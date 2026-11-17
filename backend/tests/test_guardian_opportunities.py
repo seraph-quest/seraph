@@ -20,7 +20,6 @@ pytestmark = pytest.mark.openrouter_legacy
 async def test_silent_history_feedback_is_409_and_foreign_inbox_is_hidden(isolated_runtime, monkeypatch):
     from src.guardian import feedback, inbox
     sessions, _, _, _, row, _ = await publish_source(isolated_runtime)
-    monkeypatch.setattr(feedback, "get_session", sessions)
     with pytest.raises(OpportunityError) as rejected:
         await feedback.guardian_feedback_repository.record_feedback("opportunity:"+row.id,
             feedback_type="helpful", owner_principal_id=OWNER, original_root_id=SESSION)

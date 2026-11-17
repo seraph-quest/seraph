@@ -136,32 +136,6 @@ FULLY_RETIRED_EVAL_INVOCATIONS = {
 }
 
 
-# #1235 (#1224 follow-up), tracked exception to the warnings-as-errors policy
-# (#1218). After #1228, one file still leaves an unreaped child and its raw
-# pipes to pytest's session-end gc pass, where no test-level mark applies: CI
-# on develop 05cb3164 failed only here once the per-file exceptions were
-# removed. The filters are passed as -W to this file's invocations only, so
-# the same leak anywhere else still fails. Delete with #1235.
-# pytest treats a -W message as a literal prefix (re.escape), not a regex, so
-# "anonymous pipe" is spelled as one prefix per leading fd digit: a file opened
-# by path has a quoted name and never matches.
-TRACKED_LEAK_FILTERS: tuple[str, ...] = (
-    *(f"ignore:unclosed file <_io.{kind} name={digit}:ResourceWarning"
-      for kind in ("BufferedReader", "FileIO") for digit in "123456789"),
-    *(f"ignore:subprocess {digit}:ResourceWarning" for digit in "123456789"),
-)
-TRACKED_LEAK_FILES: frozenset[str] = frozenset({
-    "tests/test_repo_repair_executors.py",
-})
-
-
-def tracked_warning_args(paths: list[str] | tuple[str, ...]) -> list[str]:
-    """``-W`` filters for invocations that include a #1235-tracked file."""
-    if not TRACKED_LEAK_FILES.intersection(paths):
-        return []
-    return [f"-W{entry}" for entry in TRACKED_LEAK_FILTERS]
-
-
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_approvals_api.py": 1_200,
     "tests/test_context_window.py": 1_200,
@@ -705,7 +679,6 @@ def run_shard_files(
                       "all 10 selected source definitions are cancelled campaign consumers; not passed")
                 continue
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args,
-                       *tracked_warning_args([path]),
                        *(f"--deselect={node}" for node in retired_nodes)]
             report_path = junit_report_path(junit_dir, label) if junit_dir is not None else None
             if report_path is not None:
@@ -779,6 +752,7 @@ def run_shard_single_process(
     exclude_cancelled_eval_harness: bool = False,
     junit_dir: Path | None = None,
     timeout_seconds: int | None = None,
+    reverse: bool = False,
 ) -> int:
     """Run every assigned file in one pytest process (#1220).
 
@@ -792,6 +766,11 @@ def run_shard_single_process(
     """
     selected = [path for path in files
                 if not (exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py")]
+    if reverse:
+        # Files in reverse order (#1223): state one file leaves for the next is
+        # seen from the other side. Tests within a file keep their order.
+        selected.reverse()
+    label = "single-process-reversed" if reverse else "single-process"
     if not selected:
         print("No backend tests assigned to this shard.")
         return 0
@@ -800,28 +779,25 @@ def run_shard_single_process(
         extra_args.append("--no-cov")
     deselect = [f"--deselect={node}" for path in selected
                 for node in (CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else [])]
-    # One process: if the #1235-tracked file is in the shard, its leak filters
-    # apply to the whole run (scheduled lane only).
-    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect,
-               *tracked_warning_args(selected)]
-    report = junit_dir / "single-process.xml" if junit_dir is not None else None
+    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect]
+    report = junit_dir / f"{label}.xml" if junit_dir is not None else None
     if report is not None:
         junit_dir.mkdir(parents=True, exist_ok=True)
-        command += [f"--junitxml={report}", "-o", "junit_suite_name=single-process"]
-    print(f"[backend-shard] single process: {len(selected)} file(s)")
+        command += [f"--junitxml={report}", "-o", f"junit_suite_name={label}"]
+    print(f"[backend-shard] single process: {len(selected)} file(s){', reversed' if reverse else ''}")
     started_at = time.perf_counter()
     try:
         completed = subprocess.run(command, cwd=root, check=False, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         duration_s = time.perf_counter() - started_at
-        print(f"[backend-shard] single-process -> 124 ({duration_s:.2f}s) timed out after {timeout_seconds}s")
+        print(f"[backend-shard] {label} -> 124 ({duration_s:.2f}s) timed out after {timeout_seconds}s")
         if report is not None:
-            write_timeout_junit(report, "single-process", timeout_seconds, duration_s)
+            write_timeout_junit(report, label, timeout_seconds, duration_s)
         return 124
     duration_s = time.perf_counter() - started_at
-    print(f"[backend-shard] single-process -> {completed.returncode} ({duration_s:.2f}s)")
+    print(f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)")
     if completed.returncode != 0 and report is not None and not report.exists():
-        write_synthetic_junit(report, "single-process", "invocation-crashed",
+        write_synthetic_junit(report, label, "invocation-crashed",
                               f"pytest exited {completed.returncode} without writing a report", duration_s)
     return completed.returncode
 
@@ -833,7 +809,7 @@ def main() -> int:
     parser.add_argument(
         "--files", nargs="+", default=None,
         help="run these test files (relative to backend/) instead of a shard, with the same per-file "
-             "handling, e.g. the #1235 leak exception for TRACKED_LEAK_FILES",
+             "handling (-k splits and retired nodes)",
     )
     parser.add_argument("--file-timeout-seconds", type=int, default=None)
     parser.add_argument(
@@ -865,6 +841,10 @@ def main() -> int:
         "--single-process", action="store_true",
         help="run the whole shard as one pytest process to expose cross-file leaks (#1220)",
     )
+    parser.add_argument(
+        "--reverse", action="store_true",
+        help="with --single-process: run the shard's files in reverse order (#1223)",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     # Progress lines must reach the job log as each file ends, not at exit:
@@ -882,6 +862,8 @@ def main() -> int:
     if extra_args[:1] == ["--"]:
         extra_args = extra_args[1:]
     extra_args = lane_pytest_args(quarantine=args.quarantine, shuffle_seed=args.shuffle_seed) + extra_args
+    if args.reverse and not args.single_process:
+        parser.error("--reverse applies to --single-process only")
     if args.single_process:
         return run_shard_single_process(
             root,
@@ -890,6 +872,7 @@ def main() -> int:
             exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
             junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
             timeout_seconds=args.single_process_timeout_seconds,
+            reverse=args.reverse,
         )
     return run_shard_files(
         root,

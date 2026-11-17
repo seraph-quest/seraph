@@ -291,15 +291,32 @@ def test_a_runtime_root_that_is_or_contains_home_is_refused(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("swap", ["dev_zero_symlink", "fifo"])
 def test_node_supervisor_refuses_swapped_package_json_without_hanging(tmp_path, swap):
-    import time
+    import threading
+    from tests.support.sync import Signal
     from tests import test_repo_node
     action = ("fs.unlinkSync('package.json');fs.symlinkSync('/dev/zero','package.json');" if swap == "dev_zero_symlink"
               else "fs.unlinkSync('package.json');require('node:child_process').execFileSync('/usr/bin/mkfifo',['package.json']);")
     script = ("const fs=require('node:fs');" + action +
               "const {VALUE}=require('../src/app.js');require('node:assert/strict').equal(VALUE,2);\n")
     executor, repo, job = test_repo_node.make_fixture(tmp_path, script=script)
-    started = time.monotonic()
-    result = executor.execute_job(job)
-    assert time.monotonic() - started < 25
+    # "Without hanging" is proven by the supervisor returning at all: a
+    # blocking read of the swapped entry never returns, so the job runs on a
+    # worker thread and a hang fails at the liveness bound.
+    outcome: dict = {}
+    returned = Signal("node supervisor returned")
+
+    def execute() -> None:
+        try:
+            outcome["result"] = executor.execute_job(job)
+        except BaseException as error:  # noqa: BLE001 - re-raised below
+            outcome["error"] = error
+        finally:
+            returned.set()
+
+    threading.Thread(target=execute, daemon=True).start()
+    returned.wait_blocking()
+    if "error" in outcome:
+        raise outcome["error"]
+    result = outcome["result"]
     assert result["status"] != "succeeded"
     assert "node_immutable_input" in str(result), str(result)[:2000]

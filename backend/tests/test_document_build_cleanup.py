@@ -1,5 +1,4 @@
 """Actual original authenticated cleanup authority, without execution renewal."""
-import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -13,10 +12,11 @@ from tests.test_document_build_storage import setup, SPEC
 from tests.test_document_build_native_capacity import build_admission_lifecycle
 from src.work_board import document_build_storage as storage
 from src.work_board.repository import BoardError
+from tests.support.clock import fake_clock  # noqa: F401
 
 
 @pytest.mark.parametrize("goal_change", ["corrected", "deleted"])
-async def test_actual_authenticated_cleanup_after_cutoff_and_goal_drift(accounting_db, monkeypatch, goal_change):
+async def test_actual_authenticated_cleanup_after_cutoff_and_goal_drift(accounting_db, monkeypatch, goal_change, fake_clock):
     from src.api import documents
     from src.auth.service import authenticate_token
     from src.db.models import Goal
@@ -24,19 +24,20 @@ async def test_actual_authenticated_cleanup_after_cutoff_and_goal_drift(accounti
     sessions = accounting_db[2].accounting_sessions
     async with sessions() as db:
         current_goal = await db.get(Goal, goal.id)
-        current_goal.due_date = datetime.now(timezone.utc)+timedelta(seconds=2)
+        current_goal.due_date = fake_clock.now(timezone.utc)+timedelta(seconds=2)
     async with sessions() as db:
         build = await storage.create(db, owner, operator, storage.BuildCreate(goal_id=goal.id,
             goal_revision=1, spec=SPEC, idempotency_key="cleanup-expiry"))
     deadline = datetime.fromisoformat(build["original_deadline"])
-    await asyncio.sleep(max(0, (deadline-datetime.now(timezone.utc)).total_seconds())+.05)
+    # The original cutoff passes on the fake clock; nothing waits in real time.
+    fake_clock.advance(max(0, (deadline-fake_clock.now(timezone.utc)).total_seconds())+.05)
+    assert storage.now() > deadline  # the clock production reads is past the original cutoff
     async with sessions() as db:
         current_goal = await db.get(Goal, goal.id)
         if goal_change == "deleted":
             await db.delete(current_goal)
         else:
             current_goal.revision += 1
-    monkeypatch.setattr(documents, "get_session", sessions)
     app = FastAPI()
     @app.middleware("http")
     async def authenticate(request, call_next):
@@ -82,7 +83,7 @@ async def test_cleanup_authority_denies_without_tombstone_or_charge_release(acco
         assert value["phase"] == "staged" and "retirement_key" not in value
 
 
-async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accounting_db, monkeypatch, build_admission_lifecycle):
+async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accounting_db, monkeypatch, build_admission_lifecycle, fake_clock):
     import json
     from sqlalchemy import select
     from src.api import documents, work_board
@@ -99,12 +100,11 @@ async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accoun
     await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
     async with sessions() as db:
-        (await db.get(Goal, goal.id)).due_date = datetime.now(timezone.utc)+timedelta(seconds=5)
+        (await db.get(Goal, goal.id)).due_date = fake_clock.now(timezone.utc)+timedelta(seconds=5)
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
     dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=sessions, general_tasks=service)
     binding, identifier = await admitted_build(accounting_db, service, dispatcher, operator, owner, goal, "never-launch-retire")
-    monkeypatch.setattr(documents, "get_session", sessions)
     monkeypatch.setattr(work_board, "dispatcher", dispatcher)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
@@ -135,7 +135,9 @@ async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accoun
             request["expected_task_revision"] = task.task_revision
             current_goal = await db.get(Goal, goal.id)
             await db.delete(current_goal)
-        await asyncio.sleep(max(0, (deadline-datetime.now(timezone.utc)).total_seconds())+.05)
+        # The original cutoff passes on the fake clock; nothing waits in real time.
+        fake_clock.advance(max(0, (deadline-fake_clock.now(timezone.utc)).total_seconds())+.05)
+        assert storage.now() > deadline  # the clock production reads is past the original cutoff
         retired = await client.request("DELETE", f"/api/documents/builds/{identifier}", json=request)
         assert retired.status_code == 200, retired.text
         assert retired.json()["state"] == "deleted" and retired.json()["quota_reserved_bytes"] == 0

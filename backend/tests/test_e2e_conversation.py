@@ -17,6 +17,10 @@ from src.approval.exceptions import ApprovalRequired
 from src.audit.repository import audit_repository
 from src.vault.repository import vault_repository
 from tests.test_websocket import _close_sync_client_with_db, _make_sync_client_with_db
+import pytest
+
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
 
 _TIMING = Timing(start_time=0.0, end_time=1.0)
 

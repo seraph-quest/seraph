@@ -72,7 +72,6 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
     from src.work_board.contracts import WorkBoardOwner
 
     root, _, factory = accounting_db
-    monkeypatch.setattr('src.work_board.triage.get_session', factory.accounting_sessions)
     original_connect = socket.socket.connect
     def local_connect(sock, address):
         if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
@@ -83,8 +82,6 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
     monkeypatch.setattr(settings, 'browser_site_allowlist', 'example.com')
     assert evaluate_site_access('https://example.com/public').allowed
     assert not evaluate_site_access('https://unapproved.example/public').allowed
-    monkeypatch.setattr('src.model_fabric.execution.gpu_admission_broker',
-        remote_inference_admission.remote_inference_admission_broker)
     configured = setup_configuration()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=('text', 'structured_output')),
@@ -313,8 +310,6 @@ async def test_actual_same_goal_three_watches_two_contacted_plan_cap(accounting_
     monkeypatch.setattr(settings, 'operator_auth_idle_seconds', 7200)
     monkeypatch.setattr(settings, 'operator_auth_absolute_seconds', 10800)
     monkeypatch.setattr(settings, 'browser_site_allowlist', 'example.com')
-    monkeypatch.setattr('src.model_fabric.execution.gpu_admission_broker',
-        remote_inference_admission.remote_inference_admission_broker)
     configured = setup_configuration()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=('text', 'structured_output')),

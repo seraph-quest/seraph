@@ -24,6 +24,7 @@ from src.workflows.repair_capacity import try_acquire_repo_repair_capacity, _QUA
 from src.workflows.job_runtime import durable_job_repository
 from tests import test_repo_repair_local_vertical as native
 from tests.test_repo_node import make_fixture, NODE, PROFILE
+from tests.support.sync import wait_until
 
 
 pytestmark=[pytest.mark.filterwarnings("error::ResourceWarning"),
@@ -125,11 +126,13 @@ async def _approve_node_flow(client,flow,*,typescript=False):
     await flow["dispatcher"].run_pass()
     pending=await client.get(f"/api/workflows/repo-repair/{job_id}")
     assert pending.status_code==200,pending.text
-    ready_deadline=time.monotonic()+10
-    while pending.json()["status"] in {"running","queued"} and time.monotonic()<ready_deadline:
-        await asyncio.sleep(.05)
+    async def settled_status():
+        nonlocal pending
         pending=await client.get(f"/api/workflows/repo-repair/{job_id}")
         assert pending.status_code==200,pending.text
+        return pending.json()["status"] not in {"running","queued"}
+    if pending.json()["status"] in {"running","queued"}:
+        await wait_until(settled_status,what="repo-repair preparation left running/queued",state=lambda:pending.json()["status"])
     payload=pending.json();assert payload["status"]=="awaiting_approval",payload
     assert payload["executor_profile"]=="local:"+PROFILE
     plan=payload["executor_posture"]["execution_plan"]
@@ -203,9 +206,7 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
     dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
     owned_pid=None;owned_start=None;stopped=False
     try:
-        deadline=time.monotonic()+15
-        while not running.exists() and time.monotonic()<deadline:await asyncio.sleep(.01)
-        assert running.exists(),"Actual admitted Node command did not run"
+        await wait_until(running.exists,what="actual admitted Node command running",task=dispatch)
         child_pid=int(running.read_text())
         marker=fresh._read_job_marker(job_id)
         assert marker and marker["phase"]=="worker_started"
@@ -365,20 +366,18 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
     fresh=NodeRepoRepairExecutor(workspace_dir=flow["workspace"])
     dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
     try:
-        deadline=time.monotonic()+15
-        while not running.exists() and time.monotonic()<deadline:await asyncio.sleep(.01)
-        assert running.exists()
+        await wait_until(running.exists,what="actual admitted Node command running",task=dispatch)
         task=await client.get(f"/api/work-board/tasks/{flow['high_task_id']}")
         cancelled=await client.post(f"/api/work-board/tasks/{flow['high_task_id']}/actions",json={"action":"cancel","expected_revision":task.json()["task"]["task_revision"]},headers={"Origin":"http://localhost:3001"})
         assert cancelled.status_code==200,cancelled.text
         await native._wait_for_task_set(dispatch,timeout=15,description="Cancelled Node durable dispatcher did not settle")
         job=await durable_job_repository.get_job(job_id)
         assert job["status"]=="unknown_external_effect",job
-        deadline=time.monotonic()+10
-        while time.monotonic()<deadline:
+        def proven_marker():
             marker=fresh._read_job_marker(job_id)
-            if marker and marker.get("cleanup_proven") is True:break
-            await asyncio.sleep(.01)
+            return marker if marker and marker.get("cleanup_proven") is True else None
+        marker=await wait_until(proven_marker,what="cancelled Node marker recording proven cleanup",
+                                state=lambda:fresh._read_job_marker(job_id))
         assert marker["status"]=="cancelled" and marker["cleanup_proven"] is True,marker
         assert marker["process_cleanup"]["process_cleanup"]["oracle"]=="linux_subreaper_waitpid_echild"
         assert try_acquire_repo_repair_capacity(flow["workspace"],job_id="unrelated-before-recovery") is None

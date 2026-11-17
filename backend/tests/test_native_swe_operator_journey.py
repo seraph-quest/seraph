@@ -25,6 +25,7 @@ from src.workflows.native_software_engineering import (
     resume_native_software_engineering_fixture,
     run_native_software_engineering_fixture,
 )
+from tests.support.sync import wait_until
 
 
 def _copy_fixture(destination: Path) -> Path:
@@ -514,10 +515,7 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     runner = asyncio.create_task(run_native_software_engineering_fixture(cancel_request))
     job_root = workspace / ".seraph" / "native-software-engineering" / "jobs" / native_swe._job_token(cancel_job_id)
     started_path = job_root / "workspace" / "test-process-started.json"
-    deadline = time.monotonic() + 10
-    while not started_path.exists() and time.monotonic() < deadline:
-        await asyncio.sleep(0.05)
-    assert started_path.exists(), "the genuine test process did not launch its descendant"
+    await wait_until(started_path.exists, what="the genuine test process launching its descendant", task=runner)
     started = json.loads(started_path.read_text(encoding="utf-8"))
     assert all(observed["pid"] > 0 for observed in started.values())
     if started["leader"]["pgid"] is not None:

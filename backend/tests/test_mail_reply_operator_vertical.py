@@ -24,6 +24,7 @@ from src.integrations.gmail_read import GMAIL_READONLY_SCOPE
 from src.vault import crypto
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
+from tests.support.sync import within
 
 # ADR-035: pins the operator mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -118,7 +119,6 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
     root, engine, factory = accounting_db
     root.chmod(0o700)
     monkeypatch.setattr(crypto, "_fernet", None)
-    monkeypatch.setattr(mail, "get_session", factory.accounting_sessions)
     original_error = mail._error
     def traced_error(exc):
         import traceback
@@ -480,6 +480,12 @@ async def test_original_transport_closure_blocks_recovery_before_staging(account
             if not running.done():
                 running.cancel()
             await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), timeout=5)
+            # Cancelling the request does not cancel the shielded original
+            # worker (by design); it must finish before the test ends (#1223).
+            workers = list(runtime._active_workers.values())
+            if workers:
+                await within(asyncio.gather(*workers, return_exceptions=True),
+                             what="the released original mail-reply worker to finish")
         await client.aclose()
 
 
@@ -492,6 +498,7 @@ def pure_reply_writer_guard(monkeypatch):
     import os
     from src.integrations import mail_reply_runtime as runtime
     from src.db import engine
+    from tests.support.db import install_session_factory
     from src.vault import crypto as vault_crypto
     inside=ContextVar("inside_exact_mail_writer",default=False)
     original_writer=runtime.writer
@@ -510,11 +517,12 @@ def pure_reply_writer_guard(monkeypatch):
         return call
     for target,name in ((Path,"open"),(Path,"read_bytes"),(Path,"read_text"),(builtins,"open"),(os,"open"),(vault_crypto,"decrypt"),(runtime,"decrypt")):
         monkeypatch.setattr(target,name,guarded(getattr(target,name)))
-    original_session=engine.get_session
+    # Every get_session caller opens through the default factory: guard it (#1241).
+    original_factory=engine.async_session_factory
     def session():
         assert not inside.get(), "nested session inside immediate Mail writer"
-        return original_session()
-    monkeypatch.setattr(engine,"get_session",session)
+        return original_factory()
+    install_session_factory(monkeypatch,session)
 
 
 @pytest.mark.asyncio

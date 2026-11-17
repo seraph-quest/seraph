@@ -22,7 +22,10 @@ from src.security.trust_contract import EgressClass
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
-from tests.async_wait_support import started_or_raise
+from tests.support.db import install_database
+from tests.support.sync import Gate, settle, started_or_raise, wait_until, within
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route
@@ -44,6 +47,10 @@ async def accounting_db(tmp_path, monkeypatch):
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
     from src.workspace.production import prepare_lifecycle_directory
     prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
+    # Partial (#1222): still its own engine, not create_database_engine, so no
+    # foreign keys, WAL or busy-timeout pragmas. Several fixtures seeded on it
+    # violate foreign keys, which production pragmas enforce. Tracked as a
+    # follow-up to #1222 in #1241.
     engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'seraph.db'}", connect_args={"timeout": 5})
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with engine.begin() as connection:
@@ -57,17 +64,19 @@ async def accounting_db(tmp_path, monkeypatch):
             except BaseException:
                 await session.rollback()
                 raise
-    for target in ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
-                   "src.db.engine.get_session", "src.auth.service.get_session",
-                   "src.model_fabric.repository.get_session", "src.api.settings.get_db",
-                   "src.vault.repository.get_session", "src.audit.repository.get_session",
-                   "src.work_board.dispatcher.get_session", "src.api.work_board.get_session",
-                   "src.api.calendar.get_session", "src.goals.repository.get_session",
-                   "src.agent.session.get_session", "src.approval.repository.get_session"):
-        monkeypatch.setattr(target, sessions)
+    # The single database seam (#1222): every get_session caller uses this file.
+    install_database(monkeypatch, engine)
     factory.accounting_sessions = sessions
-    yield root, engine, factory
-    await engine.dispose()
+    try:
+        yield root, engine, factory
+    finally:
+        # As the `db` fixture: tracked background work writes to this engine,
+        # so it finishes before the engine is disposed (#1223).
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
+        finally:
+            await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -231,11 +240,21 @@ async def test_duplicate_concurrent_reservations_execute_at_most_once(accounting
     await DurableJobRepository().configure_inference_accounting(1000)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
+    in_contact = Gate("first contact")
     async def transport():
         calls.append("contact")
-        await asyncio.sleep(0.02)
+        await in_contact.arrive()
         return {"usage": {"cost": "0.000001"}}
-    outcomes = await asyncio.gather(broker.execute(request("concurrent"), transport), broker.execute(request("concurrent"), transport), return_exceptions=True)
+    duplicates = [asyncio.create_task(broker.execute(request("concurrent"), transport)) for _ in range(2)]
+    async with in_contact:
+        # Hold the first contact open until the duplicate has been decided
+        # (refused) or has itself reached the provider.
+        await in_contact.wait_reached()
+        await wait_until(lambda: any(task.done() for task in duplicates) or in_contact.arrivals > 1,
+                         what="duplicate reservation decided while the first contact is open",
+                         state=lambda: (calls, [task.done() for task in duplicates]))
+        assert len(calls) == 1
+    outcomes = await asyncio.gather(*duplicates, return_exceptions=True)
     assert len(calls) == 1, outcomes
     snapshot = await DurableJobRepository().inference_accounting_snapshot()
     assert snapshot["committed_microusd"] == 1
@@ -256,7 +275,7 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
     monkeypatch.setattr(settings, "openrouter_api_key", "intercepted-test-key")
     _reset_login_throttle_for_tests()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     calls = []
     async def intercepted_post(client, url, **kwargs):
         calls.append(str(url))
@@ -644,12 +663,14 @@ async def test_shared_sync_async_stream_broker_one_active(accounting_db):
         order.append("async")
         return {"usage": {"cost": "0.000001"}}
     executing = asyncio.create_task(broker.execute(request("mixed-async"), async_provider))
-    for _ in range(50):
-        snapshot = await repository.inference_accounting_snapshot()
-        if len(snapshot.get("operations", [])) == 3:
-            break
-        await asyncio.sleep(0.01)
+    # Both later callers are parked in the one shared admission queue behind
+    # the active stream (their durable reservations precede enqueue).
+    await wait_until(lambda: set(broker._queue) == {"mixed-sync", "mixed-async"},
+                     what="sync and async callers queued behind the stream", task=executing,
+                     state=lambda: (list(broker._queue), order))
+    await settle()
     assert order == ["stream"]
+    assert len((await repository.inference_accounting_snapshot())["operations"]) == 3
     release.set()
     await asyncio.gather(streaming, syncing, executing)
     assert sorted(order) == ["async", "stream", "sync"]
@@ -674,11 +695,9 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     active = asyncio.create_task(broker.execute(request("cancel-contacted"), contacted))
     await started_or_raise(started, active)
     queued = asyncio.create_task(broker.execute(request("cancel-queued"), forbidden))
-    for _ in range(50):
-        snapshot = await repository.inference_accounting_snapshot()
-        if len(snapshot.get("operations", [])) == 2:
-            break
-        await asyncio.sleep(0.01)
+    await wait_until(lambda: broker._queue == ["cancel-queued"], what="second request queued behind the contact",
+                     task=queued, state=lambda: list(broker._queue))
+    snapshot = await repository.inference_accounting_snapshot()
     assert len(snapshot["operations"]) == 2
     queued.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -735,9 +754,15 @@ async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_peri
     writer.start()
     assert held.wait(5)
     try:
-        started = time.monotonic()
-        contended = await repository.inference_accounting_snapshot()
-        assert time.monotonic() - started < 1.0
+        statements.clear()
+        # The foreign writer is released only after this read returns, so a
+        # read that queued for the writer lock could never finish here; the
+        # liveness bound turns that into a loud failure, not a timing oracle.
+        contended = await within(repository.inference_accounting_snapshot(),
+                                 what="status snapshot while a foreign writer holds the lock")
+        assert not release.is_set() and writer.is_alive()
+        assert "BEGIN IMMEDIATE" not in statements
+        assert not [item for item in statements if item.split()[0] in {"INSERT", "UPDATE", "DELETE"}]
         assert contended["status"] == "ready" and contended["revision"] == ready["revision"]
     finally:
         release.set()

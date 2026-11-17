@@ -157,7 +157,6 @@ async def test_authenticated_build_api_private_preview_and_owner_switch(accounti
     from src.auth.service import authenticate_token, create_session
     from types import SimpleNamespace
     token, operator, owner, goal = await setup(accounting_db, monkeypatch)
-    monkeypatch.setattr(documents, "get_session", accounting_db[2].accounting_sessions)
     monkeypatch.setattr(documents, "_build_descriptor", descriptor)
     app = FastAPI()
     credentials = {"token": token}

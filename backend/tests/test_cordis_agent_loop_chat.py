@@ -14,15 +14,14 @@ propagation are the production ones (#1107).
 from __future__ import annotations
 
 import asyncio
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from starlette.testclient import TestClient
 
@@ -31,15 +30,12 @@ from tests.cordis_agent_loop import (AGENT_LOOP, ScriptedModel, call, cutover_ag
                                      near_scripted_gateway, text, tools)
 from tests.cordis_research import NODE, needs_cordis, seed_composition_inventory
 from tests.test_research_native_vertical import real_auth  # noqa: F401
+from tests.support.db import install_database
+from tests.support.sync import Signal, wait_until_blocking
 
 pytestmark = [needs_cordis]
 SECRET = "VAULT_SECRET_CANARY_1019_value"
 ORIGIN = {"origin": "http://localhost:3001"}
-TARGETS = ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
-           "src.db.engine.get_session", "src.auth.service.get_session", "src.model_fabric.repository.get_session",
-           "src.vault.repository.get_session", "src.audit.repository.get_session", "src.goals.repository.get_session",
-           "src.agent.session.get_session", "src.approval.repository.get_session", "src.api.ws.get_session",
-           "src.memory.repository.get_session", "src.profile.service.get_db", "src.api.profile.get_db")
 
 
 class Env:
@@ -98,19 +94,8 @@ def chat_env(tmp_path, monkeypatch, script, *, loop: str, onboarded: bool = True
     from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
     prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
     engine = create_async_engine(f"sqlite+aiosqlite:///{workspace / 'seraph.db'}", connect_args={"timeout": 5})
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except BaseException:
-                await session.rollback()
-                raise
-    for target in TARGETS:
-        monkeypatch.setattr(target, sessions)
+    # This environment's database is the default for every get_session caller (#1241).
+    install_database(monkeypatch, engine)
     if governed:
         # ADR-035: the chat route is the NEAR TEE text slot; the scripted
         # conversation is answered by the intercepted NEAR gateway.
@@ -330,11 +315,8 @@ def test_ws_disconnect_cancels_the_turn_and_writes_one_fenced_interrupted_row(tm
                 session_id = receive(socket).get("session_id")
         gate.set()
 
-        import time
-        for _ in range(200):
-            if env.turns() and env.turns()[0][0] != "running":
-                break
-            time.sleep(0.05)
+        wait_until_blocking(lambda: env.turns() and env.turns()[0][0] != "running",
+                            what="disconnected turn settling", state=env.turns)
         assert env.turns() == [("blocked", "agent_turn_cancelled")]
         rows = env.messages(session_id)
         assert [role for role, _ in rows].count("assistant") == 1 and "never adopted" not in json.dumps(rows)
@@ -557,9 +539,8 @@ def test_ws_max_steps_large_observation_and_multi_call_match_legacy(tmp_path, mo
 
 def test_rest_client_disconnect_cancels_the_turn(tmp_path, monkeypatch, real_auth):  # noqa: F811
     import threading
-    import time
     import httpx
-    gate, entered = threading.Event(), threading.Event()
+    gate, entered = threading.Event(), Signal("slow model generate entered")
 
     class Slow(ScriptedModel):
         def generate(self, *args, **kwargs):
@@ -578,8 +559,7 @@ def test_rest_client_disconnect_cancels_the_turn(tmp_path, monkeypatch, real_aut
                                          cookies=cookies, headers=ORIGIN) as client:
                 request = asyncio.create_task(client.post("/api/chat", json={"message": "read my notes and summarize",
                                                                              "message_id": "rest-cancel"}))
-                while not entered.is_set():
-                    await asyncio.sleep(0.02)
+                await entered.wait(task=request)
                 request.cancel()
                 try:
                     await request
@@ -587,15 +567,12 @@ def test_rest_client_disconnect_cancels_the_turn(tmp_path, monkeypatch, real_aut
                     pass
         env.client.portal.call(disconnect)
         gate.set()
-        for _ in range(200):
-            if env.turns() and env.turns()[0][0] != "running":
-                break
-            time.sleep(0.05)
+        wait_until_blocking(lambda: env.turns() and env.turns()[0][0] != "running",
+                            what="disconnected REST turn settling", state=env.turns)
         assert env.turns() == [("blocked", "agent_turn_cancelled")]
 
 
 def test_rest_failure_or_disconnect_between_admission_and_attach_settles_the_turn(tmp_path, monkeypatch, real_auth):  # noqa: F811
-    import time
     import httpx
     with chat_env(tmp_path, monkeypatch, [final("never")], loop="cordis") as env:
         # The agent build fails after admission: REST errors and the turn is closed, not left running.
@@ -610,7 +587,7 @@ def test_rest_failure_or_disconnect_between_admission_and_attach_settles_the_tur
 
         async def hanging(**_kwargs):
             entered.set()
-            await asyncio.sleep(60)
+            await asyncio.Event().wait()  # parks until the disconnect cancels it
         monkeypatch.setattr("src.api.chat.build_guardian_state", hanging)
         cookies = dict(env.client.cookies)
 
@@ -626,10 +603,8 @@ def test_rest_failure_or_disconnect_between_admission_and_attach_settles_the_tur
                 except asyncio.CancelledError:
                     pass
         env.client.portal.call(disconnect)
-        for _ in range(100):
-            if len(env.turns()) == 2 and env.turns()[1][0] != "running":
-                break
-            time.sleep(0.05)
+        wait_until_blocking(lambda: len(env.turns()) == 2 and env.turns()[1][0] != "running",
+                            what="cancelled pre-attach turn settling", state=env.turns)
         assert env.turns() == [("blocked", "agent_turn_failed"), ("blocked", "agent_turn_cancelled")]
         assert env.model.calls == []
 

@@ -20,6 +20,7 @@ from src.security.http_transport import (
     _TransportLifecycleMarker, default_resolver, request_pinned_https,
 )
 from src.security.site_policy import evaluate_site_access
+from src.utils.background import track_task
 
 CAPABILITY = "browser.moltbook-private-home.v1"
 JOB_KIND = "moltbook_private_home_v1"
@@ -263,7 +264,7 @@ class MoltbookPrivateBrowserReader:
                         await route.abort()
                 await context.route("**/*", route_guard)
                 def deny_page(new_page):
-                    if new_page != page: asyncio.create_task(new_page.close())
+                    if new_page != page: track_task(new_page.close(), name="moltbook-read:close-popup")
                 context.on("page",deny_page)
                 await page.goto(HOME_URL, wait_until="domcontentloaded", timeout=min(remaining,30)*1000)
                 if route_failure is not None: raise route_failure

@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+pytestmark = [pytest.mark.usefixtures("mocked_canonical_inference_context"), pytest.mark.usefixtures("db")]
 
 from src.audit.repository import audit_repository
+from tests.support.db import install_session_factory
 from src.observer.context import CurrentContext
 from src.scheduler.jobs.evening_review import (
     run_evening_review,
@@ -182,15 +183,15 @@ async def test_evening_review_llm_failure():
 
 
 @pytest.mark.asyncio
-async def test_count_messages_today_db_failure():
+async def test_count_messages_today_db_failure(monkeypatch):
     """_count_messages_today returns 0 with degraded flag on DB failure."""
-    with patch(
-        "src.db.engine.get_session",
-        side_effect=Exception("DB error"),
-    ):
-        count, degraded = await _count_messages_today()
-        assert count == 0
-        assert degraded is True
+    def failing_factory():
+        raise Exception("DB error")
+
+    install_session_factory(monkeypatch, failing_factory)
+    count, degraded = await _count_messages_today()
+    assert count == 0
+    assert degraded is True
 
 
 @pytest.mark.asyncio

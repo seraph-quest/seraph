@@ -3,7 +3,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_kernel import create_kernel, configured_real_auth
@@ -11,7 +11,43 @@ from src.db.models import WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, Work
 from src.workflows.research_coordinator import continue_parent, freeze_quiescent, _PhaseCompletion, _binding_tuple
 from src.workflows.research_waits import pause_parent
 from src.work_board.research_contracts import WAIT_SOURCES
+from tests.support.sync import Signal, assert_blocked
 
+
+class _WriterLockWatch:
+    """Observes the stale freezer's ``BEGIN IMMEDIATE`` against the shared engine.
+
+    ``issued`` is set when the statement is sent to SQLite; ``acquired`` records,
+    when it returns, whether the foreign writer had already been released. Under
+    SQLite writer exclusion it can only return after that release.
+    """
+
+    def __init__(self, engine, released: asyncio.Event) -> None:
+        self.engine = engine.sync_engine
+        self.released = released
+        self.issued = Signal("stale freezer issued BEGIN IMMEDIATE")
+        self.acquired: list[bool] = []
+
+    @staticmethod
+    def _is_begin_immediate(statement: str) -> bool:
+        return statement.strip().upper() == "BEGIN IMMEDIATE"
+
+    def _before(self, conn, cursor, statement, *args):
+        if self._is_begin_immediate(statement):
+            self.issued.set()
+
+    def _after(self, conn, cursor, statement, *args):
+        if self._is_begin_immediate(statement):
+            self.acquired.append(self.released.is_set())
+
+    def __enter__(self):
+        event.listen(self.engine, "before_cursor_execute", self._before)
+        event.listen(self.engine, "after_cursor_execute", self._after)
+        return self
+
+    def __exit__(self, *exc):
+        event.remove(self.engine, "before_cursor_execute", self._before)
+        event.remove(self.engine, "after_cursor_execute", self._after)
 
 
 async def closed_phase(accounting_db):
@@ -74,16 +110,21 @@ async def test_committed_concurrent_terminal_or_revision_wins_over_old_freeze(ac
 
     writer = asyncio.create_task(operator_writer())
     freezer = None
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        freezer = asyncio.create_task(freeze_quiescent(jobs, parent_id=spec.identity.job_id,
-            owner="research-kernel", phase_binding=binding, expected_parent_revision=revision, reason="stale_writer"))
-        await asyncio.sleep(0.03)
-        assert not freezer.done()  # actual shared SQLite writer exclusion
-    finally:
-        release.set()
-        await asyncio.wait_for(writer, timeout=5)
-    assert await asyncio.wait_for(freezer, timeout=5) is False
+    # Watch only after the foreign writer holds its lock, so its own BEGIN IMMEDIATE is not counted.
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    with _WriterLockWatch(accounting_db[1], release) as watch:
+        try:
+            freezer = asyncio.create_task(freeze_quiescent(jobs, parent_id=spec.identity.job_id,
+                owner="research-kernel", phase_binding=binding, expected_parent_revision=revision,
+                reason="stale_writer"))
+            # actual shared SQLite writer exclusion: the freezer is parked in its write lock
+            await assert_blocked(freezer, at=watch.issued, what="stale freezer waits for the operator writer")
+            assert watch.acquired == []
+        finally:
+            release.set()
+            await asyncio.wait_for(writer, timeout=5)
+        assert await asyncio.wait_for(freezer, timeout=5) is False
+    assert watch.acquired == [True]
     await accounting_db[1].dispose()
     async with accounting_db[2].accounting_sessions() as db:
         board = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
@@ -119,16 +160,20 @@ async def test_second_completed_coordinator_cannot_freeze_another_native_child_c
 
     writer = asyncio.create_task(current_worker_writer())
     freezer = None
-    try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        freezer = asyncio.create_task(freeze_quiescent(jobs, parent_id=spec.identity.job_id,
-            owner="research-kernel", phase_binding=binding, expected_parent_revision=revision, reason="unowned_worker"))
-        await asyncio.sleep(0.03)
-        assert not freezer.done()
-    finally:
-        release.set()
-        await asyncio.wait_for(writer, timeout=5)
-    assert await asyncio.wait_for(freezer, timeout=5) is False
+    # Watch only after the foreign writer holds its lock, so its own BEGIN IMMEDIATE is not counted.
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    with _WriterLockWatch(accounting_db[1], release) as watch:
+        try:
+            freezer = asyncio.create_task(freeze_quiescent(jobs, parent_id=spec.identity.job_id,
+                owner="research-kernel", phase_binding=binding, expected_parent_revision=revision,
+                reason="unowned_worker"))
+            await assert_blocked(freezer, at=watch.issued, what="stale freezer waits for the current worker")
+            assert watch.acquired == []
+        finally:
+            release.set()
+            await asyncio.wait_for(writer, timeout=5)
+        assert await asyncio.wait_for(freezer, timeout=5) is False
+    assert watch.acquired == [True]
     await accounting_db[1].dispose()
     unchanged = await jobs.get_job(child_id)
     assert unchanged["status"] == "running" and unchanged["revision"] == live["revision"]

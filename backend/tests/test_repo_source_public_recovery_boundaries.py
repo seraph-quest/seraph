@@ -1,5 +1,4 @@
 """Authentic original Source cap/cutoff boundaries; no managed-runtime claim."""
-import asyncio
 import json
 from datetime import datetime
 
@@ -13,6 +12,7 @@ from src.workflows import repo_repair_source_recovery as recovery
 from src.workflows import repo_repair_stop as stop
 from src.workflows.job_runtime import _as_utc, _utc_now
 from tests import test_repo_source_recovered_finalizer as fixtures
+from tests.support.clock import fake_clock  # noqa: F401
 from tests.test_repo_source_public_recovery import _authenticated_original_api
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
@@ -115,7 +115,7 @@ async def test_public_committed_final_failed_iteration_uses_original_cap_stop(
 
 @pytest.mark.asyncio
 async def test_public_original_deadline_crosses_after_genuine_cleanup_before_stop(
-        accounting_db, monkeypatch, repository_admission_signer):
+        accounting_db, monkeypatch, repository_admission_signer, fake_clock):
     _original_limits(monkeypatch, iterations=3, seconds=30)
     async with _authenticated_original_api(accounting_db, monkeypatch, 'test_python') as (flow, _, client):
         _check_actual_command_closure(flow, 'succeeded')
@@ -138,7 +138,8 @@ async def test_public_original_deadline_crosses_after_genuine_cleanup_before_sto
             remaining = (cutoff - _utc_now()).total_seconds()
             assert remaining <= 30
             if remaining > 0:
-                await asyncio.sleep(remaining + 0.02)
+                # The original cutoff passes on the fake clock; nothing waits in real time.
+                fake_clock.advance(remaining + 0.02)
             assert _utc_now() >= cutoff
             reason = await original_limit_owner(*args, **kwargs)
             observed.append(reason)

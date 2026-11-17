@@ -341,11 +341,11 @@ class TestChatAPI:
         )
         assert r2.json()["session_id"] == session_id
 
-    # The default in-memory test DB is one shared StaticPool connection, so a
-    # concurrent session's rollback (the accepted turn's tracked post-response
-    # memory consolidation checking in) can discard another session's flushed
-    # but uncommitted audit row (#1197). Production pools one connection per
-    # session; use that file-backed pool here.
+    # #1197: on the old single shared StaticPool connection, the accepted
+    # turn's tracked memory consolidation checking in could roll back this
+    # request's flushed audit row. Every test database is now a per-test file
+    # with one connection per session, as in production (#1239, #1222), so the "file"
+    # parameter below is only the retired spelling of the default.
     @pytest.mark.parametrize("async_db", ["file"], indirect=True)
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.create_onboarding_agent")

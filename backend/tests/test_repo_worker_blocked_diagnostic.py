@@ -19,7 +19,7 @@ def receipt(reason):
 
 def test_literal_allowlist_is_exact_original_worker_source():
     source = (Path(__file__).resolve().parents[1] / "src/execution/repo_worker.py").read_text()
-    assert hashlib.sha256(source.encode()).hexdigest() == "47b2fa825be4415f9040cafa7630132ddc6884302498d31a3dcd1c1afbd4b4b3"
+    assert hashlib.sha256(source.encode()).hexdigest() == "534cbaa6a6e20618be6e61fddb9b62f2dedbf5c59c618e8627c9defe5bda056c"
     rows = []
     def visit(node, function=""):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

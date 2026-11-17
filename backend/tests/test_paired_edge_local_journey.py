@@ -113,8 +113,8 @@ async def test_local_http_capture_artifact_readback_spool_restart_and_revoke(tmp
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test")
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "https://test")
 
+    # ``async_db`` is the default database: get_session reaches it unpatched.
     get_session = async_db
-    monkeypatch.setattr(nodes, "get_session", get_session)
     token, operator = await create_session()
 
     app = FastAPI()

@@ -11,7 +11,8 @@ from src.model_fabric.configuration import (
     OPENROUTER_VAULT_CREDENTIAL_REF,
     hydrate_openrouter_credential,
 )
-from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
+from tests.support.sync import wait_until
 from src.vault.repository import vault_repository
 
 # ADR-035 retired OpenRouter by policy; saving or activating it is refused
@@ -657,11 +658,10 @@ async def test_v2_vision_edit_preserves_exact_text_proof_but_denies_old_queued_e
     try:
         await asyncio.wait_for(started.wait(), 5)
         queued_task = asyncio.create_task(broker.execute(replace(request("queued-text"), owner_budget_microusd=25_000), forbidden))
-        for _ in range(100):
-            operations = (await durable_job_repository.inference_accounting_snapshot()).get("operations", [])
-            if len(operations) == 2:
-                break
-            await asyncio.sleep(0.01)
+        # Reservation precedes enqueue, so a queued request has its durable row.
+        await wait_until(lambda: broker._queue == ["queued-text"], what="second request queued behind the active one",
+                         task=queued_task, state=lambda: list(broker._queue))
+        operations = (await durable_job_repository.inference_accounting_snapshot()).get("operations", [])
         assert len(operations) == 2
         changed = _v2_setup_payload()
         changed["routes"]["vision"]["model_id"] = "fixture/new-vision"
@@ -705,14 +705,14 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
     embedding_started, release_embedding = threading.Event(), threading.Event()
     dimension_override = [None]
     failures = []
-    execute = api.remote_inference_admission_broker.execute
+    execute = get_remote_inference_admission_broker().execute
     async def checked_execute(*args, **kwargs):
         try:
             return await execute(*args, **kwargs)
         except Exception as error:
             failures.append((type(error).__name__, str(error), type(error.__cause__).__name__, str(error.__cause__)))
             raise
-    monkeypatch.setattr(api.remote_inference_admission_broker, "execute", checked_execute)
+    monkeypatch.setattr(get_remote_inference_admission_broker(), "execute", checked_execute)
     class ProviderClient:
         def __init__(self, **kwargs):
             assert kwargs["follow_redirects"] is False
@@ -855,11 +855,12 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
             vision_task = asyncio.create_task(analyze_screenshot_image(image, {"created_at": "2026-10-05T00:00:00Z"}))
             chat_task = asyncio.create_task(completion_with_fallback(messages=messages, temperature=0,
                 max_tokens=64, runtime_path="chat_agent", request_context=chat_context))
-            for _ in range(100):
-                pending = (await durable_job_repository.inference_accounting_snapshot())["operations"]
-                if len(pending) == 16:
-                    break
-                await asyncio.sleep(0.01)
+            # Reservation precedes enqueue: once both wait in the shared lane
+            # their durable rows exist.
+            shared_broker = get_remote_inference_admission_broker()
+            await wait_until(lambda: len(shared_broker._queue) == 2, what="vision and chat queued behind embedding",
+                             task=chat_task, state=lambda: list(shared_broker._queue))
+            pending = (await durable_job_repository.inference_accounting_snapshot())["operations"]
             assert len(pending) == 16
         finally:
             release_embedding.set()
@@ -1047,7 +1048,7 @@ async def test_persisted_controls_drive_profile_and_remote_admission(
         "max_retries": 1,
         "spend_ceiling_microusd": 25_000,
     }
-    admission = await remote_inference_admission_broker.status()
+    admission = await get_remote_inference_admission_broker().status()
     assert admission["max_inflight"] == 1
     assert admission["max_retries"] == 1
     assert admission["capacity"]["max_queued"] == 8

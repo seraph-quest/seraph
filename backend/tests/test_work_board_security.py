@@ -1,7 +1,6 @@
 """Security and cursor-boundary checks for the authenticated work board."""
 
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
@@ -33,6 +32,7 @@ from src.work_board.repository import (
 )
 from src.work_board.repository import BoardEventPage
 from src.work_board.dispatcher import WorkBoardDispatcher
+from tests.support.db import install_fake_session
 
 
 OWNER = WorkBoardOwner(
@@ -855,13 +855,9 @@ async def test_work_board_websocket_replays_after_cursor_and_marks_gap_on_reconn
     ]
     list_events = AsyncMock(side_effect=pages)
 
-    @asynccontextmanager
-    async def fake_session():
-        yield object()
-
     monkeypatch.setattr("src.api.ws.authenticate_websocket", AsyncMock(return_value=operator))
     monkeypatch.setattr("src.api.ws.auth_enabled", lambda: False)
-    monkeypatch.setattr("src.api.ws.get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr("src.api.work_board.repository.list_events", list_events)
     monkeypatch.setattr(
         "src.api.ws.ws_manager.connect_work_board",
@@ -912,13 +908,9 @@ async def test_work_board_websocket_paginates_persisted_backlog_before_live_queu
     ]
     list_events = AsyncMock(side_effect=pages)
 
-    @asynccontextmanager
-    async def fake_session():
-        yield object()
-
     monkeypatch.setattr("src.api.ws.authenticate_websocket", AsyncMock(return_value=operator))
     monkeypatch.setattr("src.api.ws.auth_enabled", lambda: False)
-    monkeypatch.setattr("src.api.ws.get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr("src.api.work_board.repository.list_events", list_events)
     monkeypatch.setattr(
         "src.api.ws.ws_manager.connect_work_board",
@@ -945,13 +937,9 @@ async def test_work_board_websocket_idle_disconnect_unregisters_queue_and_bindin
         session_id=OWNER.session_id,
     )
 
-    @asynccontextmanager
-    async def fake_session():
-        yield object()
-
     monkeypatch.setattr("src.api.ws.authenticate_websocket", AsyncMock(return_value=operator))
     monkeypatch.setattr("src.api.ws.auth_enabled", lambda: False)
-    monkeypatch.setattr("src.api.ws.get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr(
         "src.api.work_board.repository.list_events",
         AsyncMock(return_value=BoardEventPage(events=[], last_event_id=0, gap=False)),
@@ -973,10 +961,6 @@ async def test_work_board_websocket_revocation_cleans_receive_and_event_waiters(
         principal=SimpleNamespace(principal_id=OWNER.principal_id),
         session_id=OWNER.session_id,
     )
-
-    @asynccontextmanager
-    async def fake_session():
-        yield object()
 
     queue_holder: dict[str, asyncio.Queue] = {}
     original_connect = ws_manager.connect_work_board
@@ -1002,7 +986,7 @@ async def test_work_board_websocket_revocation_cleans_receive_and_event_waiters(
     monkeypatch.setattr("src.api.ws.authenticate_websocket", AsyncMock(return_value=operator))
     monkeypatch.setattr("src.api.ws.auth_enabled", lambda: True)
     monkeypatch.setattr("src.api.ws.watch_operator_session", fake_watch)
-    monkeypatch.setattr("src.api.ws.get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr("src.api.ws.ws_manager.connect_work_board", connect_work_board)
     monkeypatch.setattr(
         "src.api.work_board.repository.list_events",

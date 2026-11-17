@@ -14,6 +14,9 @@ from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
 from src.observer.manager import ContextManager, _active_observer_definitions
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 class TestContextManagerDefaults:
     def test_default_context(self):

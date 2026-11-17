@@ -25,7 +25,6 @@ async def test_actual_private_build_task_download_and_retire(accounting_db, monk
     jobs, _owner = await prepare(accounting_db, monkeypatch, existing_owner=owner)
     await build_admission_lifecycle.start()
     sessions = accounting_db[2].accounting_sessions
-    monkeypatch.setattr(documents, "get_session", sessions)
     registry = ToolRegistry(); registry.start()
     service = GeneralTaskService(registry); service.start()
     dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=sessions, general_tasks=service)

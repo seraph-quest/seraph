@@ -81,8 +81,6 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric import remote_inference_admission
     root, _, factory = accounting_db
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
-        remote_inference_admission.remote_inference_admission_broker)
     configured = setup_configuration()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output")),
@@ -220,7 +218,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             active = _executions[row.id]
             async def wait_for_native_queue():
                 while True:
-                    state = await remote_inference_admission.remote_inference_admission_broker.status()
+                    state = await remote_inference_admission.get_remote_inference_admission_broker().status()
                     if any(item["job_id"] == row.job_id for item in state["queued"]):
                         return
                     await asyncio.sleep(0.02)
@@ -395,7 +393,6 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             assert detail["assessment"]["citations"][0]["span_sha256"] == offered.sources[0].excerpt_sha256
             return
         from src.guardian import feedback
-        monkeypatch.setattr(feedback, "get_session", factory.accounting_sessions)
         async def forbid_memory_refresh(**kwargs):
             raise AssertionError("opportunity feedback cannot refresh canonical memory")
         monkeypatch.setattr(feedback.guardian_feedback_repository, "_refresh_learning_memories", forbid_memory_refresh)

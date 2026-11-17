@@ -1,6 +1,5 @@
 """Focused proof for the canonical conversation and durable native outbox slice."""
 
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import asyncio
 import json
@@ -11,10 +10,7 @@ import textwrap
 from unittest.mock import MagicMock, patch
 
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel, select
+from sqlmodel import select
 
 from config.settings import settings
 from src.conversation.identity import (
@@ -25,7 +21,6 @@ from src.conversation.identity import (
     redact_attachment_refs,
     validate_attachment_refs,
 )
-from src.db import engine as db_engine
 from src.db.models import (
     ApprovalRequest,
     NativeNotificationOutbox,
@@ -38,6 +33,7 @@ from src.observer.delivery import _canonical_delivery_message, _resolve_delivery
 from src.observer.native_notification_queue import NativeNotificationQueue
 from src.scheduler.connection_manager import ConnectionManager
 from src.security.trust_contract import TrustPrincipal
+from tests.support.clock import fake_clock  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -484,31 +480,10 @@ async def test_rest_payload_persists_the_same_identity_and_redacted_attachment_r
     assert "private-token" not in json.dumps(history.json())
 
 
-@pytest_asyncio.fixture
-async def file_db(tmp_path, monkeypatch):
-    """Use a real temporary SQLite file through the production queue seam."""
-    database_path = tmp_path / "seraph.db"
-    test_engine = create_async_engine(
-        f"sqlite+aiosqlite:///{database_path}",
-        connect_args={"check_same_thread": False},
-    )
-    factory = sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
-    async with test_engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-
-    @asynccontextmanager
-    async def get_file_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr(db_engine, "get_session", get_file_session)
-    yield get_file_session, database_path
-    await test_engine.dispose()
+@pytest.fixture
+def file_db(db):
+    """The test's own SQLite file database (``db``) behind the real ``get_session`` (#1241)."""
+    return db, db.path
 
 
 async def _add_owner(get_session, *, session_id: str, owner_id: str, operator_session_id: str, revoked_at=None):
@@ -532,7 +507,6 @@ async def test_pending_selection_does_not_reuse_ownerless_legacy_row(
     monkeypatch,
 ):
     get_session, _ = file_db
-    monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
         get_session,
         session_id="conversation-pending-owner-binding",
@@ -574,7 +548,6 @@ async def test_pending_selection_does_not_reuse_ownerless_legacy_row(
 @pytest.mark.asyncio
 async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
     get_session, _ = file_db
-    monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
         get_session,
         session_id="conversation-approval-expiry",
@@ -658,7 +631,6 @@ async def test_approval_expiry_and_atomic_consume_replay(file_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_pending_approval_expiry_creates_fresh_bounded_request(file_db, monkeypatch):
     get_session, _ = file_db
-    monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
         get_session,
         session_id="conversation-pending-expiry",
@@ -716,16 +688,15 @@ async def test_pending_approval_expiry_creates_fresh_bounded_request(file_db, mo
 
 
 @pytest.mark.asyncio
-async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
+async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch, fake_clock):
     get_session, _ = file_db
-    monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
         get_session,
         session_id="conversation-approval-attachment-expiry",
         owner_id="operator:approval-attachment",
         operator_session_id="operator-session-approval-attachment",
     )
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     receipt = issue_attachment_quarantine_receipt(
         attachment_id="approval-expiring-attachment",
         owner_principal_id="operator:approval-attachment",
@@ -767,7 +738,8 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
             )
         )
 
-    await asyncio.sleep(0.4)
+    # The receipt expires on the fake clock; nothing waits in real time.
+    fake_clock.advance(0.4)
     assert not await approval_repository.consume_approved(
         session_id="conversation-approval-attachment-expiry",
         tool_name="attachment-tool",
@@ -789,16 +761,15 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
 
 
 @pytest.mark.asyncio
-async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
+async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch, fake_clock):
     get_session, _ = file_db
-    monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
         get_session,
         session_id="conversation-resume-attachment-expiry",
         owner_id="operator:resume-attachment",
         operator_session_id="operator-session-resume-attachment",
     )
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     receipt = issue_attachment_quarantine_receipt(
         attachment_id="resume-expiring-attachment",
         owner_principal_id="operator:resume-attachment",
@@ -854,7 +825,8 @@ async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_d
             )
         )
 
-    await asyncio.sleep(0.4)
+    # The receipt expires on the fake clock; nothing waits in real time.
+    fake_clock.advance(0.4)
     assert await approval_repository.consume_approved_for_resume(
         approval_id=approval_id,
         owner_operator_session_id="operator-session-resume-attachment",
@@ -885,7 +857,7 @@ async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_d
 
 
 @pytest.mark.asyncio
-async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
+async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db, fake_clock):
     get_session, _ = file_db
     await _add_owner(
         get_session,
@@ -893,7 +865,7 @@ async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
         owner_id="operator:attachment",
         operator_session_id="operator-session-attachment",
     )
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     receipt = issue_attachment_quarantine_receipt(
         attachment_id="outbox-expiring",
         owner_principal_id="operator:attachment",
@@ -921,7 +893,8 @@ async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
             "quarantine_receipt": receipt,
         }],
     )
-    await asyncio.sleep(0.8)
+    # The receipt expires on the fake clock; nothing waits in real time.
+    fake_clock.advance(0.8)
     assert await queue.claim_next(worker_id="expired-attachment-worker") is None
     stored = await queue.get(notification.id)
     assert stored is not None

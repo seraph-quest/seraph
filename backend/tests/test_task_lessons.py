@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from config.settings import settings
 from src.auth.service import create_session
+from tests.support.sync import settle, wait_until
 from src.db.models import Goal, Memory, MemoryProposal, Session, WorkBoardAttempt, WorkBoardTask, WorkflowRunState, OperatorSession, WorkflowStepState
 from src.memory.task_lessons import LessonRequest, LessonScope, TaskMethod, ResearchStrategy, create_task_lesson, inspect_task_lesson, _task
 from src.work_board.repository import BoardError
@@ -44,7 +45,6 @@ async def failed_local_task(async_db, monkeypatch, tmp_path):
     root.mkdir(mode=0o700)
     monkeypatch.setattr(settings, "workspace_dir", str(root))
     monkeypatch.setattr(settings, "operator_auth_secret", "isolated-lesson-test")
-    monkeypatch.setattr("src.memory.m5.get_session", async_db)
     _, operator = await create_session()
     now = datetime.now(timezone.utc)
     async with async_db() as db:
@@ -333,8 +333,10 @@ async def test_exact_timeout_retains_single_io_until_positive_finish_and_never_l
     try:
         assert await asyncio.to_thread(entered.wait, 2)
         # A blocked physical operation does not block an unrelated event-loop
-        # tick or task-source inspection. No thread cancellation is claimed.
-        await asyncio.wait_for(asyncio.sleep(.01), timeout=.1)
+        # tick or task-source inspection. No thread cancellation is claimed:
+        # the loop runs every ready callback while the write is parked.
+        await settle()
+        assert not callback.done()
         with pytest.raises(TimeoutError):
             await callback
         visible = await eligible_lesson_source(operator, "task")
@@ -348,10 +350,8 @@ async def test_exact_timeout_retains_single_io_until_positive_finish_and_never_l
         assert len(writes) == 1
     finally:
         release.set()
-        for _ in range(100):
-            if not task_lessons._AUTOMATIC_IO:
-                break
-            await asyncio.sleep(.01)
+    await wait_until(lambda: not task_lessons._AUTOMATIC_IO, what="retained lesson I/O finished",
+                     state=lambda: dict(task_lessons._AUTOMATIC_IO))
     assert not task_lessons._AUTOMATIC_IO
     recovered = await maybe_propose_automatic_lesson(task, "attempt")
     assert recovered["reason_code"] == "automatic_lesson_cancelled_staged_artifact"

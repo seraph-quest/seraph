@@ -56,9 +56,7 @@ async def _authenticated_original_api(accounting_db, monkeypatch, language, *, f
     assert captured["operator"].principal.principal_id == owner.principal_id
     assert captured["operator"].session_id == owner.session_id
     factory, jobs = accounting_db[2], flow["jobs"]
-    monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-    monkeypatch.setattr(work_board_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(work_board_api.dispatcher, "jobs", jobs)
     monkeypatch.setattr(work_board_api.dispatcher, "general_tasks", tasks)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "localhost,test,127.0.0.1")

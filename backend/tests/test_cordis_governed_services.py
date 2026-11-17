@@ -1,7 +1,7 @@
 """#1018 acceptance: governed capability and inference services through Cordis.
 
 Real Auth, SQLite, durable jobs, CapabilityExecutionHost, model-fabric
-execute_streaming behind the single remote_inference_admission_broker and the
+execute_streaming behind the single remote-inference admission broker and the
 real reviewed Cordis child. Model inference runs on the ADR-035 NEAR TEE text
 slot against the intercepted NEAR gateway (fixed in-memory responses); Python
 socket connects and DNS are denied.
@@ -21,6 +21,7 @@ import pytest
 
 from tests.cordis_research import needs_cordis, package_variant, research_host
 from tests.test_inference_accounting import accounting_db  # noqa: F401
+from tests.support.sync import assert_blocked
 from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa: F401
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
@@ -95,8 +96,6 @@ async def governed(accounting_db, monkeypatch, *, package_root=None, hook=None):
     jobs = DurableJobRepository()
     # Interactive chat and Cordis share one broker instance (the module singleton).
     from src.model_fabric import remote_inference_admission
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
-                        remote_inference_admission.remote_inference_admission_broker)
     # ADR-035: governed inference runs on the NEAR TEE text slot. Streaming
     # inference requires a slot that has proven streaming, as chat does.
     model = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=Model(),
@@ -112,7 +111,7 @@ async def governed(accounting_db, monkeypatch, *, package_root=None, hook=None):
             await hook(frame)
     async with research_host(jobs, package_root=package_root, observe=observe) as host:
         yield {"jobs": jobs, "host": host, "operator": operator, "model": model, "frames": frames, "root": root,
-               "broker": remote_inference_admission.remote_inference_admission_broker}
+               "broker": remote_inference_admission.get_remote_inference_admission_broker()}
 
 
 def _chat(env, tag, *, gated=False):
@@ -492,6 +491,8 @@ async def test_secret_runtime_paths_failed_reads_and_policy_changes_never_succee
         assert job["status"] == "blocked" and job["effects"] == []
 
 
+@pytest.mark.realtime(reason="service_jobs.SERVICE_TIMEOUT becomes the original deadline the Cordis child process "
+                             "enforces with its own wall clock; a fake clock in the test process cannot move it (#1225)")
 async def test_late_and_cancelled_capability_results_are_settled_and_recoverable(accounting_db, real_auth, monkeypatch):  # noqa: F811
     import threading
     from datetime import timedelta
@@ -619,7 +620,12 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
         after = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="interactive",
             messages=_messages("lane-after-lost"), max_tokens=64, idempotency_key="lane-after", host=env["host"]))
         assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 6))
-        await asyncio.sleep(0.5)
+        def after_queued():
+            with broker._condition:
+                return [item for item in broker._queue if item.startswith("remote:cordis-svc:")]
+        # Observed parked in the serial admission queue behind the held,
+        # reconciliation-required slot, not merely slow.
+        await assert_blocked(after, at=after_queued, what="request after an unknown-cost result waits for reconcile")
         assert "lane-after-lost" not in model.calls and not after.done()
         await broker.reconcile(held.operation_id, owner_id=held.owner_id, job_id=held.job_id,
                                fencing_token=held.fencing_token, outcome="failed", actual_cost_microusd=2)

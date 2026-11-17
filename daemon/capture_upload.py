@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover - package import fallback
     from .blocklist import is_blocked
 
 CAPTURE_UPLOAD_PATH = "/api/observer/captures"
+CONTEXT_PATH = "/api/observer/context"
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_LOCAL_TEXT_CHARS = 8 * 1024
 _LOCAL_PROVIDERS = frozenset({"apple-vision"})
@@ -103,9 +104,12 @@ def bounded_local_analysis(analysis: dict[str, object] | None) -> dict[str, obje
     return result if len(result) > 1 else None
 
 
+STORED_STATUSES = frozenset({"accepted", "duplicate", "suppressed"})
+
+
 @dataclass(frozen=True)
 class CaptureUploadResult:
-    status: str  # accepted | duplicate | suppressed | blocked | skipped | failed
+    status: str  # accepted | duplicate | suppressed | unconfirmed | blocked | skipped | failed
     reason: str
     capture_id: str = ""
     observation_id: str | None = None
@@ -114,7 +118,7 @@ class CaptureUploadResult:
     @property
     def stored(self) -> bool:
         """True when the backend holds this capture (new or already known)."""
-        return self.status in {"accepted", "duplicate", "suppressed"}
+        return self.status in STORED_STATUSES
 
 
 class LocalCaptureUploader:
@@ -172,8 +176,15 @@ class LocalCaptureUploader:
         )
 
     def _headers(self) -> dict[str, str]:
-        # No Origin and no cookie: the backend accepts this native ingress on
-        # the bearer credential alone (a browser always sends Origin).
+        return self.edge_headers()
+
+    def edge_headers(self) -> dict[str, str]:
+        """The scoped paired-edge credential headers for native ingress.
+
+        No Origin and no cookie: the backend accepts this native ingress on
+        the bearer credential (a browser always sends Origin). Callers send
+        them only to ``self.origin``, the validated loopback backend.
+        """
         return {
             "Authorization": f"Bearer {self._credential}",
             "X-Seraph-Node-Device": self.device_id,
@@ -181,6 +192,15 @@ class LocalCaptureUploader:
             "X-Seraph-Node-Extension": self.extension_id,
             "X-Seraph-Node-Reference": self.reference,
         }
+
+    async def post_context(self, client: httpx.AsyncClient, payload: dict[str, object]) -> httpx.Response:
+        """Post window context to the loopback backend with the paired credential.
+
+        Same native ingress as the capture upload (#1248): no Origin, no
+        cookie, the scoped paired-edge credential headers, and only to the
+        validated loopback origin. One attempt; the caller reports refusals.
+        """
+        return await client.post(f"{self.origin}{CONTEXT_PATH}", json=payload, headers=self._headers())
 
     def _record_failure(self, result: CaptureUploadResult, *, retry_after: float | None = None) -> CaptureUploadResult:
         self._consecutive_failures += 1
@@ -256,10 +276,15 @@ class LocalCaptureUploader:
             detail = data.get("detail")
             code = str(detail.get("code")) if isinstance(detail, dict) and detail.get("code") else ""
             if 200 <= response.status_code < 300:
+                # Only an explicit stored status means the backend holds the
+                # capture; anything else is unconfirmed, so the daemon still
+                # archives it locally (#1263).
+                reported = data.get("status")
+                confirmed = isinstance(reported, str) and reported in STORED_STATUSES
                 return self._record_success(
                     CaptureUploadResult(
-                        status=str(data.get("status") or "accepted"),
-                        reason=str(data.get("reason_code") or "capture_accepted"),
+                        status=reported if confirmed else "unconfirmed",
+                        reason=str(data.get("reason_code") or ("capture_accepted" if confirmed else "upload_status_unconfirmed")),
                         capture_id=capture_id,
                         observation_id=data.get("observation_id") if isinstance(data.get("observation_id"), str) else None,
                         http_status=response.status_code,
@@ -299,6 +324,7 @@ class LocalCaptureUploader:
 
 __all__ = [
     "CAPTURE_UPLOAD_PATH",
+    "CONTEXT_PATH",
     "CaptureUploadResult",
     "LocalCaptureUploader",
     "bounded_local_analysis",

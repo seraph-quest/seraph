@@ -36,8 +36,8 @@ def owner():
 def evidence_storage(async_db, monkeypatch, tmp_path, client):
     client.headers["origin"] = "http://localhost:3001"
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    with patch("src.api.task_evidence.get_session", async_db), patch("src.api.mail.get_session", async_db):
-        yield tmp_path
+    # ``async_db`` is the default database: get_session reaches it unpatched.
+    yield tmp_path
 
 
 async def seed(async_db, owner, root):
@@ -567,7 +567,6 @@ async def test_real_dispatcher_goal_snapshot_enters_api_and_exact_output_scope(c
     operator = replace(operator, session_id=task.owner_session_id,
         principal=replace(operator.principal, principal_id=task.owner_principal_id, session_id=task.owner_session_id))
     monkeypatch.setattr(task_evidence, "_operator", lambda request: operator)
-    monkeypatch.setattr(task_evidence, "get_session", async_db)
     async with async_db() as db:
         scope = await output_artifact_scope(db, record["artifact_id"])
         assert scope is not None

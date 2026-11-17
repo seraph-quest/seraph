@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from functools import partial
 import logging
 import math
 from pathlib import Path
@@ -32,6 +33,8 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.artifacts.registry import artifact_id_for
 from src.auth.service import AuthFailure, authenticate_session
 from src.db.engine import get_session
+from src.utils.background import track_task
+from src.utils.clock import get_clock
 from src.db.models import (
     CalendarPrepReceipt,
     Goal,
@@ -730,7 +733,7 @@ async def _await_communication_model_call(call, *, timeout: float) -> Any:
     """
     worker = asyncio.create_task(call)
     try:
-        return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout)
+        return await get_clock().wait_for(asyncio.shield(worker), timeout=timeout)
     except (asyncio.TimeoutError, asyncio.CancelledError):
         while not worker.done():
             try:
@@ -744,8 +747,37 @@ async def _await_communication_model_call(call, *, timeout: float) -> Any:
         raise
 
 
+async def _await_bounded_model_call(call, *, timeout: float, name: str) -> Any:
+    """Bound the wait for a model call, and own the callback it cannot stop.
+
+    ``to_thread`` cannot stop the provider callback. When the wait ends first
+    (timeout or cancellation) the callback still runs and later writes its
+    route receipt and accounting, so it is handed to ``track_task`` instead of
+    being left as an orphaned executor future: shutdown and
+    ``drain_tracked_tasks`` wait for that late work before the database it
+    writes to goes away (#1247). The wait itself is unchanged, and the late
+    output is never adopted.
+    """
+    worker = asyncio.ensure_future(call)
+    try:
+        return await get_clock().wait_for(asyncio.shield(worker), timeout=timeout)
+    except BaseException:
+        if not worker.done():
+            track_task(_settle_late_model_call(worker), name=name)
+        raise
+
+
+async def _settle_late_model_call(worker: asyncio.Future) -> None:
+    try:
+        await worker
+    except Exception as exc:
+        # The caller already raised its own timeout or cancellation; a late
+        # provider failure is recorded by the callback's own receipt path.
+        logger.warning("Late model call failed after its wait ended: %s", type(exc).__name__)
+
+
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return get_clock().now(timezone.utc)
 
 
 def _safe_digest(value: Any) -> str:
@@ -906,7 +938,7 @@ def _repo_repair_execution_deadline_at(
 ) -> str:
     """Compute one UTC deadline at the physical reservation boundary."""
 
-    now = datetime.now(timezone.utc)
+    now = get_clock().now(timezone.utc)
     candidates: list[datetime] = [
         now + timedelta(seconds=max(1, min(int(max_wall_seconds), MAX_RUNTIME_SECONDS)))
     ]
@@ -3950,7 +3982,7 @@ class WorkBoardDispatcher:
             # worker running: cancel it and wait, bounded, never release it early.
             worker.cancel()
             try:
-                await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                await get_clock().wait_for(asyncio.shield(worker), timeout=5)
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
             if not job_id:
@@ -3981,7 +4013,7 @@ class WorkBoardDispatcher:
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
                     try:
-                        await asyncio.wait_for(asyncio.shield(worker),timeout=5)
+                        await get_clock().wait_for(asyncio.shield(worker),timeout=5)
                     except asyncio.CancelledError:pass
                     except asyncio.TimeoutError:return receipts,False
                 from src.work_board.document_compare_native import cleanup_proven, reconcile_reap
@@ -3997,7 +4029,7 @@ class WorkBoardDispatcher:
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
                     try:
-                        await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                        await get_clock().wait_for(asyncio.shield(worker), timeout=5)
                     except asyncio.CancelledError:
                         pass
                     except asyncio.TimeoutError:
@@ -4013,7 +4045,7 @@ class WorkBoardDispatcher:
                 if worker is not None and worker is not asyncio.current_task() and not worker.done():
                     worker.cancel()
                     try:
-                        await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                        await get_clock().wait_for(asyncio.shield(worker), timeout=5)
                     except asyncio.CancelledError:
                         pass
                     except asyncio.TimeoutError:
@@ -4825,7 +4857,7 @@ class WorkBoardDispatcher:
                     from src.browser.task_runner import BrowserTaskRunner
 
                     try:
-                        preflight = await asyncio.wait_for(
+                        preflight = await get_clock().wait_for(
                             BrowserTaskRunner(
                                 workspace_root=settings.workspace_dir,
                             ).preflight(inputs, timeout_seconds=1.0),
@@ -6088,7 +6120,7 @@ class WorkBoardDispatcher:
         if worker is not None and not worker.done():
             worker.cancel()
             try:
-                await asyncio.wait_for(asyncio.shield(worker), timeout=_RESEARCH_CANCEL_WORKER_WAIT_SECONDS)
+                await get_clock().wait_for(asyncio.shield(worker), timeout=_RESEARCH_CANCEL_WORKER_WAIT_SECONDS)
             except asyncio.TimeoutError:
                 return {"completed": False, "cancellation_pending": True, "reason": "actual_worker_completion_required"}
             except asyncio.CancelledError:
@@ -8065,7 +8097,7 @@ class WorkBoardDispatcher:
                     priority=int(task.priority),
                     resource_claims=("mail-read", "remote-inference"),
                     declared_authority=authority,
-                    deadline_at=communication_binding.source_deadline_at if communication_binding is not None else datetime.now(timezone.utc) + timedelta(seconds=MAIL_RUNTIME_SECONDS),
+                    deadline_at=communication_binding.source_deadline_at if communication_binding is not None else get_clock().now(timezone.utc) + timedelta(seconds=MAIL_RUNTIME_SECONDS),
                     max_attempts=1,
                     max_outstanding_jobs=1,
                     run_fingerprint=input_fingerprint,
@@ -8280,13 +8312,13 @@ class WorkBoardDispatcher:
                             deadline = deadline.astimezone(timezone.utc)
                         except (TypeError, ValueError) as exc:
                             raise GmailReadError("mail_reply_reconciliation_required", "Mail reply deadline is invalid", status_code=409, recovery_action="reconcile_existing_reply") from exc
-                        timeout = min(float(MAIL_RUNTIME_SECONDS), max(0.001, (deadline - datetime.now(timezone.utc)).total_seconds()))
+                        timeout = min(float(MAIL_RUNTIME_SECONDS), max(0.001, (deadline - get_clock().now(timezone.utc)).total_seconds()))
                         if timeout <= 0:
                             raise GmailReadError("mail_reply_deadline_expired", "The Mail reply deadline expired", status_code=409, recovery_action="reconcile_existing_reply")
                         await current_context()
                         mark_provider_contact()
                         try:
-                            raw = await (_await_communication_model_call if communication_binding is not None else asyncio.wait_for)(
+                            raw = await (_await_communication_model_call if communication_binding is not None else partial(_await_bounded_model_call, name="mail_reply_late_model_call"))(
                                 asyncio.to_thread(model.generate, messages, response_format={"type": "json_object"}, request_context=copy(context), max_tokens=2048),
                                 timeout=timeout,
                             )
@@ -8392,7 +8424,7 @@ class WorkBoardDispatcher:
             latest = artifact_receipt
             await current_context()
             readback_id = f"mail-reply-readback:{uuid.uuid4().hex}"
-            readback = await self.jobs.record_readback(job_id, target_path=artifact_relative, status="succeeded", effect_type="mail_reply_draft", target_digest=artifact_sha256, content_sha256=artifact_sha256, readback_id=readback_id, verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), details={"verified": True, "memory_status": "no_learning"}, owner=lease_owner, fencing_token=fence, expected_revision=int(latest.get("revision") or 0))
+            readback = await self.jobs.record_readback(job_id, target_path=artifact_relative, status="succeeded", effect_type="mail_reply_draft", target_digest=artifact_sha256, content_sha256=artifact_sha256, readback_id=readback_id, verified_at=get_clock().now(timezone.utc).isoformat().replace("+00:00", "Z"), details={"verified": True, "memory_status": "no_learning"}, owner=lease_owner, fencing_token=fence, expected_revision=int(latest.get("revision") or 0))
             latest = readback
             await current_context()
             async def assert_related_terminal(db, run):
@@ -8574,7 +8606,7 @@ class WorkBoardDispatcher:
                     priority=int(task.priority),
                     resource_claims=("remote-inference",),
                     declared_authority=authority,
-                    deadline_at=communication_binding.source_deadline_at if communication_binding is not None else datetime.now(timezone.utc) + timedelta(seconds=max(1, min(int(runtime_seconds), 180))),
+                    deadline_at=communication_binding.source_deadline_at if communication_binding is not None else get_clock().now(timezone.utc) + timedelta(seconds=max(1, min(int(runtime_seconds), 180))),
                     max_attempts=1,
                     max_outstanding_jobs=max_outstanding_jobs,
                     run_fingerprint=input_digest,
@@ -8752,9 +8784,9 @@ class WorkBoardDispatcher:
                     and _text(root_lease.get("owner")) == _text(self.runner_id)
                     and int(root_lease.get("fencing_token") or 0) > 0
                     and persisted_datetime(root_lease.get("expires_at")) is not None
-                    and persisted_datetime(root_lease.get("expires_at")) > datetime.now(timezone.utc)
+                    and persisted_datetime(root_lease.get("expires_at")) > get_clock().now(timezone.utc)
                     and persisted_datetime(current_root.get("deadline_at")) is not None
-                    and persisted_datetime(current_root.get("deadline_at")) > datetime.now(timezone.utc)
+                    and persisted_datetime(current_root.get("deadline_at")) > get_clock().now(timezone.utc)
                 )
                 if not root_identity_ok:
                     raise_calendar_guard_error("The Calendar durable root authority changed")
@@ -8768,7 +8800,7 @@ class WorkBoardDispatcher:
                     )
 
                     session_row = await guard_db.get(OperatorSession, task.owner_session_id)
-                    now = datetime.now(timezone.utc)
+                    now = get_clock().now(timezone.utc)
                     if session_row is None:
                         if not (
                             settings.deployment_environment == "test"
@@ -8922,7 +8954,7 @@ class WorkBoardDispatcher:
                         or current_connection.revision != int(inputs.get("expected_connection_revision") or 0)
                         or current_consent.state != "active"
                         or current_connection.state != "active"
-                        or _utc_datetime(current_consent.expires_at) <= datetime.now(timezone.utc)
+                        or _utc_datetime(current_consent.expires_at) <= get_clock().now(timezone.utc)
                         or current_consent.goal_id != task.goal_id
                         or int(current_consent.goal_revision or 0) != int(task.goal_revision or 0)
                         or current_consent.allow_remote_model is not True
@@ -9031,7 +9063,7 @@ class WorkBoardDispatcher:
                                 status_code=409,
                                 recovery_action="reconcile_admission_binding",
                             )
-                        remaining_deadline = (root_deadline - datetime.now(timezone.utc)).total_seconds()
+                        remaining_deadline = (root_deadline - get_clock().now(timezone.utc)).total_seconds()
                         requested_runtime = max(0.001, min(float(runtime_seconds), 180.0))
                         model_timeout = min(120.0, requested_runtime, remaining_deadline)
                         if model_timeout <= 0:
@@ -9048,7 +9080,7 @@ class WorkBoardDispatcher:
                         # fresh, retry-safe precontact failure.
                         mark_provider_contact()
                         try:
-                            raw = await (_await_communication_model_call if communication_binding is not None else asyncio.wait_for)(
+                            raw = await (_await_communication_model_call if communication_binding is not None else partial(_await_bounded_model_call, name="calendar_late_model_call"))(
                                 asyncio.to_thread(
                                     model.generate,
                                     messages,
@@ -9208,7 +9240,7 @@ class WorkBoardDispatcher:
                 target_digest=artifact_sha256,
                 content_sha256=artifact_sha256,
                 readback_id=calendar_readback_id,
-                verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                verified_at=get_clock().now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 details={"verified": True, "memory_status": "no_learning"},
                 owner=lease_owner,
                 fencing_token=fence,
@@ -9277,7 +9309,7 @@ class WorkBoardDispatcher:
                         recovery_action="reconcile_external_effect",
                     )
 
-                now = datetime.now(timezone.utc)
+                now = get_clock().now(timezone.utc)
                 root_authority = _load_json_mapping(getattr(terminal_run, "declared_authority_json", None))
                 expected_authority = expected_calendar_authority()
                 terminal_root_lineage_ok = (
@@ -9629,7 +9661,7 @@ class WorkBoardDispatcher:
                     except Exception:
                         terminal_calendar_matches = False
                 terminal_session = await receipt_db.get(OperatorSession, task.owner_session_id)
-                now = datetime.now(timezone.utc)
+                now = get_clock().now(timezone.utc)
                 terminal_session_ok = bool(
                     terminal_session is not None
                     and terminal_session.revoked_at is None
@@ -11099,7 +11131,7 @@ class WorkBoardDispatcher:
                     # Lesson consent is distinct from execution authority. Failure
                     # to propose cannot undo or interrupt the ordinary task.
                     from src.memory.task_lessons import maybe_propose_automatic_lesson
-                    await asyncio.wait_for(maybe_propose_automatic_lesson(projected.task, projected.attempt.attempt_id), timeout=5)
+                    await get_clock().wait_for(maybe_propose_automatic_lesson(projected.task, projected.attempt.attempt_id), timeout=5)
             except Exception as exc:
                 logger.info("automatic task lesson unavailable for %s: %s", projected.task.task_id, type(exc).__name__)
             return projected

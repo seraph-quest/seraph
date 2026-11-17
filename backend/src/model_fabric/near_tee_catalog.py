@@ -68,10 +68,10 @@ import math
 import os
 from pathlib import Path
 import re
-import time
 from urllib.parse import quote
 
 from config.settings import settings
+from src.utils.clock import get_clock
 
 
 CATALOG_RECEIPT_SCHEMA = "seraph.near.tee.catalog.receipt.v1"
@@ -619,7 +619,7 @@ async def refresh_catalog_observations(configuration=None, *, now: float | None 
         if catalog_receipt_block_reason(slot_name, profile, receipts=receipts,
                 revision=configured.egress_revision) is not None:
             continue
-        checked = time.time() if now is None else now
+        checked = get_clock().time() if now is None else now
         prior = observations.get(slot_name)
         entry = dict(prior) if _observation_matches(prior, profile) else {
             "model_id": profile.model, "profile_hash": profile.contract_hash, "profile_id": profile.id,
@@ -698,7 +698,7 @@ class NearTeeCatalogRefresher:
         import logging
         from .configuration import read_model_fabric_configuration
         logger = logging.getLogger(__name__)
-        await asyncio.sleep(self._startup_delay)
+        await get_clock().sleep(self._startup_delay)
         while True:
             interval = REFRESH_MAX_INTERVAL_HOURS * 3600.0
             try:
@@ -709,7 +709,7 @@ class NearTeeCatalogRefresher:
                 raise
             except Exception:
                 logger.warning("NEAR TEE background catalog read failed; dispatch is unaffected", exc_info=True)
-            await asyncio.sleep(interval)
+            await get_clock().sleep(interval)
 
 
 near_tee_catalog_refresher = NearTeeCatalogRefresher()
@@ -743,5 +743,5 @@ async def run_catalog_check(configuration, *, now: float | None = None) -> dict[
             reason = exc.code
         receipts[slot_name] = build_receipt(slot_name=slot_name, slot=slot, profile=profile, facts=facts,
             raw=raw, reason=reason, required=required, revision=configuration.egress_revision,
-            now=time.time() if now is None else now)
+            now=get_clock().time() if now is None else now)
     return receipts

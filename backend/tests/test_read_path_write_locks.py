@@ -10,12 +10,12 @@ from contextlib import asynccontextmanager, contextmanager
 import pytest
 from sqlalchemy import event
 
-from config.settings import settings
 from src.db.models import MemoryKind
 from src.memory.repository import memory_repository
+from tests.support.sqlite_locks import assert_only_bounded_writes, bounded_write_watch, greenlet_frames
 
-# Before #1074 each of these waited out the 5s busy timeout at least once.
-_READ_BOUND_SECONDS = 2.0
+# Before #1074 each of these waited out the 5s busy timeout at least once. The
+# proof is causal; see tests/support/sqlite_locks.py.
 
 
 @asynccontextmanager
@@ -27,20 +27,14 @@ async def _database(async_db):
     def record(_conn, _cursor, statement, *_args):
         words = statement.split()
         if words and words[0].upper() in {"BEGIN", "INSERT", "UPDATE", "DELETE"}:
-            import greenlet, sys
-            stack = []
-            g = greenlet.getcurrent()
-            while g is not None:
-                f = g.gr_frame if g is not greenlet.getcurrent() else sys._getframe()
-                while f is not None:
-                    stack.append(f); f = f.f_back
-                g = g.parent
+            stack = greenlet_frames()
             chain = [f"{f.f_code.co_filename.split('/backend/')[-1]}:{f.f_lineno}:{f.f_code.co_name}" for f in stack if "/backend/src/" in f.f_code.co_filename and "db/engine" not in f.f_code.co_filename][:5]
             statements.append(" ".join(words[:3]).upper() + " @ " + " <- ".join(chain))
 
     event.listen(engine, "before_cursor_execute", record)
     try:
-        yield engine.url.database, statements
+        with bounded_write_watch(engine) as writes:
+            yield engine.url.database, statements, writes
     finally:
         event.remove(engine, "before_cursor_execute", record)
 
@@ -63,7 +57,7 @@ def _foreign_writer(path):
     writer.start()
     assert held.wait(5)
     try:
-        yield
+        yield held
     finally:
         release.set()
         writer.join(10)
@@ -92,7 +86,7 @@ async def test_chat_turn_builds_full_guardian_state_under_a_foreign_writer(async
 
     await SessionManager().get_or_create("contended")
     await _seed_memories()
-    async with _database(async_db) as (path, statements):
+    async with _database(async_db) as (path, statements, writes):
         await build_guardian_state(session_id="contended", user_message="What next?")
         # A new memory changes the bounded snapshot, so this turn also wants
         # to persist the snapshot cache while the writer holds the lock.
@@ -103,12 +97,14 @@ async def test_chat_turn_builds_full_guardian_state_under_a_foreign_writer(async
             importance=0.9,
         )
         statements.clear()
+        writes.clear()
         with _foreign_writer(path):
-            started = time.monotonic()
+            # The writer holds its lock for the whole turn; the turn still returns.
             state = await build_guardian_state(session_id="contended", user_message="What next?")
-            elapsed = time.monotonic() - started
-        # Full state (not the minimal-agent fallback) inside the chat budget.
-        assert elapsed < min(_READ_BOUND_SECONDS, settings.guardian_state_timeout_seconds), statements
+            contended_writes = list(writes)
+        # Full state (not the minimal-agent fallback), with no standard-wait write.
+        assert contended_writes, statements  # the snapshot-cache save was attempted
+        assert_only_bounded_writes(contended_writes, statements)
         assert "Prefers concise morning briefings" in state.memory_context
         assert "Alice owns investor updates" in state.bounded_memory_context
         # One deferred tombstone check per turn instead of five serialized ones;
@@ -130,7 +126,7 @@ async def test_tombstone_reapply_after_stale_restore_still_happens(async_db):
     )
     await memory_repository.mark_memory_tombstoned(created.memory_id, actor="operator", reason="user deletion")
     await memory_repository.reconcile_memory_tombstones()
-    async with _database(async_db) as (_path, statements):
+    async with _database(async_db) as (_path, statements, _writes):
         settled = await memory_repository.reconcile_memory_tombstones()
         assert settled["reapplied_count"] == 0 and "reapply_due" not in settled
         # Nothing due: the read never takes the writer lock.
@@ -178,12 +174,11 @@ async def test_expired_insights_and_approvals_stay_hidden_without_waiting_for_a_
         (await db.get(QueuedInsight, stale.id)).created_at = datetime.now(timezone.utc) - timedelta(days=30)
         (await db.get(ApprovalRequest, lapsed.id)).expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
 
-    async with _database(async_db) as (path, _statements):
+    async with _database(async_db) as (path, statements, writes):
         with _foreign_writer(path):
-            started = time.monotonic()
             insights = await insight_queue.peek_all()
             pending = await approval_repository.list_pending(session_id="approval-session")
-            assert time.monotonic() - started < _READ_BOUND_SECONDS
+            assert_only_bounded_writes(writes, statements)
             # Expired items are never presented as active, even unpersisted.
             assert [item.id for item in insights] == [fresh.id]
             assert [item["id"] for item in pending] == [live.id]
@@ -206,13 +201,13 @@ async def test_idle_daemon_poll_takes_no_writer_lock_and_audits_once_per_window(
     from src.observer.native_notification_queue import NativeNotificationQueue
 
     queue = NativeNotificationQueue()
-    async with _database(async_db) as (path, statements):
+    async with _database(async_db) as (path, statements, writes):
         await queue.claim_next(worker_id="idle-daemon")
         assert not [item for item in statements if not item.startswith("BEGIN")], statements
+        writes.clear()
         with _foreign_writer(path):
-            started = time.monotonic()
             assert await queue.claim_next(worker_id="idle-daemon") is None
-            assert time.monotonic() - started < _READ_BOUND_SECONDS
+            assert writes == [], statements  # the idle poll takes no writer lock at all
 
     monkeypatch.setattr(observer_api, "_empty_poll_audited_at", {})
     assert observer_api._empty_poll_audit_due("worker-a") is True
@@ -300,11 +295,10 @@ async def test_orphaned_goal_insights_are_hidden_without_waiting_for_a_writer(as
     async with async_db() as db:
         db.add(QueuedInsight(id="orphan-insight", content="Goal was deleted", goal_id="deleted-goal",
                              goal_revision=1, owner_principal_id="operator:a", operator_session_id="session:a"))
-    async with _database(async_db) as (path, _statements):
+    async with _database(async_db) as (path, statements, writes):
         with _foreign_writer(path):
-            started = time.monotonic()
             assert [item.id for item in await insight_queue.peek_all()] == [kept.id]
-            assert time.monotonic() - started < _READ_BOUND_SECONDS
+            assert_only_bounded_writes(writes, statements)
         async with async_db() as db:
             assert await db.get(QueuedInsight, "orphan-insight") is not None
         assert [item.id for item in await insight_queue.peek_all()] == [kept.id]
@@ -351,14 +345,14 @@ async def test_bounded_read_path_audit_is_deferred_not_dropped(async_db):
     from src.db.models import AuditEvent
     from src.utils.background import drain_tracked_tasks
 
-    async with _database(async_db) as (path, _statements):
+    async with _database(async_db) as (path, statements, writes):
         with _foreign_writer(path):
-            started = time.monotonic()
             persisted_now = await log_integration_event(
                 integration_type="screen_repository", name="daily_summary", outcome="empty_result",
                 lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
             )
-            assert time.monotonic() - started < _READ_BOUND_SECONDS
+            assert writes, statements  # the bounded audit write was attempted
+            assert_only_bounded_writes(writes, statements)
             assert persisted_now is False
         await drain_tracked_tasks(timeout_seconds=10)
     async with async_db() as db:

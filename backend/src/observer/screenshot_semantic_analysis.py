@@ -44,7 +44,7 @@ from src.model_fabric.configuration import (
 from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionError,
-    remote_inference_admission_broker,
+    get_remote_inference_admission_broker,
 )
 from src.model_fabric.near_tee import NearTeeError
 from src.security.trust_contract import EgressClass
@@ -219,7 +219,7 @@ async def screenshot_semantic_analysis_background_slots(*, timeout_seconds: floa
         return 0
     proofs_ready = await _vision_profile_proofs_ready(timeout_seconds=timeout_seconds)
     try:
-        status = await remote_inference_admission_broker.status()
+        status = await get_remote_inference_admission_broker().status()
     except Exception:
         return 0
     capacity = status.get("capacity") if isinstance(status, dict) else None
@@ -252,7 +252,7 @@ async def _screenshot_semantic_analysis_queue_status(*, timeout_seconds: float =
     """Return the process-local remote admission state."""
     if not screenshot_semantic_analysis_enabled():
         return None
-    return await remote_inference_admission_broker.status()
+    return await get_remote_inference_admission_broker().status()
 
 
 async def _screenshot_semantic_analysis_backend_ready(*, timeout_seconds: float = 2.0) -> bool:

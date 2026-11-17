@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -96,11 +95,6 @@ def _context(
     }
 
 
-@asynccontextmanager
-async def _empty_db_session():
-    yield object()
-
-
 async def _bind_publication_consent(client, monkeypatch):
     owner, connection, _binding, _request = await active_connection(client, monkeypatch)
     monkeypatch.setitem(globals(), "OWNER", owner["principal_id"])
@@ -116,7 +110,6 @@ def _patch_route_context(monkeypatch, *contexts, authority):
     for context in contexts:
         context["parent"]["declared_authority"] = authority
     monkeypatch.setattr(api, "_operator", lambda _request: _operator())
-    monkeypatch.setattr(api, "get_session", _empty_db_session)
     # These route-contract tests must not consult the live workspace vault;
     # secret redaction is covered separately against its managed store.
     monkeypatch.setattr(

@@ -48,6 +48,11 @@ import src.work_board.dispatcher as dispatcher_module
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
 from src.work_board import review as review_service
 from src.workflows.job_runtime import DurableJobError, DurableJobLeaseError, DurableJobRepository
+from tests.support.clock import fake_clock, timers_pending  # noqa: F401 - fixture
+from tests.support.sync import Gate, Signal, within
+
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
 
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
@@ -2900,7 +2905,7 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkeypatch):
+async def test_pending_admission_reconciles_after_restart(async_db, tmp_path: Path, monkeypatch):
     """A claimed pending row links an existing exact durable admission after restart."""
 
     workspace = tmp_path / "workspace"
@@ -2917,41 +2922,9 @@ async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkey
     (workspace / "inputs" / "restart.json").write_bytes(raw)
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
 
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'pending-admission.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    runtime_tables = [
-        Session.__table__,
-        Goal.__table__,
-        WorkBoardTask.__table__,
-        WorkBoardAttempt.__table__,
-        WorkBoardEvent.__table__,
-        WorkBoardLink.__table__,
-        WorkflowRunState.__table__,
-        Secret.__table__,
-        WorkBoardProposal.__table__,
-        WorkBoardEvidenceDependency.__table__,
-    ]
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync: SQLModel.metadata.create_all(sync, tables=runtime_tables)
-        )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def durable_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", durable_session)
-    monkeypatch.setattr("src.vault.repository.get_session", durable_session)
+    # The test's own database; job runtime and vault reach it through get_session.
+    factory = async_db.factory
+    durable_session = async_db
     repository = WorkBoardRepository()
     jobs = DurableJobRepository()
     task = WorkBoardTask(
@@ -3020,7 +2993,6 @@ async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkey
             )
         ).scalar_one()
     assert linked.workflow_run_id == expected_job_id
-    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -3117,6 +3089,9 @@ async def test_stale_fence_cannot_attach_output(async_db, tmp_path: Path, monkey
                 "idempotency_key": spec.identity.idempotency_key,
             },
         )
+        # Release the writer lock before the job repository's own sessions
+        # write: each session has its own connection on the file database (#1222).
+        await db.commit()
         readback = await jobs.record_effect(
             job_id,
             effect_type="board_child_readback",
@@ -3216,3 +3191,103 @@ async def test_unknown_effect_never_auto_retries(async_db):
             await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
         ).scalar_one()
         assert refreshed.status is WorkBoardStatus.blocked
+
+
+async def _research_cancel_fixture(monkeypatch):
+    """A registered research worker and stub cancel reservations (#1227 item 3).
+
+    The worker parks until it is cancelled, then parks again in its own
+    post-cancel cleanup at ``quiescing``, as the real worker does while it
+    cancels its children and freezes the group. The reservation calls are
+    stubbed so only ``cancel_research``'s own wait is under test.
+    """
+    from src.work_board import research_control
+
+    calls: list[str] = []
+
+    async def request_cancel(jobs, owner, task_id, request):
+        calls.append("request_cancel")
+        return {"attempt_id": "research-attempt"}
+
+    async def finish_cancel(jobs, owner, task_id, request):
+        calls.append("finish_cancel")
+        return {"completed": True, "proof": "finished"}
+
+    monkeypatch.setattr(research_control, "request_cancel", request_cancel)
+    monkeypatch.setattr(research_control, "finish_cancel", finish_cancel)
+    running = Signal("research worker running")
+    quiescing = Gate("research worker post-cancel cleanup")
+
+    async def worker_body():
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await quiescing.arrive()
+            raise
+
+    worker = asyncio.create_task(worker_body(), name="research-worker")
+    await running.wait(task=worker)
+    dispatcher = WorkBoardDispatcher(jobs=object())
+    monkeypatch.setitem(dispatcher._active_worker_tasks, ("research-task", "research-attempt"), worker)
+    return dispatcher, worker, quiescing, calls
+
+
+@asynccontextmanager
+async def _finally_cancelled(coroutine):
+    """Run ``coroutine`` as a task; a failed assertion cancels and reaps it
+    rather than leaving it parked on a fake timer at teardown."""
+    task = asyncio.create_task(coroutine)
+    try:
+        yield task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_research_cancel_answers_pending_when_worker_outlives_its_wait(monkeypatch, fake_clock):
+    """The ``cancellation_pending`` branch: the cancelled worker is still in its
+    cleanup when the endpoint's wait expires (#1227 item 3). The fake clock
+    moves only past the production bound, so nothing here races load."""
+    dispatcher, worker, quiescing, calls = await _research_cancel_fixture(monkeypatch)
+    async with quiescing, _finally_cancelled(dispatcher.cancel_research(OWNER, "research-task", object())) as cancel:
+        await quiescing.wait_reached(task=cancel)
+        # Exactly one timer, at the unchanged production bound.
+        assert await timers_pending(fake_clock, what="cancel_research waits on the worker") == [
+            dispatcher_module._RESEARCH_CANCEL_WORKER_WAIT_SECONDS
+        ] == [5]
+        assert not cancel.done()
+        fake_clock.advance(5)
+        result = await within(cancel, what="cancel_research answers after its bound")
+        assert result == {
+            "completed": False,
+            "cancellation_pending": True,
+            "reason": "actual_worker_completion_required",
+        }
+        # No completion is claimed: the finishing reservation never ran and
+        # the worker, still cleaning up, was not abandoned or cancelled again.
+        assert calls == ["request_cancel"]
+        assert not worker.done()
+        assert worker.cancelling() == 1
+    with pytest.raises(asyncio.CancelledError):
+        await within(worker, what="the released worker finishes its cleanup")
+    assert fake_clock.pending_deadlines() == []
+
+
+async def test_research_cancel_finishes_after_the_worker_completes_within_its_wait(monkeypatch, fake_clock):
+    """The completed branch at the same seam: once the cancelled worker has
+    actually finished (here by re-raising its cancellation, so the wait takes
+    the ``CancelledError`` with ``worker.done()`` path), the endpoint finishes
+    the cancel without time moving."""
+    dispatcher, worker, quiescing, calls = await _research_cancel_fixture(monkeypatch)
+    async with quiescing, _finally_cancelled(dispatcher.cancel_research(OWNER, "research-task", object())) as cancel:
+        await quiescing.wait_reached(task=cancel)
+        assert await timers_pending(fake_clock, what="cancel_research waits on the worker") == [5]
+        quiescing.release()
+        result = await within(cancel, what="cancel_research answers after the worker returns")
+    assert result == {"completed": True, "proof": "finished"}
+    assert calls == ["request_cancel", "finish_cancel"]
+    assert worker.done() and worker.cancelled()
+    assert fake_clock.elapsed == 0
+    assert fake_clock.pending_deadlines() == []

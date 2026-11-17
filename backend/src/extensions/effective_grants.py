@@ -14,7 +14,8 @@ from src.auth.service import authenticate_session, AuthFailure
 import src.db.engine as database
 from src.db.models import (Goal, GoogleServiceConnection, CalendarReadConsent, MailReadConsent,
     GovernedScheduleBinding, GuardianSourceWatch,
-    ApprovalRequest, WorkBoardTask, TelegramTransportState, GitHubFollowthroughConnection)
+    ApprovalRequest, WorkBoardTask, TelegramTransportState, GitHubFollowthroughConnection,
+    GitHubActivitySource)
 
 LIMIT = 100
 
@@ -31,7 +32,7 @@ def _revision(row):
 
 def _entry(kind, record_id, *, boundary, purpose, source, destination, state, revision,
            expiry=None, goal_id=None, limits=None, controls=None, jobs=None):
-    capability={'calendar_consent':'calendar.observe_due_events.v1','mail_consent':'mail.read.v1','goal':'goal.proactive.v1','source_watch':'guardian.research-watch.v1','github':'github.followthrough.v1','telegram':'telegram.transport.v1','node':'paired.observation.v1'}.get(kind.removesuffix('_model'),kind)
+    capability={'calendar_consent':'calendar.observe_due_events.v1','mail_consent':'mail.read.v1','goal':'goal.proactive.v1','source_watch':'guardian.research-watch.v1','github':'github.followthrough.v1','telegram':'telegram.transport.v1','node':'paired.observation.v1','github_activity':'github.activity-read.v1'}.get(kind.removesuffix('_model'),kind)
     return dict(grant_id=f'{kind}:{record_id}', kind=kind, capability_id=capability, record_id=record_id,
         boundary=boundary, purpose=purpose, source=source, destination=destination,
         state=state, revision=revision, expires_at=_iso(expiry), goal_id=goal_id,
@@ -174,6 +175,19 @@ async def inventory(request):
                 state=consent['state'],revision=c.revision,expiry=c.consent_expires_at,
                 limits={'actions':','.join(consent['actions']),'root_bound':consent['root_bound'], 'credential_is_consent':False, 'maximum_duration_seconds':3600},
                 controls=['revoke'],jobs=[{'job_id':c.active_job_id,'state':'reserved','kind':'publication'}] if c.active_job_id else []))
+        # #1264: the first ambient-credential source. The local gh login holds
+        # the account's full access; these rows say so and offer revoke.
+        # Owned by the operator identity (survives logins), not this login's principal.
+        identity_id=getattr(operator,'operator_identity_id',None)
+        activity_sources=(await db.execute(select(GitHubActivitySource).where(GitHubActivitySource.owner_identity_id==identity_id).limit(LIMIT))).scalars().all() if identity_id else []
+        for a in activity_sources:
+            from src.integrations.github_activity import GRANT_SENTENCE
+            limits={'credential':'local_gh_cli_login','credential_scope':'full_gh_scope','seraph_requests':'get_only_allowlist',
+                'login':a.identity_login,'gh_entry_path':a.gh_entry_path,'statement':GRANT_SENTENCE}
+            rows.append(_entry('github_activity',a.id,boundary='observation',purpose='github_activity_evidence',source='local_gh_cli_login',destination='local_evidence',
+                state=a.state,revision=a.revision,limits=limits,controls=['revoke']))
+            rows.append(_entry('github_activity_model',a.id,boundary='inference_egress',purpose='github_activity_model_context',source='local_gh_cli_login',destination='governed_provider',
+                state=a.state if a.model_context_allowed else 'denied',revision=a.revision,limits=limits,controls=['revoke']))
     # Paired inventory uses raw owner proof; foreign state yields only a neutral
     # reset requirement, never pairing ids, device names or credentials.
     from src.api.nodes import _node_inventory_for_owner
@@ -255,6 +269,9 @@ async def revoke(request, body):
             result=await goals.update_goal(record,goals.GoalUpdate(proactive_enabled=False,expected_revision=body.expected_revision),target)
         elif kind=='schedule':
             result=await calendar.revoke_schedule(_with_body(request,{'expected_binding_revision':body.expected_revision,'idempotency_key':body.idempotency_key}),record)
+        elif kind.startswith('github_activity'):
+            from src.integrations.github_activity import revoke_github_activity,GitHubActivityRevokeRequest
+            result=await revoke_github_activity(GitHubActivityRevokeRequest(expected_revision=body.expected_revision),target)
         elif kind=='github':
             from src.extensions.github_followthrough import revoke_github_connection,ConnectionRevokeRequest
             result=await revoke_github_connection(ConnectionRevokeRequest(expected_revision=body.expected_revision),target)

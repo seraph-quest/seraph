@@ -81,8 +81,6 @@ async def _actual_notification_intent(accounting_db, monkeypatch, *, auth_cookie
     from src.workflows.job_runtime import durable_job_repository
     from config.settings import settings
     monkeypatch.setattr(settings, "operator_auth_idle_seconds", 3600)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
-        remote_inference_admission.remote_inference_admission_broker)
     root, _, factory = accounting_db
     configured = setup_configuration()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(

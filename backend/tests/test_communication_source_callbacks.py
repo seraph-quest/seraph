@@ -9,6 +9,13 @@ from src.work_board.dispatcher import _await_communication_model_call
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.work_board.repository import BoardError
 from tests.test_inference_accounting import accounting_db
+from tests.support.sync import assert_blocked, suspended_in, wait_until
+
+
+def _holding_after_deadline(producer):
+    """The producer has left its bounded ``wait_for`` (deadline or cancel
+    delivered) and is parked holding the original worker."""
+    return suspended_in(producer, "_await_communication_model_call", without=("wait_for",))
 
 
 @pytest.mark.asyncio
@@ -34,10 +41,11 @@ async def test_timeout_holds_original_worker_until_thread_closes(late_failure):
     producer = asyncio.create_task(_await_communication_model_call(
         asyncio.to_thread(original_call), timeout=0.02))
     try:
-        async with asyncio.timeout(2):
-            while not started.is_set():
-                await asyncio.sleep(0.001)
-        await asyncio.sleep(0.04)
+        await wait_until(started.is_set, what="original call started", task=producer)
+        # The 0.02 s production deadline has fired and the producer still
+        # holds the original thread: observed, not assumed after a sleep.
+        await assert_blocked(producer, at=lambda: _holding_after_deadline(producer),
+                             what="timed-out producer holds the original worker")
         assert not producer.done()
         assert not closed.is_set()
         release.set()
@@ -68,12 +76,12 @@ async def test_repeated_cancellation_holds_same_thread_and_preserves_cancel():
     producer = asyncio.create_task(_await_communication_model_call(
         asyncio.to_thread(original_call), timeout=2))
     try:
-        async with asyncio.timeout(2):
-            while not started.is_set():
-                await asyncio.sleep(0.001)
+        await wait_until(started.is_set, what="original call started", task=producer)
         for _ in range(3):
             producer.cancel()
-            await asyncio.sleep(0.005)
+            # assert_blocked settles the loop, which delivers the cancel.
+            await assert_blocked(producer, at=lambda: _holding_after_deadline(producer),
+                                 what="cancelled producer holds the original worker")
             assert not producer.done()
             assert not closed.is_set()
         release.set()

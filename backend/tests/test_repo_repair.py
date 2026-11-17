@@ -312,7 +312,10 @@ async def _seed_canonical_repair(
             started_at=now - timedelta(seconds=1),
         )
     db.add(attempt)
-    await db.flush()
+    # Commit, as the production dispatcher does before source inspection: the
+    # job repository reads and writes through its own sessions, which (on the
+    # per-test file database, #1222) do not see this session's uncommitted rows.
+    await db.commit()
     return payload_digest
 
 

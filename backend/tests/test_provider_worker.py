@@ -19,6 +19,9 @@ from src.runtime_plugins import worker as worker_module
 from src.runtime_plugins.worker import (DEGRADABLE, MANDATORY, ProviderActivationError, ProviderWorker, attach,
                                         current_worker, domain_provider_unavailable)
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 BACKEND = Path(__file__).resolve().parents[1]
 
 
@@ -339,15 +342,18 @@ async def test_every_startup_failure_releases_the_lock_engine_and_mcp(monkeypatc
 @pytest.mark.parametrize("provider, predicate", [("authority", "_authority_predicate"), ("tasks", "_tasks_predicate"),
                                                  ("goals", "_goals_predicate"), ("memory", "_memory_predicate")])
 async def test_storage_failure_in_a_table_check_is_that_providers_typed_reason(monkeypatch, provider, predicate):
-    from contextlib import asynccontextmanager
     from sqlalchemy.exc import OperationalError
+    from tests.support.db import install_session_factory
 
-    @asynccontextmanager
-    async def broken():
-        raise OperationalError("SELECT", {}, Exception("disk I/O error"))
-        yield
+    class BrokenStorage:
+        async def __aenter__(self):
+            raise OperationalError("SELECT", {}, Exception("disk I/O error"))
+
+        async def __aexit__(self, *_exc):
+            return False
     monkeypatch.setattr(settings, "vault_encryption_key", "")
-    monkeypatch.setattr(db_engine, "get_session", broken)
+    # The real get_session cannot open a session: storage is unavailable (#1241).
+    install_session_factory(monkeypatch, BrokenStorage)
     with pytest.raises(ProviderActivationError) as excinfo:
         await getattr(worker_module, predicate)()
     assert (excinfo.value.provider, excinfo.value.reason_code) == (provider, f"{provider}_storage_unavailable")
@@ -466,8 +472,12 @@ async def test_cancellation_during_the_drain_still_releases_the_lease(monkeypatc
 # ------------------------------------------------------------------ status reads under writer contention
 
 @pytest.fixture
-async def contended_db(tmp_path):
-    """An isolated file database whose sessions give up on a held writer lock after 50 ms."""
+async def contended_database(tmp_path):
+    """An isolated file database whose sessions give up on a held writer lock after 50 ms.
+
+    Yields ``(path, factory)``; ``factory`` is installed through
+    ``override_session_factory`` for the test's task.
+    """
     from sqlalchemy import create_engine, event
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
@@ -487,8 +497,13 @@ async def contended_db(tmp_path):
         connection.cursor().execute("PRAGMA busy_timeout=50")
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     with db_engine.override_session_factory(factory):
-        yield path
+        yield path, factory
     await engine.dispose()
+
+
+@pytest.fixture
+def contended_db(contended_database):
+    return contended_database[0]
 
 
 def _active_worker():
@@ -541,21 +556,20 @@ async def test_status_reads_never_write_and_a_contended_probe_is_unknown_not_fai
 
 
 @pytest.mark.asyncio
-async def test_a_non_contention_probe_failure_still_fails_audit(contended_db, monkeypatch):
-    from contextlib import asynccontextmanager
+async def test_a_non_contention_probe_failure_still_fails_audit(contended_database):
     from sqlalchemy.exc import OperationalError
+    _path, factory = contended_database
     worker = _active_worker()
-    real = db_engine.get_session
 
-    @asynccontextmanager
-    async def broken_writes():
-        async with real() as db:
-            async def refuse(*_a, **_k):
-                raise OperationalError("SAVEPOINT", {}, Exception("disk I/O error"))
-            db.begin_nested = refuse
-            yield db
-    monkeypatch.setattr(db_engine, "get_session", broken_writes)
-    status = await worker.readiness(probe_writes=True)
+    def broken_writes():
+        db = factory()
+        async def refuse(*_a, **_k):
+            raise OperationalError("SAVEPOINT", {}, Exception("disk I/O error"))
+        db.begin_nested = refuse
+        return db
+    # Every session the readiness probe opens refuses writes (#1241).
+    with db_engine.override_session_factory(broken_writes):
+        status = await worker.readiness(probe_writes=True)
     assert worker.status["audit"].state == "failed"
     assert worker.status["audit"].reason_code == "audit_write_unavailable"
     assert status["audit_write_probe"]["outcome"] == "failed"

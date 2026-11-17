@@ -5,7 +5,6 @@ connection, producer/helper/Git processes, SQLite and marker bytes are real.
 Only the admitted lease is shortened and a child-start notification paused.
 No observer supplies terminal or quiescence proof.
 """
-from contextlib import asynccontextmanager
 import asyncio
 import json
 import multiprocessing
@@ -25,6 +24,7 @@ from src.execution.repo_supervisor import start_identity, exact_signal
 from src.workflows.job_runtime import durable_job_repository as jobs
 from tests.test_repo_publication_vertical import actual_repair, selected_connection, request_for, ORIGIN
 from tests.repo_publication_support import GitDataTransport
+from tests.support.sync import wait_until_blocking
 
 
 def _canonical_request_process(database_url, job_id, principal, root, observed_path, continue_path, result_path):
@@ -35,7 +35,7 @@ def _canonical_request_process(database_url, job_id, principal, root, observed_p
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
     from src.db.engine import _configure_sqlite_connection
-    from tests.conftest import _PATCH_TARGETS
+    import src.db.engine as db_engine
     from src.workflows.repo_publication import RepoPublicationService
 
     async def run():
@@ -43,16 +43,9 @@ def _canonical_request_process(database_url, job_id, principal, root, observed_p
             pool_size=4, max_overflow=0, pool_timeout=3)
         event.listen(physical.sync_engine, "connect", _configure_sqlite_connection)
         factory = sessionmaker(physical, class_=AsyncSession, expire_on_commit=False)
-        @asynccontextmanager
-        async def session():
-            async with factory() as db:
-                try:
-                    yield db
-                    await db.commit()
-                except BaseException:
-                    await db.rollback()
-                    raise
-        patches = [patch(target, session) for target in _PATCH_TARGETS]
+        # The child's own pool becomes the default database (#1222 seam).
+        patches = [patch.object(db_engine, "engine", physical),
+                   patch.object(db_engine, "async_session_factory", factory)]
         for item in patches: item.start()
         original_claim = jobs.claim_job
         async def shortened_claim(*args, **kwargs):
@@ -69,9 +62,9 @@ def _canonical_request_process(database_url, job_id, principal, root, observed_p
                 descriptor = os.open(observed_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, "wb") as output:
                     output.write(raw); output.flush(); os.fsync(output.fileno())
-                until = time.monotonic()+6
-                while time.monotonic() < until and not Path(continue_path).exists():
-                    time.sleep(.01)
+                # Parked until the test lets the notification continue (or kills
+                # this parent); never falls through on a timer.
+                wait_until_blocking(Path(continue_path).exists, what="test allowing the paused notification to continue")
         def observed_run(admission, authority):
             return original_run(admission, authority, process_observer=observe)
         # A request parent must have no HTTP contact before local production.

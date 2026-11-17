@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from config.settings import settings
 from src.guardian.opportunity_contracts import EvidenceSource, OpportunityEvidence, OpportunityError, digest, json_bytes
 from src.workspace import canonical_workspace_root
+from src.utils.background import track_task
 
 CAPABILITY = "guardian.opportunity-assess.v1"
 JOB_KIND = "guardian_opportunity_assess"
@@ -944,7 +945,7 @@ async def run_opportunity_tick():
                 finally:
                     _executions.pop(identifier, None)
 
-            task = asyncio.create_task(run(), name=f"guardian-opportunity:{row.id}")
+            task = track_task(run(), name=f"guardian-opportunity:{row.id}")
             _executions[row.id] = task
             started += 1
             if started >= 16:

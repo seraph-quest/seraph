@@ -236,7 +236,14 @@ def _bounded_git(command, *, stage, env, data, deadline, guard_fd=None, process_
     except BaseException:
         # This is the directly owned fixed Git child, never a recovered PID.
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except PermissionError:
+                # Darwin refuses killpg while the group leader is exiting (a
+                # zombie). Signal the leader itself, which still succeeds, so
+                # the wait below reaps it instead of Popen.__del__ (#1223). A
+                # leader that really refuses signals still raises here.
+                process.kill()
         process.wait(timeout=5)
         raise
     finally:

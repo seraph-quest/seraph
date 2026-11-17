@@ -1,6 +1,7 @@
 """Settings API — runtime mode management."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from sqlmodel import col, select
 from config.settings import RepoSandboxSettings, settings
 from src.db.engine import get_session as get_db
 from src.db.models import MemoryEpisode, ScreenObservation, UserProfile
+from src.utils.clock import get_clock
 from src.local_runtime_profile_verifier import (
     PROFILE_VERIFIER_VERSION,
     latest_local_runtime_profile_proof,
@@ -501,7 +503,7 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
             parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
-            status["alive"] = (datetime.now(timezone.utc) - parsed).total_seconds() < max_age_seconds
+            status["alive"] = (get_clock().now(timezone.utc) - parsed).total_seconds() < max_age_seconds
         except ValueError:
             status["alive"] = False
     return status
@@ -517,7 +519,7 @@ def _strip_derived_screen_fields(payload: dict[str, object], *, explicit_provide
     state and is never persisted here."""
     selected = payload.pop("provider_selected", None)
     for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff",
-            "near_tee_vision_available"):
+            "near_tee_vision_available", "settings_unreadable"):
         payload.pop(derived, None)
     if payload.get("provider") in {"", None} and selected == "near_tee" and not explicit_provider:
         # Keep the operator's NEAR TEE choice across a temporarily unavailable slot.
@@ -547,7 +549,7 @@ async def _choose_screenshot_folder_with_native_dialog() -> str:
     except OSError as exc:
         raise HTTPException(status_code=503, detail="Native folder picker is unavailable") from exc
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+        stdout, stderr = await get_clock().wait_for(process.communicate(), timeout=90)
     except asyncio.TimeoutError as exc:
         process.kill()
         await process.communicate()
@@ -602,9 +604,14 @@ def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
 
 
 def _screenshot_folder_summary(root: Path) -> dict[str, object]:
-    from src.observer.screenshot_folder_source import SUPPORTED_IMAGE_EXTENSIONS, _capture_timestamp
+    from src.observer.screenshot_folder_source import (
+        LOCAL_CAPTURE_UPLOAD_DIRNAME,
+        SUPPORTED_IMAGE_EXTENSIONS,
+        _capture_timestamp,
+    )
 
     resolved_root = root.resolve()
+    capture_store_root = root / LOCAL_CAPTURE_UPLOAD_DIRNAME
     if not root.exists():
         return {
             "status": "not_found",
@@ -613,6 +620,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "last_image_at_source": None,
             "exists": False,
             "readable": False,
+            "capture_store_bytes": 0,
+            "capture_store_file_count": 0,
         }
     if not root.is_dir():
         return {
@@ -622,14 +631,23 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "last_image_at_source": None,
             "exists": True,
             "readable": False,
+            "capture_store_bytes": None,
+            "capture_store_file_count": None,
         }
     image_count = 0
     latest_captured_at: datetime | None = None
     latest_captured_at_source: str | None = None
+    capture_store_bytes = 0
+    capture_store_file_count = 0
     try:
         for path in root.rglob("*"):
             if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
                 image_count += 1
+                if path.is_relative_to(capture_store_root) and not path.is_symlink():
+                    # Same walk: the private daemon upload store's usage.
+                    with contextlib.suppress(FileNotFoundError):
+                        capture_store_bytes += path.lstat().st_size
+                        capture_store_file_count += 1
                 captured_at, captured_at_source = _capture_timestamp(path, resolved_root)
                 if latest_captured_at is None or captured_at > latest_captured_at:
                     latest_captured_at = captured_at
@@ -643,6 +661,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "last_image_at_source": None,
             "exists": True,
             "readable": False,
+            "capture_store_bytes": None,
+            "capture_store_file_count": None,
         }
     return {
         "status": "ready" if image_count else "empty",
@@ -653,6 +673,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
         "readable": True,
         "summary_status": "ready",
         "summary_failure": None,
+        "capture_store_bytes": capture_store_bytes,
+        "capture_store_file_count": capture_store_file_count,
     }
 
 
@@ -668,12 +690,14 @@ def _fallback_screenshot_folder_summary(root: Path, *, status: str) -> dict[str,
         "readable": readable,
         "summary_status": "partial",
         "summary_failure": status,
+        "capture_store_bytes": None,
+        "capture_store_file_count": None,
     }
 
 
 async def _screenshot_folder_summary_fast(root: Path) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             asyncio.to_thread(_screenshot_folder_summary, root),
             timeout=_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S,
         )
@@ -919,7 +943,7 @@ def _screenshot_visual_run_summary(details_payloads: list[str]) -> dict[str, int
 
 async def _screenshot_folder_pipeline_summary_fast(root: Path | None = None) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             _screenshot_folder_pipeline_summary(root),
             timeout=_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S,
         )
@@ -953,7 +977,7 @@ def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
 
 async def _report_receipt_summary_fast(report_dir: Path) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             asyncio.to_thread(_report_receipt_summary, report_dir),
             timeout=_REPORT_RECEIPT_SUMMARY_TIMEOUT_S,
         )
@@ -1017,7 +1041,7 @@ def _local_runtime_profile_proof_summary() -> dict[str, object]:
 
 async def _local_runtime_profile_proof_summary_fast() -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             asyncio.to_thread(_local_runtime_profile_proof_summary),
             timeout=_LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S,
         )
@@ -1103,7 +1127,7 @@ async def set_interruption_mode(body: InterruptionModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.interruption_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     ctx = context_manager.get_context()
@@ -1117,7 +1141,13 @@ async def set_interruption_mode(body: InterruptionModeRequest):
 @router.get("/settings/screen-analysis")
 async def get_screen_analysis_settings():
     """Return screenshot analysis settings for local image-folder ingestion."""
-    return _read_screen_analysis_settings()
+    payload = _read_screen_analysis_settings()
+    if payload.get("settings_unreadable"):
+        # The stored limits are unknown: omit them so the daemon keeps the last
+        # limits it received instead of pruning its archive on defaults.
+        payload.pop("archive_retention_days", None)
+        payload.pop("archive_max_mb", None)
+    return payload
 
 
 @router.put("/settings/screen-analysis")
@@ -1181,6 +1211,14 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
             if value < 0:
                 raise HTTPException(status_code=422, detail=f"{field_name} must be >= 0")
             payload[field_name] = value
+    from src.observer.local_capture_upload import MIN_CAPTURE_STORE_CAP_MB
+
+    if body.archive_max_mb is not None and 0 < body.archive_max_mb < MIN_CAPTURE_STORE_CAP_MB:
+        # One capture may be up to 8 MiB: a smaller cap would delete every new file.
+        raise HTTPException(
+            status_code=422,
+            detail=f"archive_max_mb must be 0 (no cap) or at least {MIN_CAPTURE_STORE_CAP_MB}",
+        )
     if body.archive_retention_days is not None:
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
@@ -1299,6 +1337,11 @@ async def get_artifact_storage_settings():
         }
     )
     screen_analysis = await get_screen_analysis_settings()
+    from src.observer.local_capture_upload import MIB, capture_store_limits
+
+    capture_store_limit_values = capture_store_limits()
+    capture_store_max_mb = capture_store_limit_values[0] // MIB if capture_store_limit_values else None
+    capture_store_retention_days = capture_store_limit_values[1] if capture_store_limit_values else None
     vlm_status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
     chat_policy = effective_workload_policy("chat_agent")
     inference_policy = {
@@ -1355,6 +1398,16 @@ async def get_artifact_storage_settings():
             "summary_status": screenshot_source.get("summary_status", "ready"),
             "summary_failure": screenshot_source.get("summary_failure"),
             "stored_artifacts": ["image"],
+            "capture_store": {
+                "bytes": screenshot_source.get("capture_store_bytes"),
+                "file_count": screenshot_source.get("capture_store_file_count"),
+                "max_mb": capture_store_max_mb,
+                "retention_days": capture_store_retention_days,
+                "cap_scope": "per_store",
+                "enforced_by": "backend",
+                # "settings_unreadable": limits unknown, so nothing is pruned.
+                "limits_status": "ready" if capture_store_limit_values else "settings_unreadable",
+            },
             "analysis": {
                 "provider": effective_screen_analysis_provider() or "not_configured",
                 "model": effective_screen_analysis_model(),
@@ -1582,7 +1635,7 @@ async def set_tool_policy_mode(body: ToolPolicyModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.tool_policy_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     return {"mode": body.mode}
@@ -1623,7 +1676,7 @@ async def set_mcp_policy_mode(body: McpPolicyModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.mcp_policy_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     return {"mode": body.mode}
@@ -1650,7 +1703,7 @@ async def set_approval_mode(body: ApprovalModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.approval_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     return {"mode": body.mode}

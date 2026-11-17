@@ -254,17 +254,10 @@ async def _unverified_attempt(db, task: WorkBoardTask) -> WorkBoardAttempt:
     return attempt
 
 
-def _patch_m5_sessions(monkeypatch, async_db) -> None:
-    monkeypatch.setattr(m5, "get_session", async_db)
-    monkeypatch.setattr("src.guardian.goal_conditioned_loop.get_session", async_db)
-    monkeypatch.setattr("src.goals.repository.get_session", async_db)
-
-
 async def _accepted_m5_memory_with_later_receipt(async_db, monkeypatch, *, goal_id: str):
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id=goal_id)
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
         owner_session_id=OWNER.session_id,
@@ -327,7 +320,6 @@ async def test_fresh_conversation_uses_accepted_correction(async_db, monkeypatch
         )
         db.add(prior_memory)
         await db.flush()
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -494,7 +486,6 @@ async def test_rotated_m5_key_blocks_learning_with_recovery_reason(async_db, mon
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id="m5-rotated-key-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -547,7 +538,6 @@ async def test_rotated_m5_key_can_reverify_source_and_require_fresh_acceptance(a
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id="m5-rotated-key-recovery-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
         owner_session_id=OWNER.session_id,
@@ -925,7 +915,6 @@ async def test_tampered_source_baseline_blocks_later_decision(async_db, monkeypa
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id="m5-tampered-baseline-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
         owner_session_id=OWNER.session_id,
@@ -1027,7 +1016,6 @@ async def test_missing_m5_key_returns_recovery_http_error_after_quarantine(async
     async with async_db() as db:
         goal, source, _later = await _goal_and_tasks(db, goal_id="m5-missing-key-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
         owner_session_id=OWNER.session_id,
@@ -1069,7 +1057,6 @@ async def test_missing_m5_key_blocks_and_persists_new_source_and_decision_receip
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id="m5-create-receipt-key-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
     monkeypatch.setattr(
         memory_api,
         "authenticated_memory_context",
@@ -1218,7 +1205,6 @@ async def test_m5_export_restore_preserves_scope_for_later_decision(async_db, mo
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id="m5-recovery-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=operator.principal.principal_id,
@@ -1325,7 +1311,6 @@ async def test_m5_export_restore_preserves_recovery_generation_for_later_decisio
             db, goal_id="m5-recovery-roundtrip-goal"
         )
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=operator.principal.principal_id,
@@ -1668,7 +1653,6 @@ async def test_m5_restore_blocks_rehashed_forged_selection_binding(
     async with async_db() as db:
         goal, source, later = await _goal_and_tasks(db, goal_id="m5-forged-binding-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=operator.principal.principal_id,
@@ -1811,7 +1795,6 @@ async def test_rehashed_correction_target_cannot_change_acceptance_or_rollback(a
         )
         db.add(prior)
         await db.flush()
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=operator.principal.principal_id,
@@ -1988,7 +1971,6 @@ async def test_m5_rollback_accepts_unchanged_normalized_correction_target(async_
         )
         db.add(prior)
         await db.flush()
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=operator.principal.principal_id,
@@ -2036,7 +2018,6 @@ async def test_stale_source_fence_rejects_edit_accept(async_db, monkeypatch):
     async with async_db() as db:
         goal, source, _later = await _goal_and_tasks(db, goal_id="m5-stale-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -2090,7 +2071,6 @@ async def test_stale_goal_or_task_revision_rejects_accept(
             db, goal_id=f"m5-stale-{stale_entity}-goal"
         )
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
         owner_session_id=OWNER.session_id,
@@ -2131,7 +2111,6 @@ async def test_cross_owner_or_session_denied(async_db, monkeypatch):
     async with async_db() as db:
         goal, source, _later = await _goal_and_tasks(db, goal_id="m5-owner-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     with pytest.raises(PermissionError):
         await m5.create_memory_proposal(
@@ -2168,7 +2147,6 @@ async def test_unverified_readback_records_no_learning(async_db, monkeypatch):
     async with async_db() as db:
         _goal, source, _later = await _goal_and_tasks(db, goal_id="m5-no-learning-goal")
         attempt = await _unverified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     result = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -2200,7 +2178,6 @@ async def test_verified_outcome_proposes_correction(async_db, monkeypatch):
     async with async_db() as db:
         _goal, source, _later = await _goal_and_tasks(db, goal_id="m5-proposal-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -2236,7 +2213,6 @@ async def test_reject_and_rollback_preserve_audit(async_db, monkeypatch):
     async with async_db() as db:
         goal, source, _later = await _goal_and_tasks(db, goal_id="m5-reject-goal")
         attempt = await _verified_attempt(db, source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     rejected_proposal = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -2375,7 +2351,6 @@ async def test_unknown_effect_records_no_learning(async_db, monkeypatch):
         db.add(run)
         db.add(source)
         await db.flush()
-    _patch_m5_sessions(monkeypatch, async_db)
 
     result = await m5.create_memory_proposal(
         owner_principal_id=OWNER.principal_id,
@@ -2477,7 +2452,6 @@ async def test_conflicting_accepted_memories_do_not_change_later_candidate(async
         await db.flush()
         first_attempt = await _verified_attempt(db, source)
         second_attempt = await _verified_attempt(db, second_source)
-    _patch_m5_sessions(monkeypatch, async_db)
 
     for task, attempt, candidate_text in (
         (source, first_attempt, "First verified preference candidate."),

@@ -28,8 +28,6 @@ async def test_auto_root_witness_is_separate_from_request_bearer_and_rechecks_ra
             source_packet_id='packet', source_digest='a'*64, source_token_json='{}', dedupe_key='auto',
             status='proposed', expires_at=current+timedelta(minutes=7), assessment_deadline_at=current))
         await db.commit()
-    monkeypatch.setattr(auth, 'get_session', async_db)
-    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
     enabled = True
     async def source_policy(*args, **kwargs):
         return None, None, None, SimpleNamespace(auto_stage_plan=enabled), None
@@ -113,8 +111,6 @@ async def test_output_persistence_rechecks_original_owner_in_same_writer(async_d
             sequence=1, priority=50, deadline_at=current+timedelta(minutes=5), state='unknown',
             job_fencing_token=1, contact_started_at=current))
         await db.commit()
-    monkeypatch.setattr(auth, 'get_session', async_db)
-    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
     operator = await auth.authenticate_session('persist-root', touch=False)
     owner = WorkBoardOwner(principal_id=principal, session_id='persist-root')
     enabled = True
@@ -334,7 +330,6 @@ async def test_optional_postcommit_auto_stage_root_revocation_has_no_new_effect(
         raise auth.AuthFailure('root_revoked')
     async def forbidden_generation(**kwargs):
         raise AssertionError('revoked Root must not stage another card or contact')
-    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
     monkeypatch.setattr(plans, 'assert_opportunity_current', policy_prerequisite)
     monkeypatch.setattr(auth, 'authenticate_session', revoked_root)
     monkeypatch.setattr(plans, 'generate_plan', forbidden_generation)
@@ -368,7 +363,6 @@ async def test_work_get_does_not_finalize_expired_or_unverified_contact(async_db
         await db.commit()
     async def forbidden_finalizer(*args, **kwargs):
         raise AssertionError('unverified or expired output cannot reach finalization')
-    monkeypatch.setattr(plans.db_engine, 'get_session', async_db)
     monkeypatch.setattr(plans, '_finalize_plan', forbidden_finalizer)
     reason = await plans.reconcile_generated_plan(WorkBoardOwner(principal_id='owner', session_id='root'),
         'orphan-proposal', operator=object())

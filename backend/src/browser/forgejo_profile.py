@@ -26,6 +26,7 @@ from src.browser.forgejo_issue_title import (
 from src.security.http_transport import (
     _TransportLifecycleMarker, default_resolver, request_pinned_https,
 )
+from src.utils.background import track_task
 
 
 @dataclass(frozen=True)
@@ -373,7 +374,7 @@ class ForgejoTitleBrowser:
                     try: await route_guard(route, request)
                     finally: route_handlers.discard(task)
                 await context.route("**/*", tracked_route)
-                context.on("page", lambda other: asyncio.create_task(other.close()) if other != page else None)
+                context.on("page", lambda other: track_task(other.close(), name="forgejo-profile:close-popup") if other != page else None)
                 await page.goto(ORIGIN+target.page_path, wait_until="domcontentloaded", timeout=10000)
                 await page.locator("body:not(.no-js)").wait_for(timeout=5000)
                 if route_failure is not None: raise route_failure

@@ -1,15 +1,17 @@
+import asyncio
 import json
 import logging
 import os
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from typing import AsyncGenerator, Callable, Iterable, Iterator
 
 from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
@@ -18,17 +20,6 @@ from src.workspace import canonical_workspace_database_path, canonical_workspace
 
 _db_path = str(canonical_workspace_database_path(settings.workspace_dir))
 _db_url = f"sqlite+aiosqlite:///{_db_path}"
-
-engine = create_async_engine(
-    _db_url,
-    echo=settings.database_echo,
-    connect_args={"check_same_thread": False},
-    pool_size=20,
-    max_overflow=0,
-    pool_timeout=3,
-    pool_pre_ping=True,
-)
-
 
 _SQLITE_BUSY_TIMEOUT_MS = 5000
 _BOUNDED_LOCK_WAIT_MARKER = "seraph_bounded_lock_wait"
@@ -50,9 +41,6 @@ def _restore_sqlite_busy_timeout(dbapi_connection, connection_record, _connectio
         cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
         cursor.close()
 
-
-event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
-event.listen(engine.sync_engine, "checkout", _restore_sqlite_busy_timeout)
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +89,33 @@ def _forget_write_start(_dbapi_connection, connection_record) -> None:
     connection_record.info.pop(_WRITE_STARTED_AT, None)
 
 
-event.listen(engine.sync_engine, "before_cursor_execute", _note_write_start)
-event.listen(engine.sync_engine, "commit", _report_write_hold)
-event.listen(engine.sync_engine, "rollback", _report_write_hold)
-event.listen(engine.sync_engine, "checkin", _forget_write_start)
+def create_database_engine(url: str) -> AsyncEngine:
+    """Build a Seraph SQLite engine with the production pool and connection setup.
+
+    The canonical engine below is built here. Tests build their per-test file
+    databases with the same function, so they get the same pool, pragmas
+    (foreign keys, WAL, busy timeout) and writer-lock diagnostics (#1222).
+    """
+    database_engine = create_async_engine(
+        url,
+        echo=settings.database_echo,
+        connect_args={"check_same_thread": False},
+        pool_size=20,
+        max_overflow=0,
+        pool_timeout=3,
+        pool_pre_ping=True,
+    )
+    sync_engine = database_engine.sync_engine
+    event.listen(sync_engine, "connect", _configure_sqlite_connection)
+    event.listen(sync_engine, "checkout", _restore_sqlite_busy_timeout)
+    event.listen(sync_engine, "before_cursor_execute", _note_write_start)
+    event.listen(sync_engine, "commit", _report_write_hold)
+    event.listen(sync_engine, "rollback", _report_write_hold)
+    event.listen(sync_engine, "checkin", _forget_write_start)
+    return database_engine
+
+
+engine = create_database_engine(_db_url)
 
 
 async def bound_lock_wait(session: AsyncSession, milliseconds: int) -> None:
@@ -2109,6 +2120,42 @@ async def _ensure_forgejo_form_profiles(conn) -> None:
             await conn.exec_driver_sql(f"ALTER TABLE forgejo_connections ADD COLUMN {column} {sql_type}")
 
 
+_GITHUB_ACTIVITY_TABLES = ("github_activity_sources", "github_activity_runs", "github_activity_items")
+
+
+async def _set_aside_pre_identity_github_activity(conn) -> None:
+    """Set aside the unreleased principal-keyed #1264 slice-1 tables, keeping their rows.
+
+    Before review the GitHub activity tables were keyed to a per-login
+    principal; they are now keyed to the operator identity. A workspace that
+    ran the branch build has the old shape. Its tables are renamed to
+    ``<name>_pre_identity`` (rows kept for audit, their indexes dropped so the
+    model's index names are free) and ``create_all`` builds the new ones. An
+    old source is therefore off until the operator enables it again; nothing
+    is deleted and no old row grants anything.
+    """
+    result = await conn.exec_driver_sql("PRAGMA table_info(github_activity_sources)")
+    columns = {row[1] for row in result.fetchall()}
+    if not columns or "owner_identity_id" in columns:
+        return
+    for table in _GITHUB_ACTIVITY_TABLES:
+        exists = (await conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))).fetchone()
+        if exists is None:
+            continue
+        aside = f"{table}_pre_identity"
+        taken = (await conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (aside,))).fetchone()
+        if taken is not None:
+            aside = f"{aside}_{uuid.uuid4().hex[:8]}"
+        await conn.exec_driver_sql(f'ALTER TABLE "{table}" RENAME TO "{aside}"')
+        indexes = (await conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+            (aside,))).fetchall()
+        for (name,) in indexes:
+            await conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{name}"')
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -2147,6 +2194,7 @@ async def init_db() -> None:
         await _ensure_mail_columns(conn)
         await _ensure_connection_sync_columns(conn)
         await _ensure_forgejo_form_profiles(conn)
+        await _set_aside_pre_identity_github_activity(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)
@@ -2220,6 +2268,19 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     if factory is None:
         _require_state_gate_open()
         factory = async_session_factory
+    async with session_scope(factory) as session:
+        yield session
+
+
+@asynccontextmanager
+async def session_scope(
+    factory: Callable[[], AsyncSession],
+) -> AsyncGenerator[AsyncSession, None]:
+    """One unit of work on ``factory``: commit on success, roll back on error.
+
+    ``get_session`` runs every session through this after choosing the
+    factory. Tests that hold their own database handle use it directly.
+    """
     async with factory() as session:
         try:
             yield session
@@ -2236,6 +2297,30 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             session.info.pop("work_board_events_after_commit", None)
+            raise
+        except BaseException as original:
+            # Cancellation (and other BaseExceptions) must also discard the
+            # unit of work explicitly instead of relying on the session close
+            # (#1256). Drop the pending events first: that step cannot be
+            # interrupted, so nothing rolled back is ever published.
+            session.info.pop("work_board_events_after_commit", None)
+            try:
+                # Not shielded: a shielded rollback would keep running after a
+                # second cancel while the session closes underneath it. A
+                # second cancel interrupts the rollback instead, and the
+                # session close below still discards the transaction.
+                await session.rollback()
+            except asyncio.CancelledError:
+                # A second cancel only repeats a cancellation already under
+                # way. During GeneratorExit, KeyboardInterrupt or SystemExit
+                # it is new and propagates.
+                if not isinstance(original, asyncio.CancelledError):
+                    raise
+                logger.warning("session rollback was interrupted", exc_info=True)
+            except Exception:
+                # The original exception is what the caller must see; a
+                # failed rollback must not replace it.
+                logger.warning("session rollback failed", exc_info=True)
             raise
 
 

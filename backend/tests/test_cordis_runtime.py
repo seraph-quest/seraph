@@ -20,6 +20,7 @@ from src.runtime_plugins.bridge import CordisHost, HostBlocked, Pending
 from src.runtime_plugins.composition import BUILD_FILES, CHILD_ENV, PACKAGE_FILES, PACKAGE_ROOT, CompositionBlocked, reviewed_composition, reviewed_node, validate_profile
 from src.runtime_plugins.protocol import ProtocolError, decode_json, encode_frame, read_frame, validate_frame
 from src.runtime_plugins.cli import _npm_env, build, reviewed_npm
+from tests.support.sync import within
 
 
 def hello():
@@ -323,10 +324,23 @@ class ActualHostTests(unittest.IsolatedAsyncioTestCase):
         verified = await self.host.refresh_status()
         pid = self.host.process.pid
         os.kill(pid, signal.SIGSTOP)
-        started = time.monotonic()
+        # The original deadline (well below the 4 s refresh cap) is what bounds
+        # the hung request: the status frame sent to the stopped child carries
+        # exactly that deadline, and the refresh returns at all (a hang fails
+        # at the liveness bound). No elapsed-time oracle.
+        frames = []
+
+        def recording_encode(frame):
+            frames.append(frame)
+            return encode_frame(frame)
+
+        original_deadline = int(time.time() * 1000) + 1000
         try:
-            receipt = await self.host.refresh_status(deadline_at=int(time.time() * 1000) + 100)
-            self.assertLess(time.monotonic() - started, 1)
+            with patch("src.runtime_plugins.bridge.encode_frame", recording_encode):
+                receipt = await within(self.host.refresh_status(deadline_at=original_deadline),
+                                       what="refresh against a stopped child returning")
+            status_frames = [frame for frame in frames if frame.get("method") == "runtime.status"]
+            self.assertEqual([frame["deadline_at"] for frame in status_frames], [original_deadline])
             self.assertEqual(receipt["state"], "blocked")
             self.assertNotEqual(receipt["readiness"]["state"], "verified")
             self.assertEqual(receipt["readiness"]["checked_at"], verified["readiness"]["checked_at"])

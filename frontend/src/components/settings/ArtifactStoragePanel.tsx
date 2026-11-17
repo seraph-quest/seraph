@@ -61,6 +61,16 @@ interface VlmProbeEndpoint {
   error: string;
 }
 
+interface CaptureStoreUsage {
+  bytes: number | null;
+  file_count: number | null;
+  max_mb: number | null;
+  retention_days: number | null;
+  cap_scope?: string;
+  enforced_by?: string;
+  limits_status?: string;
+}
+
 interface ArtifactStorageSettings {
   inference?: {
     provider: string;
@@ -92,6 +102,7 @@ interface ArtifactStorageSettings {
     exists: boolean;
     readable: boolean;
     stored_artifacts: string[];
+    capture_store?: CaptureStoreUsage;
     analysis?: {
       provider: string;
       model: string;
@@ -511,6 +522,34 @@ function ArtifactRow({
       </div>
     </div>
   );
+}
+
+function formatStoreBytes(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  if (bytes === 0) return "0 MiB";
+  if (mib < 1) return `${Math.max(1, Math.round(bytes / 1024))} KiB`;
+  if (mib < 10) return `${mib.toFixed(1)} MiB`;
+  return `${Math.round(mib)} MiB`;
+}
+
+export function captureStoreLabel(store: CaptureStoreUsage): string {
+  if (store.max_mb === null || store.retention_days === null) {
+    const used = store.bytes === null || store.bytes === undefined ? "usage unavailable" : formatStoreBytes(store.bytes);
+    return `${used} · limits unavailable (settings file unreadable) · nothing pruned`;
+  }
+  const kept = `kept ${store.retention_days} days`;
+  const cap = store.max_mb > 0 ? `${store.max_mb} MiB cap` : "no size cap";
+  if (store.bytes === null || store.bytes === undefined) {
+    return `usage unavailable · ${cap} · ${kept}`;
+  }
+  return store.max_mb > 0
+    ? `${formatStoreBytes(store.bytes)} of ${cap} · ${kept}`
+    : `${formatStoreBytes(store.bytes)} · ${cap} · ${kept}`;
+}
+
+function captureStoreTone(store: CaptureStoreUsage): "normal" | "good" | "warn" {
+  if (store.bytes === null || store.bytes === undefined || store.max_mb === null) return "warn";
+  return store.max_mb > 0 && store.bytes > store.max_mb * 1024 * 1024 ? "warn" : "normal";
 }
 
 function screenshotFolderDisplayPath(path: string | null): string {
@@ -1084,6 +1123,13 @@ export function ArtifactStoragePanel() {
                   tone={screenshotFolderSource.auto_ingest_enabled ? "good" : "normal"}
                 />
                 <ArtifactRow label="Reads" value="local image files only" tone="good" />
+                {screenshotFolderSource.capture_store && (
+                  <ArtifactRow
+                    label="Stored captures"
+                    value={captureStoreLabel(screenshotFolderSource.capture_store)}
+                    tone={captureStoreTone(screenshotFolderSource.capture_store)}
+                  />
+                )}
                 {screenshotFolderSource.analysis && (
                   <>
                     <ArtifactRow

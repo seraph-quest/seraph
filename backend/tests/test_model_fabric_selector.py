@@ -33,6 +33,7 @@ from src.model_fabric import (
     select_route,
 )
 from src.model_fabric.proofs import build_model_route_proof
+from tests.support.brokers import use_inference_broker
 from src.security.trust_contract import (
     AuthorityGrant,
     ContentOrigin,
@@ -54,8 +55,7 @@ def _legacy_provider_compatibility_mode(monkeypatch):
     # bounded broker while using its documented isolated-fixture constructor;
     # the production singleton and separate #909 accounting proofs stay intact.
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
-        RemoteInferenceAdmissionBroker(clock=lambda: 100.0, durable_accounting=False))
+    use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(clock=lambda: 100.0, durable_accounting=False))
 
 
 def _profile(*, remote: bool = False, **changes) -> ProviderProfile:
@@ -348,7 +348,7 @@ async def test_streaming_admission_rejection_does_not_fallback_to_second_candida
             if False:
                 yield "unreachable"
 
-    monkeypatch.setattr(execution, "gpu_admission_broker", SaturatedBroker())
+    use_inference_broker(monkeypatch, SaturatedBroker())
 
     async def transport(candidate, _body, _follow_redirects):
         transported.append(candidate.profile.id)
@@ -432,7 +432,7 @@ async def test_adapter_admission_rejection_persists_zero_attempt_denial_without_
             )
             raise GpuAdmissionCapacityError("GPU admission queue is full", receipt=receipt)
 
-    monkeypatch.setattr(execution, "gpu_admission_broker", SaturatedBroker())
+    use_inference_broker(monkeypatch, SaturatedBroker())
 
     async def adapter(_candidate, _follow_redirects):
         nonlocal transported

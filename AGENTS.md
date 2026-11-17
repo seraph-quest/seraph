@@ -146,15 +146,44 @@ on a cause (an event, gate or notification) instead. The only exemption is
 it covers sleeps and clock comparisons only, and each marker is itself counted,
 so adding one is a reviewed baseline edit. Use `--rename OLD NEW` for a renamed
 test file.
+Production time is an input (#1225): modules listed in `CLOCK_SEAM_MODULES` in
+that script read time and arm timers only through `src.utils.clock.get_clock()`
+(the check fails on the direct reads and asyncio timers it recognises there). Tests install the explicit-
+advance `FakeClock` with the `fake_clock` fixture from `tests/support/clock.py`
+and move time with `advance`, never by waiting.
+A test that touches the database requests the `db` fixture
+(`backend/tests/support/db.py`, #1222). It installs a per-test SQLite file,
+built by the production engine factory, as the default database, so every
+`get_session` caller reaches it through the real gated path. Do not patch
+`get_session`: inject a failing or fake session with `install_session_factory`
+or `install_fake_session` from the same module, so the real `get_session` and
+`session_scope` still run (#1241). The injected factory serves every caller,
+request authentication included, so a failure aimed at one unit of work must
+check which session it is in and assert that it fired. A test that connects to
+the canonical engine fails; a connection made after its teardown fails the next
+test's setup (or the run) and names the test that left the work running.
 Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be
-narrow and name its issue. Until #1235, `tests/test_repo_repair_executors.py`
-leaks an unreaped child at session end (`TRACKED_LEAK_FILES` in
-`backend/scripts/run_backend_test_shard.py`) and gets its exception as `-W`
-from the shard runner only; run it with
-`uv run python scripts/run_backend_test_shard.py --files tests/test_repo_repair_executors.py`,
-since plain `uv run pytest` on it fails on the leak.
+narrow and name its issue. No test file carries a per-file leak exception
+(#1235 removed the last one); an owner that spawns a child reaps it and
+closes its pipes on every path.
+
+Process-global state is registered (#1223). Every module-level mutable in
+`backend/src` has an entry in `backend/tests/support/process_state_registry.py`
+(restored around every test, reset, or shared with a stated reason), and
+`tests/test_process_state_registry.py` fails on an unregistered one. It also
+fails on a dropped `create_task`/`ensure_future` handle in src: spawn
+background work with `src.utils.background.track_task`. A test fails at
+teardown if it leaves a task pending when its pytest-asyncio loop closes, a
+thread running, a registered lock held, or a child process running or
+unreaped. Read an HTTP body iterator through `contextlib.aclosing`.
+Exceptions live only in `backend/tests/support/leaks.py`, each naming its
+issue. Reach the remote-inference broker through
+`get_remote_inference_admission_broker()`; each test gets a fresh one, and a
+test installs its own with `tests.support.brokers.use_inference_broker`.
+`run_backend_test_shard.py --single-process [--reverse]` runs a whole shard in
+one process, in file order or reversed.
 
 Determinism lanes (#1220) never retry a test to turn a job green. A pull
 request's changed backend test files run 20 times under CPU contention in

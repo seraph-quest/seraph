@@ -51,6 +51,9 @@ from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
+from tests.support.brokers import use_inference_broker
+from tests.support.clock import fake_clock, timers_pending  # noqa: F401
+from tests.support.sync import Signal, settle, within
 
 # ADR-035: pins calendar vertical negatives whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -102,8 +105,7 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
     await DurableJobRepository().configure_inference_accounting(25_000)
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     from src.llm_runtime import _provider_profile
 
     proof_profile = _provider_profile("openrouter")
@@ -313,6 +315,7 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
         provider_requests=[],
         model_calls=[],
         model_started=threading.Event(),
+        model_reached=Signal("governed model transport reached"),
         model_release=threading.Event(),
         revocation_task=None,
     )
@@ -349,6 +352,7 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
         ctx.model_calls.append(dict(kwargs["body"]))
         if mode in {"revoke", "timeout"}:
             ctx.model_started.set()
+            ctx.model_reached.set()
             ctx.model_release.wait(timeout=10)
         message = SimpleNamespace(role="assistant", content=json.dumps(model_output))
         response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
@@ -379,14 +383,29 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
     return ctx
 
 
+def _late_model_callbacks() -> list[asyncio.Task]:
+    """Pending tracked tasks the dispatcher created for a timed-out model call."""
+
+    from src.utils import background
+
+    return [task for task in tuple(background._tasks)
+            if task.get_name() == "calendar_late_model_call" and not task.done()]
+
+
 async def _finish_background_model(ctx: SimpleNamespace) -> None:
-    """Release a deliberately blocked model thread and await revocation work."""
+    """Release a deliberately blocked model thread and await its late work.
+
+    After a model timeout the dispatcher owns the still-running callback as a
+    tracked task; draining tracked tasks waits for that callback, including
+    its receipt and accounting writes, before the fixture disposes the engine
+    (#1247).
+    """
 
     ctx.model_release.set()
     if ctx.revocation_task is not None:
         await asyncio.wait_for(ctx.revocation_task, timeout=5)
     if ctx.mode == "timeout":
-        await asyncio.sleep(0.1)
+        await settle(tracked=True)
 
 
 @pytest.mark.asyncio
@@ -491,18 +510,32 @@ async def test_calendar_real_vertical_tampered_artifact_cannot_terminally_succee
 @pytest.mark.asyncio
 async def test_calendar_real_vertical_model_timeout_keeps_root_liability_without_retry(
     accounting_db,
+    fake_clock,
     monkeypatch,
     tmp_path,
 ):
     tmp_path, _engine, factory = accounting_db
     async_db = factory.accounting_sessions
     ctx = await _seed_vertical(async_db, monkeypatch, tmp_path, mode="timeout")
-    try:
-        result = await ctx.dispatcher._admit_execute_direct(
+    admission = asyncio.create_task(
+        ctx.dispatcher._admit_execute_direct(
             ctx.claim,
             ctx.typed_input,
             runtime_seconds=1,
         )
+    )
+    try:
+        # The model call is in flight and parked in the provider transport;
+        # only then does the dispatcher's 1 s model wait expire (#1247).
+        await ctx.model_reached.wait(task=admission)
+        assert ctx.model_reached.is_set(), await admission
+        assert await timers_pending(fake_clock, what="the dispatcher parks on its model wait") == [1.0]
+        fake_clock.advance(1)
+        result = await within(admission, what="the timed-out admission returns")
+        # The model is still parked, so the dispatcher must own its late
+        # callback as a tracked task rather than an orphaned thread future.
+        late_callbacks = _late_model_callbacks()
+        assert [task.done() for task in late_callbacks] == [False]
         async with async_db() as db:
             root = (
                 await db.execute(
@@ -513,8 +546,13 @@ async def test_calendar_real_vertical_model_timeout_keeps_root_liability_without
                 )
             ).scalar_one()
     finally:
+        if not admission.done():
+            admission.cancel()
+            await asyncio.gather(admission, return_exceptions=True)
         await _finish_background_model(ctx)
 
+    assert all(task.done() for task in late_callbacks)
+    assert _late_model_callbacks() == []
     assert result["admitted"] is True
     assert result["completed"] is False
     assert result["blocked"] is True

@@ -1368,36 +1368,6 @@ async def _run_governed_completion_fixture(
     }
 
 
-EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
-    "src.db.engine.get_session",
-    "src.agent.session.get_session",
-    "src.approval.repository.get_session",
-    "src.audit.repository.get_session",
-    "src.goals.repository.get_session",
-    "src.guardian.feedback.get_session",
-    "src.observer.insight_queue.get_session",
-    "src.vault.repository.get_session",
-    "src.api.settings.get_db",
-    "src.api.profile.get_db",
-    "src.api.observer.get_session",
-    "src.api.capabilities.get_db",
-    "src.api.workflows.get_session",
-    "src.scheduler.jobs.memory_consolidation.get_session",
-    "src.scheduler.jobs.screenshot_observation_digest.get_session",
-    "src.scheduler.scheduled_jobs.get_session",
-    "src.observer.screenshot_folder_source.get_session",
-    "src.observer.screen_repository.get_session",
-    "src.workflows.durable_state.get_session",
-    "src.workflows.job_runtime.get_session",
-    "src.workflows.manager.get_session",
-    "src.workflows.production_workflow_guarantees.get_session",
-    "src.memory.repository.get_session",
-    "src.profile.service.get_db",
-    "src.memory.hybrid_retrieval.get_session",
-    "src.memory.decay.get_session",
-    "src.memory.flush.get_session",
-    "src.memory.superiority.get_session",
-)
 
 
 @dataclass(frozen=True)
@@ -1711,6 +1681,22 @@ def _isolated_eval_database(
     return _run
 
 
+class _SessionFactoryScope:
+    """``override_session_factory`` with the start/stop shape of a patch.
+
+    Listed first, so it is stopped last, after the tracked-task drain.
+    """
+
+    def __init__(self, factory):
+        self._scope = override_session_factory(factory)
+
+    def start(self):
+        self._scope.__enter__()
+
+    def stop(self):
+        self._scope.__exit__(None, None, None)
+
+
 def _make_sync_client_with_db():
     tmpdir = tempfile.mkdtemp(prefix="seraph-eval-")
     engine = create_async_engine(
@@ -1719,16 +1705,6 @@ def _make_sync_client_with_db():
         poolclass=StaticPool,
     )
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
 
     async def _test_init_db():
         async with engine.begin() as conn:
@@ -1741,8 +1717,11 @@ def _make_sync_client_with_db():
         finally:
             await engine.dispose()
 
-    patches = [patch(target, _get_session) for target in EVAL_SYNC_CLIENT_DB_PATCH_TARGETS]
-    patches.append(patch("src.runtime_plugins.worker.init_db", _test_init_db))
+    # The session-factory override reaches every get_session caller (and its
+    # get_db aliases) at call time. Patching each import site instead let a
+    # module first imported while the patch was active bind the fake for good,
+    # pointing later callers at this removed temporary database (#1223).
+    patches = [_SessionFactoryScope(factory), patch("src.runtime_plugins.worker.init_db", _test_init_db)]
     patches.append(patch("src.runtime_plugins.worker.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))

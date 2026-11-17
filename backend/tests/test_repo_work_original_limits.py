@@ -16,6 +16,8 @@ from src.workflows.repo_repair_source import (
 )
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
+from tests.support.clock import fake_clock  # noqa: F401
+from tests.support.sync import assert_blocked, suspended_in
 from tests.test_repo_work_task_publication import actual_native_source, _actual_source_callback_journey
 
 
@@ -127,7 +129,8 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
     from src.model_fabric.configuration import read_model_fabric_configuration
     # Each pytest case has a different event loop. All real owners import
     # this same configuration lock; no Source authority is replaced.
-    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", asyncio.Lock())
+    mutation_lock = asyncio.Lock()
+    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", mutation_lock)
     factory, owner, service, jobs, binding, _ = await actual_native_source(accounting_db, monkeypatch,
         goal_capacity=2, claim_child=False,
         work_limits={"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.000050})
@@ -160,9 +163,13 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
         SimpleNamespace(state=SimpleNamespace(operator=operator)),
         SimpleNamespace(grant_id="provider_policy:near_tee", expected_revision=configured.egress_revision,
             idempotency_key="actual-automatic-stop-revoke")))
-    await asyncio.sleep(0.1)
-    assert not mutation.done()
-    release.set()
+    try:
+        # The policy mutation is parked on the configuration mutation lock the
+        # automatic stop writer holds, not merely slow.
+        await assert_blocked(mutation, at=lambda: mutation_lock.locked() and suspended_in(mutation, "Lock.acquire"),
+                             what="policy revoke waits for the automatic stop writer")
+    finally:
+        release.set()
     outcome = await asyncio.wait_for(preparing, timeout=15)
     actual_mutation = await asyncio.wait_for(mutation, timeout=15)
     assert actual_mutation["status"] == "revoked"
@@ -178,12 +185,12 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cutoff_kind", ["repository_wall", "c1_wall", "goal_runtime", "goal_due", "goal_period"])
-async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_db, monkeypatch, repository_admission_signer, cutoff_kind):
+async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_db, monkeypatch, repository_admission_signer, cutoff_kind, fake_clock):
     from datetime import datetime, timedelta, timezone
     from src.work_board.contracts import TaskLimits
     from src.workflows.repo_repair_source import _repository_record
     from src.workflows.repo_repair_stop import stop_repository_root
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     task_limits = TaskLimits(max_inference_calls=5, max_cost_microusd=500,
         wall_seconds=10 if cutoff_kind == "c1_wall" else 900)
     work_limits = {"max_iterations": 3, "max_total_seconds": 10 if cutoff_kind == "repository_wall" else 900,
@@ -204,7 +211,8 @@ async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_
         cutoff = datetime.fromisoformat(before[0]["original_deadline_at"])
         native_before = await jobs._fetch(db, binding.invocation_id)
         original_fence, original_deadline = native_before.fencing_token, native_before.deadline_at
-    await asyncio.sleep(max(0, (cutoff - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+    # The original cutoff passes on the fake clock; nothing waits in real time.
+    fake_clock.advance(max(0, (cutoff - fake_clock.now(timezone.utc)).total_seconds()) + 0.05)
     reason = "goal_limit_exhausted" if cutoff_kind.startswith("goal_") else "deadline_exhausted"
     stopped = await stop_repository_root(service.repository_source_service, jobs, job_id=root_id,
         owner=owner, general_task_service=service, reason=reason)
@@ -224,10 +232,10 @@ async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_
 
 
 @pytest.mark.asyncio
-async def test_actual_later_goal_cutoff_cannot_govern_original_repository_stop(accounting_db, monkeypatch, repository_admission_signer):
+async def test_actual_later_goal_cutoff_cannot_govern_original_repository_stop(accounting_db, monkeypatch, repository_admission_signer, fake_clock):
     from datetime import datetime, timedelta, timezone
     from src.workflows.repo_repair_stop import stop_repository_root
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     factory, owner, service, jobs, binding, _ = await actual_native_source(
         accounting_db, monkeypatch, goal_capacity=2, claim_child=False,
         work_limits={"max_iterations": 3, "max_total_seconds": 10, "max_cost_usd": 0.0010019},
@@ -243,7 +251,8 @@ async def test_actual_later_goal_cutoff_cannot_govern_original_repository_stop(a
         cutoff = datetime.fromisoformat(original["original_deadline_at"])
         goal_cutoff = datetime.fromisoformat(limits["original_goal_limits"]["due_date"])
         assert cutoff < goal_cutoff
-    await asyncio.sleep(max(0, (goal_cutoff - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+    # The original cutoff passes on the fake clock; nothing waits in real time.
+    fake_clock.advance(max(0, (goal_cutoff - fake_clock.now(timezone.utc)).total_seconds()) + 0.05)
     reads = []
     original_read = source._read_private_artifact
     def forbidden_read(*args, **kwargs):
@@ -290,7 +299,7 @@ async def test_actual_original_zero_allowance_stops_before_contact(accounting_db
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["artifact_metadata", "artifact_ttl", "envelope_group", "envelope_source",
     "wrong_actor", "no_automatic_cause"])
-async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accounting_db, monkeypatch, repository_admission_signer, drift):
+async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accounting_db, monkeypatch, repository_admission_signer, drift, fake_clock):
     from datetime import datetime, timedelta, timezone
     from src.db.models import WorkBoardTask, WorkBoardInputArtifact
     from src.work_board.contracts import TaskLimits, WorkBoardOwner
@@ -308,14 +317,15 @@ async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accou
     async with factory() as db:
         root = await jobs._fetch(db, root_id)
         cutoff = datetime.fromisoformat(read_repository_original(root)[0]["original_deadline_at"])
-    await asyncio.sleep(max(0, (cutoff - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+    # The original cutoff passes on the fake clock; nothing waits in real time.
+    fake_clock.advance(max(0, (cutoff - fake_clock.now(timezone.utc)).total_seconds()) + 0.05)
     async with factory() as db:
         task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
         artifact = await db.get(WorkBoardInputArtifact, task.input_artifact_id)
         if drift == "artifact_metadata":
             artifact.metadata_digest = "0" * 64
         elif drift == "artifact_ttl":
-            artifact.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            artifact.expires_at = fake_clock.now(timezone.utc) - timedelta(seconds=1)
         elif drift.startswith("envelope_"):
             path = _payload_path(artifact)
             payload = json.loads(path.read_bytes())

@@ -31,14 +31,15 @@ from src.db.models import Goal, RepoRepairProposal as RepoRepairProposalRow, Rep
 from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxJob, build_repo_repair_executor
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
-from src.model_fabric import remote_inference_admission_broker
+from src.model_fabric import get_remote_inference_admission_broker
+from tests.support.brokers import use_inference_broker
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardOwner, WorkBoardTaskCreate
 from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_id
 from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import durable_job_repository
-from tests.conftest import _PATCH_TARGETS
 from tests.test_inference_accounting import accounting_db
+from tests.support.sync import wait_until
 
 
 CAPABILITY = "engineering.repo-repair.v1"
@@ -49,10 +50,7 @@ async def async_db(accounting_db, monkeypatch):
     """Route native APIs and workers to the existing canonical ledger fixture."""
 
     _root, _engine, factory = accounting_db
-    sessions = factory.accounting_sessions
-    for target in (*_PATCH_TARGETS, "src.workflows.repo_repair.get_session"):
-        monkeypatch.setattr(target, sessions)
-    yield sessions
+    yield factory.accounting_sessions
 
 
 def _repair_input() -> dict[str, Any]:
@@ -124,10 +122,14 @@ async def _wait_for_task_set(
 
     try:
         ticks = 0
-        deadline = time.monotonic() + timeout
-        while any(not task.done() for task in tasks) and time.monotonic() < deadline:
+
+        def all_done() -> bool:
+            nonlocal ticks
             ticks += 1
-            await asyncio.sleep(0.01)
+            return all(task.done() for task in tasks)
+
+        await wait_until(all_done, what=description, bound=timeout,
+                         state=lambda: [task.get_name() for task in tasks if not task.done()])
         assert all(task.done() for task in tasks), description
         return list(await asyncio.gather(*tasks)), ticks
     finally:
@@ -508,105 +510,105 @@ def _publication_loaded_library_diagnostic(error: BaseException) -> dict[str, An
 _PUBLICATION_WORKER_GUARD_CANDIDATES = (
     ('process-group inspection is unavailable', 'worker_input_guard_79', '_process_group_members', 79),
     ('worker process-group cleanup exceeded the wall deadline', 'worker_input_guard_111', '_wait_process_group_quiescent', 111),
-    ('worker process cleanup is unproven', 'worker_input_guard_130', '_terminate_and_reap_process', 130),
-    ('worker left a nested process running', 'worker_input_guard_154', '_reject_nested_process_group', 154),
-    ('snapshot directory changed or contains a symlink', 'worker_input_guard_182', '_open_directory_descriptor', 182),
-    ('trusted pytest package is unavailable', 'worker_input_guard_200', '_pytest_package_identity', 200),
-    ('trusted pytest package is not a regular file', 'worker_input_guard_204', '_pytest_package_identity', 204),
-    ('snapshot source path is invalid', 'worker_input_guard_228', '_open_source_regular_file', 228),
-    ('snapshot source is not a single-link regular file', 'worker_input_guard_241', '_open_source_regular_file', 241),
-    ('snapshot source identity changed before read', 'worker_input_guard_245', '_open_source_regular_file', 245),
-    ('snapshot source descriptor could not be opened', 'worker_input_guard_255', '_open_source_regular_file', 255),
-    ('job input could not be read', 'worker_input_guard_270', '_read_bounded_job_json', 270),
-    ('job input exceeds the fixed input limit', 'worker_input_guard_272', '_read_bounded_job_json', 272),
-    ('job input is not valid UTF-8 JSON', 'worker_input_guard_276', '_read_bounded_job_json', 276),
-    ('job input must be an object', 'worker_input_guard_278', '_read_bounded_job_json', 278),
-    ('snapshot source changed during read', 'worker_input_guard_284', '_assert_stable_file', 284),
-    ('empty or NUL path', 'worker_input_guard_290', '_safe_relative', 290),
-    ('path traversal is blocked', 'worker_input_guard_293', '_safe_relative', 293),
-    ('invalid relative path', 'worker_input_guard_296', '_safe_relative', 296),
-    ('snapshot depth limit exceeded', 'worker_input_guard_312', '_walk_tree', 312),
-    ('duplicate snapshot path', 'worker_input_guard_320', '_walk_tree', 320),
-    ('snapshot directory limit exceeded', 'worker_input_guard_331', '_walk_tree', 331),
-    ('snapshot file limit exceeded', 'worker_input_guard_337', '_walk_tree', 337),
-    ('snapshot byte limit exceeded', 'worker_input_guard_344', '_walk_tree', 344),
-    ('snapshot source could not be read', 'worker_input_guard_368', 'tree_digest', 368),
-    ('publication materialization exceeds file bound', 'worker_input_guard_389', '_publication_files', 389),
-    ('snapshot source could not be copied', 'worker_input_guard_414', '_copy_snapshot', 414),
-    ('test_args must be a non-empty list', 'worker_input_guard_423', '_validate_test_args', 423),
-    ('test argument limit exceeded', 'worker_input_guard_425', '_validate_test_args', 425),
-    ('invalid test argument', 'worker_input_guard_430', '_validate_test_args', 430),
-    ('test path is outside allowed_paths', 'worker_input_guard_438', '_validate_test_args', 438),
-    ('pytest must name an allowed test path', 'worker_input_guard_441', '_validate_test_args', 441),
-    ('allowed_paths must be a non-empty list', 'worker_input_guard_448', '_validate_allowed_paths', 448),
-    ('allowed_paths limit exceeded', 'worker_input_guard_450', '_validate_allowed_paths', 450),
-    ('allowed_paths entries must be non-empty strings', 'worker_input_guard_454', '_validate_allowed_paths', 454),
-    ('allowed_paths entry exceeds the fixed length limit', 'worker_input_guard_456', '_validate_allowed_paths', 456),
-    ('allowed_paths entry exceeds the fixed length limit', 'worker_input_guard_459', '_validate_allowed_paths', 459),
-    ('allowed_paths contains duplicate entries', 'worker_input_guard_461', '_validate_allowed_paths', 461),
-    ('patch file header is unsupported', 'worker_input_guard_475', '_patch_header_path', 475),
-    ('patch path is not canonical', 'worker_input_guard_479', '_patch_header_path', 479),
-    ('patch byte limit exceeded', 'worker_input_guard_492', '_validate_patch_paths', 492),
-    ('patch must be UTF-8', 'worker_input_guard_496', '_validate_patch_paths', 496),
-    ('patch contains unsupported control bytes', 'worker_input_guard_498', '_validate_patch_paths', 498),
-    ('patch diff header is unsupported', 'worker_input_guard_510', '_validate_patch_paths', 510),
-    ('patch section requires ---/+++ file headers', 'worker_input_guard_525', '_validate_patch_paths', 525),
-    ('patch section header is inconsistent', 'worker_input_guard_533', '_validate_patch_paths', 533),
-    ('patch hunk header is malformed', 'worker_input_guard_542', '_validate_patch_paths', 542),
-    ('patch hunk is truncated', 'worker_input_guard_548', '_validate_patch_paths', 548),
-    ('patch hunk line is malformed', 'worker_input_guard_560', '_validate_patch_paths', 560),
-    ('patch hunk counts are inconsistent', 'worker_input_guard_562', '_validate_patch_paths', 562),
-    ('patch section has no text hunks', 'worker_input_guard_568', '_validate_patch_paths', 568),
-    ('patch names one path twice', 'worker_input_guard_570', '_validate_patch_paths', 570),
-    ('patch has no supported file paths', 'worker_input_guard_573', '_validate_patch_paths', 573),
-    ('exported diff does not match the tested tree paths', 'worker_input_guard_601', 'verify_exported_diff', 601),
-    ('base copy changed before diff verification', 'worker_input_guard_615', 'verify_exported_diff', 615),
-    ('exported diff content does not match the tested tree', 'worker_input_guard_627', 'verify_exported_diff', 627),
-    ('exported diff content does not match the tested tree', 'worker_input_guard_635', 'verify_exported_diff', 635),
-    ('changed path output exceeded limit', 'worker_input_guard_649', '_validate_changed_paths', 649),
-    ('git changed path output is missing approved patch paths', 'worker_input_guard_652', '_validate_changed_paths', 652),
-    ('git changed path output is malformed', 'worker_input_guard_655', '_validate_changed_paths', 655),
-    ('git changed path output contains an empty path', 'worker_input_guard_659', '_validate_changed_paths', 659),
-    ('git changed path is not UTF-8', 'worker_input_guard_663', '_validate_changed_paths', 663),
-    ('git changed path output is missing approved patch paths', 'worker_input_guard_669', '_validate_changed_paths', 669),
-    ('worker command is not in the fixed profile', 'worker_input_guard_687', '_run_fixed', 687),
-    ('worker wall deadline expired before process spawn', 'worker_input_guard_723', '_run_fixed', 723),
-    ('worker dispatch fence rejected process spawn', 'worker_input_guard_728', '_run_fixed', 728),
-    ('worker process identity observation failed', 'worker_input_guard_742', '_run_fixed', 742),
-    ('worker output cleanup exceeded the wall deadline', 'worker_input_guard_770', '_join_output_threads', 770),
-    ('worker wall deadline expired before process completion', 'worker_input_guard_777', '_run_fixed', 777),
-    ('worker terminal identity observation failed', 'worker_input_guard_789', '_run_fixed', 789),
-    ('worker terminal identity observation failed', 'worker_input_guard_799', '_run_fixed', 799),
-    ('output JSON limit exceeded', 'worker_input_guard_840', '_write_json', 840),
-    ('local worker output directory is not private', 'worker_input_guard_853', '_open_private_output_directory', 853),
-    ('local worker output name is invalid', 'worker_input_guard_864', '_write_private_output', 864),
-    ('local worker output file is not private', 'worker_input_guard_885', '_write_private_output', 885),
-    ('output JSON limit exceeded', 'worker_input_guard_900', '_write_worker_output_json', 900),
-    ('unsupported worker profile', 'worker_input_guard_926', 'run_job', 926),
-    ('worker backend kind is invalid', 'worker_input_guard_928', 'run_job', 928),
-    ('Docker worker executable is fixed', 'worker_input_guard_930', 'run_job', 930),
-    ('local worker executable is invalid', 'worker_input_guard_932', 'run_job', 932),
-    ('worker roots must be absolute', 'worker_input_guard_938', 'run_job', 938),
-    ('patch input could not be read', 'worker_input_guard_945', 'run_job', 945),
-    ('patch exceeds the fixed input limit', 'worker_input_guard_947', 'run_job', 947),
-    ('worker wall deadline expired before staging', 'worker_input_guard_957', 'run_job', 957),
-    ('worker wall deadline expired during staging', 'worker_input_guard_960', 'run_job', 960),
-    ('snapshot digest does not match the approved preview', 'worker_input_guard_965', 'run_job', 965),
-    ('base digest does not match the approved preview', 'worker_input_guard_968', 'run_job', 968),
-    ('worker image digest is required', 'worker_input_guard_971', 'run_job', 971),
-    ('patch digest does not match the approved artifact', 'worker_input_guard_975', 'run_job', 975),
-    ('local worker runtime identity changed', 'worker_input_guard_994', 'run_job', 994),
-    ('git init failed', 'worker_input_guard_1013', 'run_job', 1013),
-    ('git add failed', 'worker_input_guard_1027', 'run_job', 1027),
-    ('git baseline failed', 'worker_input_guard_1041', 'run_job', 1041),
-    ('patch check failed', 'worker_input_guard_1055', 'run_job', 1055),
-    ('patch apply failed', 'worker_input_guard_1068', 'run_job', 1068),
-    ('changed path staging failed', 'worker_input_guard_1125', 'run_job', 1125),
-    ('changed path export failed', 'worker_input_guard_1142', 'run_job', 1142),
-    ('diff export failed or exceeded limit', 'worker_input_guard_1158', 'run_job', 1158),
-    ('diff export is missing approved patch paths', 'worker_input_guard_1160', 'run_job', 1160),
-    ('exported diff does not apply to the base', 'worker_input_guard_1168', '_apply_exported', 1168),
-    ('actual bounded runtime execution proof invalid', 'worker_input_guard_1213', 'run_job', 1213),
+    ('worker process cleanup is unproven', 'worker_input_guard_149', '_terminate_and_reap_process', 149),
+    ('worker left a nested process running', 'worker_input_guard_173', '_reject_nested_process_group', 173),
+    ('snapshot directory changed or contains a symlink', 'worker_input_guard_201', '_open_directory_descriptor', 201),
+    ('trusted pytest package is unavailable', 'worker_input_guard_219', '_pytest_package_identity', 219),
+    ('trusted pytest package is not a regular file', 'worker_input_guard_223', '_pytest_package_identity', 223),
+    ('snapshot source path is invalid', 'worker_input_guard_247', '_open_source_regular_file', 247),
+    ('snapshot source is not a single-link regular file', 'worker_input_guard_260', '_open_source_regular_file', 260),
+    ('snapshot source identity changed before read', 'worker_input_guard_264', '_open_source_regular_file', 264),
+    ('snapshot source descriptor could not be opened', 'worker_input_guard_274', '_open_source_regular_file', 274),
+    ('job input could not be read', 'worker_input_guard_289', '_read_bounded_job_json', 289),
+    ('job input exceeds the fixed input limit', 'worker_input_guard_291', '_read_bounded_job_json', 291),
+    ('job input is not valid UTF-8 JSON', 'worker_input_guard_295', '_read_bounded_job_json', 295),
+    ('job input must be an object', 'worker_input_guard_297', '_read_bounded_job_json', 297),
+    ('snapshot source changed during read', 'worker_input_guard_303', '_assert_stable_file', 303),
+    ('empty or NUL path', 'worker_input_guard_309', '_safe_relative', 309),
+    ('path traversal is blocked', 'worker_input_guard_312', '_safe_relative', 312),
+    ('invalid relative path', 'worker_input_guard_315', '_safe_relative', 315),
+    ('snapshot depth limit exceeded', 'worker_input_guard_331', '_walk_tree', 331),
+    ('duplicate snapshot path', 'worker_input_guard_339', '_walk_tree', 339),
+    ('snapshot directory limit exceeded', 'worker_input_guard_350', '_walk_tree', 350),
+    ('snapshot file limit exceeded', 'worker_input_guard_356', '_walk_tree', 356),
+    ('snapshot byte limit exceeded', 'worker_input_guard_363', '_walk_tree', 363),
+    ('snapshot source could not be read', 'worker_input_guard_387', 'tree_digest', 387),
+    ('publication materialization exceeds file bound', 'worker_input_guard_408', '_publication_files', 408),
+    ('snapshot source could not be copied', 'worker_input_guard_433', '_copy_snapshot', 433),
+    ('test_args must be a non-empty list', 'worker_input_guard_442', '_validate_test_args', 442),
+    ('test argument limit exceeded', 'worker_input_guard_444', '_validate_test_args', 444),
+    ('invalid test argument', 'worker_input_guard_449', '_validate_test_args', 449),
+    ('test path is outside allowed_paths', 'worker_input_guard_457', '_validate_test_args', 457),
+    ('pytest must name an allowed test path', 'worker_input_guard_460', '_validate_test_args', 460),
+    ('allowed_paths must be a non-empty list', 'worker_input_guard_467', '_validate_allowed_paths', 467),
+    ('allowed_paths limit exceeded', 'worker_input_guard_469', '_validate_allowed_paths', 469),
+    ('allowed_paths entries must be non-empty strings', 'worker_input_guard_473', '_validate_allowed_paths', 473),
+    ('allowed_paths entry exceeds the fixed length limit', 'worker_input_guard_475', '_validate_allowed_paths', 475),
+    ('allowed_paths entry exceeds the fixed length limit', 'worker_input_guard_478', '_validate_allowed_paths', 478),
+    ('allowed_paths contains duplicate entries', 'worker_input_guard_480', '_validate_allowed_paths', 480),
+    ('patch file header is unsupported', 'worker_input_guard_494', '_patch_header_path', 494),
+    ('patch path is not canonical', 'worker_input_guard_498', '_patch_header_path', 498),
+    ('patch byte limit exceeded', 'worker_input_guard_511', '_validate_patch_paths', 511),
+    ('patch must be UTF-8', 'worker_input_guard_515', '_validate_patch_paths', 515),
+    ('patch contains unsupported control bytes', 'worker_input_guard_517', '_validate_patch_paths', 517),
+    ('patch diff header is unsupported', 'worker_input_guard_529', '_validate_patch_paths', 529),
+    ('patch section requires ---/+++ file headers', 'worker_input_guard_544', '_validate_patch_paths', 544),
+    ('patch section header is inconsistent', 'worker_input_guard_552', '_validate_patch_paths', 552),
+    ('patch hunk header is malformed', 'worker_input_guard_561', '_validate_patch_paths', 561),
+    ('patch hunk is truncated', 'worker_input_guard_567', '_validate_patch_paths', 567),
+    ('patch hunk line is malformed', 'worker_input_guard_579', '_validate_patch_paths', 579),
+    ('patch hunk counts are inconsistent', 'worker_input_guard_581', '_validate_patch_paths', 581),
+    ('patch section has no text hunks', 'worker_input_guard_587', '_validate_patch_paths', 587),
+    ('patch names one path twice', 'worker_input_guard_589', '_validate_patch_paths', 589),
+    ('patch has no supported file paths', 'worker_input_guard_592', '_validate_patch_paths', 592),
+    ('exported diff does not match the tested tree paths', 'worker_input_guard_620', 'verify_exported_diff', 620),
+    ('base copy changed before diff verification', 'worker_input_guard_634', 'verify_exported_diff', 634),
+    ('exported diff content does not match the tested tree', 'worker_input_guard_646', 'verify_exported_diff', 646),
+    ('exported diff content does not match the tested tree', 'worker_input_guard_654', 'verify_exported_diff', 654),
+    ('changed path output exceeded limit', 'worker_input_guard_668', '_validate_changed_paths', 668),
+    ('git changed path output is missing approved patch paths', 'worker_input_guard_671', '_validate_changed_paths', 671),
+    ('git changed path output is malformed', 'worker_input_guard_674', '_validate_changed_paths', 674),
+    ('git changed path output contains an empty path', 'worker_input_guard_678', '_validate_changed_paths', 678),
+    ('git changed path is not UTF-8', 'worker_input_guard_682', '_validate_changed_paths', 682),
+    ('git changed path output is missing approved patch paths', 'worker_input_guard_688', '_validate_changed_paths', 688),
+    ('worker command is not in the fixed profile', 'worker_input_guard_706', '_run_fixed', 706),
+    ('worker wall deadline expired before process spawn', 'worker_input_guard_742', '_run_fixed', 742),
+    ('worker dispatch fence rejected process spawn', 'worker_input_guard_747', '_run_fixed', 747),
+    ('worker process identity observation failed', 'worker_input_guard_761', '_run_fixed', 761),
+    ('worker output cleanup exceeded the wall deadline', 'worker_input_guard_800', '_join_output_threads', 800),
+    ('worker wall deadline expired before process completion', 'worker_input_guard_817', '_run_fixed', 817),
+    ('worker terminal identity observation failed', 'worker_input_guard_829', '_run_fixed', 829),
+    ('worker terminal identity observation failed', 'worker_input_guard_841', '_run_fixed', 841),
+    ('output JSON limit exceeded', 'worker_input_guard_913', '_write_json', 913),
+    ('local worker output directory is not private', 'worker_input_guard_926', '_open_private_output_directory', 926),
+    ('local worker output name is invalid', 'worker_input_guard_937', '_write_private_output', 937),
+    ('local worker output file is not private', 'worker_input_guard_958', '_write_private_output', 958),
+    ('output JSON limit exceeded', 'worker_input_guard_973', '_write_worker_output_json', 973),
+    ('unsupported worker profile', 'worker_input_guard_999', 'run_job', 999),
+    ('worker backend kind is invalid', 'worker_input_guard_1001', 'run_job', 1001),
+    ('Docker worker executable is fixed', 'worker_input_guard_1003', 'run_job', 1003),
+    ('local worker executable is invalid', 'worker_input_guard_1005', 'run_job', 1005),
+    ('worker roots must be absolute', 'worker_input_guard_1011', 'run_job', 1011),
+    ('patch input could not be read', 'worker_input_guard_1018', 'run_job', 1018),
+    ('patch exceeds the fixed input limit', 'worker_input_guard_1020', 'run_job', 1020),
+    ('worker wall deadline expired before staging', 'worker_input_guard_1030', 'run_job', 1030),
+    ('worker wall deadline expired during staging', 'worker_input_guard_1033', 'run_job', 1033),
+    ('snapshot digest does not match the approved preview', 'worker_input_guard_1038', 'run_job', 1038),
+    ('base digest does not match the approved preview', 'worker_input_guard_1041', 'run_job', 1041),
+    ('worker image digest is required', 'worker_input_guard_1044', 'run_job', 1044),
+    ('patch digest does not match the approved artifact', 'worker_input_guard_1048', 'run_job', 1048),
+    ('local worker runtime identity changed', 'worker_input_guard_1067', 'run_job', 1067),
+    ('git init failed', 'worker_input_guard_1086', 'run_job', 1086),
+    ('git add failed', 'worker_input_guard_1100', 'run_job', 1100),
+    ('git baseline failed', 'worker_input_guard_1114', 'run_job', 1114),
+    ('patch check failed', 'worker_input_guard_1128', 'run_job', 1128),
+    ('patch apply failed', 'worker_input_guard_1141', 'run_job', 1141),
+    ('changed path staging failed', 'worker_input_guard_1198', 'run_job', 1198),
+    ('changed path export failed', 'worker_input_guard_1215', 'run_job', 1215),
+    ('diff export failed or exceeded limit', 'worker_input_guard_1231', 'run_job', 1231),
+    ('diff export is missing approved patch paths', 'worker_input_guard_1233', 'run_job', 1233),
+    ('exported diff does not apply to the base', 'worker_input_guard_1241', '_apply_exported', 1241),
+    ('actual bounded runtime execution proof invalid', 'worker_input_guard_1286', 'run_job', 1286),
 )
 
 
@@ -794,9 +796,7 @@ async def _prepare_native_flow(
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
-    monkeypatch.setattr(sys.modules[__name__], "remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
 
     executor = build_repo_repair_executor()
     preflight = await asyncio.to_thread(executor.preflight)
@@ -1009,7 +1009,7 @@ async def test_local_native_repo_repair_api_vertical(client, async_db, tmp_path:
     assert approval_projection["local_host_execution_required"] is True
     assert pending_payload["memory_status"] == "no_learning"
 
-    broker_status = await remote_inference_admission_broker.status()
+    broker_status = await get_remote_inference_admission_broker().status()
     assert broker_status["active"] is None
     assert broker_status["queued"] == []
     durable_pending = await durable_job_repository.get_job(job_id)
@@ -1224,7 +1224,7 @@ async def test_local_native_two_goals_share_one_worker(
     assert high_payload["goal_id"] != low_payload["goal_id"]
     assert high_payload["proposal"]["approval_id"] != low_payload["proposal"]["approval_id"]
     assert high_payload["proposal"]["base_snapshot_digest"] == low_payload["proposal"]["base_snapshot_digest"]
-    broker_status = await remote_inference_admission_broker.status()
+    broker_status = await get_remote_inference_admission_broker().status()
     assert broker_status["active"] is None
     assert broker_status["queued"] == []
 
@@ -1369,12 +1369,10 @@ async def test_local_native_api_cancel_reconciles_same_job(
     task_before_payload = None
     cancel_sent = False
     try:
-        deadline = time.monotonic() + 45.0
-        while time.monotonic() < deadline:
-            child_pid = _marker_pid(nested_marker)
-            if child_pid is not None and _pid_is_running(child_pid):
-                break
-            await asyncio.sleep(0.02)
+        child_pid = await wait_until(
+            lambda: (pid := _marker_pid(nested_marker)) is not None and _pid_is_running(pid) and pid,
+            what="the native nested child published its private running marker",
+            task=dispatch_task, bound=45.0)
         assert child_pid is not None, "native nested child did not publish its private running marker"
         assert _pid_is_running(child_pid), "native nested child was not running at the cancel boundary"
 
@@ -1441,9 +1439,8 @@ async def test_local_native_api_cancel_reconciles_same_job(
 
         # The nested child and its staged checkout must be gone before accepting
         # either a terminal cancellation or an explicit unknown-effect recovery.
-        cleanup_deadline = time.monotonic() + 45.0
-        while time.monotonic() < cleanup_deadline and _pid_is_running(child_pid):
-            await asyncio.sleep(0.02)
+        await wait_until(lambda: not _pid_is_running(child_pid), bound=45.0,
+                         what="the nested child exits after cancel (it was cancelled while still active)")
         assert not _pid_is_running(child_pid), "cancel returned while the nested child was still active"
         staging = flow["workspace"] / "artifacts" / "repo-sandbox" / "staging"
         assert not any(staging.iterdir())
@@ -1532,13 +1529,10 @@ async def test_local_native_cancel_and_fresh_instance_reconcile(tmp_path: Path, 
     )
     execution = asyncio.create_task(asyncio.to_thread(executor.execute_job, job))
     try:
-        marker = None
-        deadline = time.monotonic() + 45.0
-        while time.monotonic() < deadline:
-            marker = executor._read_job_marker(job.job_id)
-            if marker and marker.get("phase") == "worker_started":
-                break
-            await asyncio.sleep(0.01)
+        marker = await wait_until(
+            lambda: (found := executor._read_job_marker(job.job_id)) and found.get("phase") == "worker_started" and found,
+            what="the native worker reached its durable start marker", bound=45.0,
+            state=lambda: executor._read_job_marker(job.job_id))
         assert marker and marker.get("phase") == "worker_started", marker
         cancel = await asyncio.to_thread(
             executor.cancel,

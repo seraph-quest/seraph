@@ -44,7 +44,8 @@ async def stock_current_method_lifetime(accounting_db, monkeypatch):
     # Its original database wrapper stays on this fixture's canonical factory.
     current = methods.CurrentMethod()
     monkeypatch.setattr(methods, 'current_method', current)
-    assert methods.database.get_session is accounting_db[2].accounting_sessions
+    # The single database seam (#1222) installed this fixture's file as the default.
+    assert methods.database.engine is accounting_db[1]
     try:
         yield current
     finally:

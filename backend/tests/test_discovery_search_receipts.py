@@ -3,13 +3,14 @@ from dataclasses import FrozenInstanceError, asdict
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
-import time
 
 import httpx
 import pytest
 
+from src.guardian import discovery_search as discovery_search_module
 from src.guardian.discovery_search import DiscoverySearch, DiscoverySearchBlocked, SEARCH_URL
 from src.guardian.research_plan_contracts import SearchManifestV1
+from tests.support.sync import Signal, within
 
 
 BODY = b'<a class="result__a" href="https://example.com/public">Public evidence</a>'
@@ -18,7 +19,9 @@ RUN_ID = "c8440f78-5b26-468f-8866-7ed6c797fbf6"
 
 @pytest.fixture
 def actual_search_http():
-    controls = {"bodies": [BODY], "delay": 0}
+    # ``hold``: a Signal the handler parks on before answering, so a request
+    # is outstanding until the test releases it (no wall-clock delay).
+    controls = {"bodies": [BODY], "hold": None}
     contacts = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -32,7 +35,8 @@ def actual_search_http():
             index = len(contacts)
             contacts.append(body)
             raw = controls["bodies"][min(index, len(controls["bodies"]) - 1)]
-            time.sleep(controls["delay"])
+            if controls["hold"] is not None:
+                controls["hold"].wait_blocking()
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
@@ -130,16 +134,33 @@ async def test_narrow_bytes_are_per_request_not_combined_stage_budget(actual_sea
     assert sum(receipt.byte_count for receipt in result.response_receipts) == 2 * len(BODY)
 
 
+def record_request_timeouts(monkeypatch):
+    """Record the timeout each actual search request is given."""
+
+    timeouts = []
+    original = discovery_search_module.request_pinned_https
+
+    async def recording(*args, timeout_seconds, **kwargs):
+        timeouts.append(timeout_seconds)
+        return await original(*args, timeout_seconds=timeout_seconds, **kwargs)
+
+    monkeypatch.setattr(discovery_search_module, "request_pinned_https", recording)
+    return timeouts
+
+
 @pytest.mark.asyncio
-async def test_narrow_seconds_are_per_request_with_original_wall_intersection(actual_search_http):
+async def test_narrow_seconds_are_per_request_with_original_wall_intersection(actual_search_http, monkeypatch):
     port, controls, contacts = actual_search_http
-    controls["delay"] = 0.6
-    start = time.monotonic()
+    timeouts = record_request_timeouts(monkeypatch)
+    # The original wall is consulted before each request: 5 s, then 4.4 s left.
+    remaining = iter([5, 4.4])
     result = await search_adapter(port).search(["first public query", "second public query"],
         run_id=RUN_ID, authority_check=allowed, max_search_seconds=1,
-        remaining_seconds=lambda: 5 - (time.monotonic() - start))
+        remaining_seconds=lambda: next(remaining))
     assert len(contacts) == 2 and len(result.response_receipts) == 2
-    assert time.monotonic() - start >= 1.2  # Aggregate one-second semantics would deny this.
+    # Each request gets the full one-second cap intersected with the original
+    # wall; aggregate one-second semantics would give the second request less.
+    assert timeouts == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -155,17 +176,24 @@ async def test_narrow_byte_overflow_has_no_complete_body_receipt(actual_search_h
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("remaining", [5, 0.15])
-async def test_narrow_time_or_original_wall_stops_actual_request_without_receipt(actual_search_http, remaining):
+async def test_narrow_time_or_original_wall_stops_actual_request_without_receipt(actual_search_http, monkeypatch,
+                                                                                remaining):
     port, controls, contacts = actual_search_http
-    controls["delay"] = 1.5
+    # The server holds its answer until released, so only the request's own
+    # timeout can end it.
+    controls["hold"] = Signal("search server answer released")
+    timeouts = record_request_timeouts(monkeypatch)
     observed = []
     async def receipt(value): observed.append(value)
-    start = time.monotonic()
-    with pytest.raises(DiscoverySearchBlocked, match="search_timeout"):
-        await search_adapter(port).search(["bounded public query"], run_id=RUN_ID,
-            authority_check=allowed, max_search_seconds=1, remaining_seconds=remaining,
-            response_receipt=receipt)
-    assert time.monotonic() - start < min(1, remaining) + 0.6
+    try:
+        with pytest.raises(DiscoverySearchBlocked, match="search_timeout"):
+            await within(search_adapter(port).search(["bounded public query"], run_id=RUN_ID,
+                authority_check=allowed, max_search_seconds=1, remaining_seconds=remaining,
+                response_receipt=receipt), what="held search request timing out")
+    finally:
+        controls["hold"].set()
+    # The request was bounded by the narrower of the cap and the original wall.
+    assert timeouts == [min(1, remaining)]
     assert len(contacts) == 1 and observed == []
 
 

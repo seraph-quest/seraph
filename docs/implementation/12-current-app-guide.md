@@ -637,7 +637,8 @@ failing owner settles its claimed job as blocked (`native_governed_cancelled`,
 `inference.request` maps a closed purpose (`interactive` or `background`) to the
 canonical routes `cordis_interactive_inference` and `cordis_background_inference`
 and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
-the single `remote_inference_admission_broker`, bound to the job's lease.
+the single remote-inference broker (`get_remote_inference_admission_broker()`),
+bound to the job's lease.
 Interactive work keeps its priority over queued background work; cancelling a
 queued request releases its reservation without contact; a lost response after
 contact stays an `unknown` cost liability. By broker design that uncertain
@@ -1394,7 +1395,9 @@ Live operator transitions of these two domains through
 one background step: drain at E while the row is still `ready`, then the
 fenced `transition_domain` writer (`ready → draining → blocked@E+1 → ready` in
 one transaction), then reactivation at E+1. Only one transition per domain runs
-at a time. A failure leaves the domain visibly blocked with its fix, or, when
+at a time, and the domain stays claimed (status `transition: reactivating`)
+until that reactivation settles, so a released domain already shows its new
+activation or its block reason. A failure leaves the domain visibly blocked with its fix, or, when
 the row never moved, reactivates it at E without a "recovered" entry; the
 status shows `last_transition` (`succeeded` or `failed` with its reason).
 
@@ -3543,7 +3546,9 @@ and this capability remains Partial within those explicit proof limits.
 ### Project issues and pull requests (C4.3 #1017) {#project-issues-and-pull-requests-1017}
 
 Project follow-through is **Partial**. It uses the existing GitHub connection and
-adds no new write authority. Routes live under
+adds no new write authority. The [GitHub activity source](#github-activity-evidence-1264) is separate:
+it is read-only and uses the operator's local `gh` login, not this connection's
+vault credential. Routes live under
 `/api/capabilities/github/project-source`:
 
 - `GET` returns the sync status and the connection's actual limitations: selected
@@ -4286,9 +4291,86 @@ time, queued for the governed vision job. The daemon's bounded local
 analysis (Apple Vision text; any other `local_analysis.provider` is rejected
 with 422) becomes the
 observation's summary/activity/project and digest content until governed
-analysis exists. A repeated `capture_id` is idempotent. `screen_cleanup` removes uploaded files after the observation
-retention; these files are not backed up
+analysis exists. A repeated `capture_id` is idempotent. These files are not backed up
 ([#1141](https://github.com/seraph-quest/seraph/issues/1141)).
+
+**Stored screenshot limits ([#1263](https://github.com/seraph-quest/seraph/issues/1263), Partial):**
+`archive_max_mb` and `archive_retention_days` (screen-analysis settings) are
+enforced. A capture is stored once: when the backend stored the upload
+(accepted, duplicate or suppressed) the daemon writes no archive copy; it
+archives under `--capture-archive-dir` only when the backend did not store it
+(unpaired, failed, blocked, over 8 MiB) and `preserve_captures` is on. A
+near-duplicate the backend suppressed is kept nowhere. The cap applies **per
+store** (MiB, `0` = no size cap), and each store is pruned only by the process
+that writes it, oldest first, never following symlinks, bounded per run
+(5,000 deletions, 200,000 scanned entries; a cut-short run reports
+`over_cap`). The backend prunes `.seraph-daemon-captures/` for size after each
+accepted upload, inside the ingest lock, and for age plus size in the daily
+`screen_cleanup` job, using the shorter of the observation retention and
+`archive_retention_days`; it never touches operator screenshot-folder images
+or the daemon archive. The daemon prunes its archive (whole captures, PNG plus
+sidecars, only files it names) for size after each archive write, for age plus
+size when the limits received from the backend change, and at UTC day
+rollover. It deletes only under limits received from the backend in that
+process, nothing before the first successful settings fetch, and keeps the
+last received limits through a backend outage; its last result is in
+`daemon-status.json` as `capture_budget.archive_prune`. The daemon reads
+the limits from `GET /api/settings/screen-analysis` without an operator
+session, so unless local no-login mode is on that read returns 401 and the
+daemon never receives limits: its archive is then never pruned. A 200 that
+lacks either limit, or a backend whose `screen-analysis-settings.json` is
+unreadable (the GET then omits both limits), also leaves the last received
+limits in force; the backend skips its own pruning with `settings_unreadable`
+and reports `capture_store.limits_status`. A non-zero `archive_max_mb` below 8
+(one capture can be 8 MiB) is refused with 422, and the file a request just
+wrote is never pruned by that request. The settings file is written atomically. After a topology
+switch or a long run of failed uploads, the two stores together can hold up
+to twice the cap until retention ages the idle store out. A record whose
+image was pruned stays readable: `GET /api/observer/screen-artifacts` reports
+`artifacts.image_available: false`, `/analysis` returns 200 with the stored
+metadata and `image_available: false` (a legacy row whose sidecar is gone
+returns `analysis_available: false`), `/image` and `/provider-output` return
+404, and a capture pruned before its governed analysis ran becomes
+`source_missing` and leaves digests and reports. `GET
+/api/settings/artifact-storage` reports `screenshot_folder.capture_store`
+(bytes, file count, cap, retention), shown read-only in the cockpit as
+"Stored captures". Existing archive files are removed only by these rules.
+
+**Daemon context post ([#1248](https://github.com/seraph-quest/seraph/issues/1248), Partial):**
+the daemon's window-context post `POST /api/observer/context` uses the same
+native ingress as the capture upload. A request with neither an Origin nor a
+cookie skips the Origin requirement (the host allow-list still applies, and
+in local no-login mode so does the loopback-peer rule), gets no operator
+session, and must present the paired-edge
+credential (`Authorization: Bearer` plus `X-Seraph-Node-Device` /
+`-Pairing` / `-Extension` / `-Reference`). The handler verifies it with the
+capture upload's check (active pairing, matching identity, policy allowing
+`media.ingest` / `screen_capture`) before reading the body, which is bounded
+to 1 MiB; a missing, invalid or revoked credential is refused. A request that
+carries an Origin keeps the browser origin and operator-session path
+unchanged, and a cookie without an Origin is still refused with
+`mutation_origin_required`. An unpaired daemon still posts without the
+credential, is refused, logs once that context posting needs pairing and keeps
+capturing locally (if screen capture is enabled); a paired daemon logs a refused context post once per state
+change, and `last_context_post_at` in daemon status records only accepted
+posts.
+
+**Daemon notification receipts ([#1258](https://github.com/seraph-quest/seraph/issues/1258), Partial):**
+the daemon's receipts `POST /api/observer/notifications/{id}/ack`, `/fail`
+and `/display-attempted` were refused with `mutation_origin_required`, because
+the daemon sends no Origin. A request to exactly one of those three paths
+(one id segment, no trailing slash) with neither an Origin nor a cookie now
+skips the Origin requirement (host allow-list and, in local no-login mode, the
+loopback-peer rule still apply). Unlike the context post it still resolves
+the operator session, because a receipt is fenced to the claim made under that
+session, and the handler additionally requires the paired-edge credential,
+owned by that operator, before reading the body (bounded to 4 KiB). A
+missing, invalid or revoked credential is refused, and the
+`X-Seraph-Daemon-Id` header must still match the receipt's `worker_id`. No
+other notification route (dismiss, dismiss-all, test, reconcile) gains a
+no-Origin pass. A paired daemon sends its paired-edge headers on these receipts
+only to its validated loopback backend; an unpaired daemon's receipts are
+still refused.
 
 The optional [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 implements ADR-022's ordinary top-frame Chromium text profile within
@@ -4302,6 +4384,118 @@ macOS execution or native desktop capture; missing adapters block capture while
 the portable core remains usable. Pairing alone grants neither execution nor
 data egress, and protected-surface checks cannot identify every sensitive page.
 Availability follows the reviewed installed revision described above.
+
+### GitHub activity evidence for the end-of-day report (#1264) {#github-activity-evidence-1264}
+
+**Partial (slice 1 of [#1264](https://github.com/seraph-quest/seraph/issues/1264)).**
+Seraph can collect the operator's own GitHub activity for a day and store it
+as evidence. The end-of-day report does not read it yet; that is the next
+slice. Code: `backend/src/integrations/github_cli.py` (the only code that
+starts `gh`) and `backend/src/integrations/github_activity.py`.
+
+- **Credential.** It uses the operator's local `gh` login. `gh` holds the
+  account's full GitHub access and Seraph cannot narrow it. Seraph never reads
+  the token: it does not run `gh auth`, and it does not open `gh`'s config,
+  hosts file or keychain. It only sends the GET requests listed in the panel
+  (`/user`, `/users/{login}/events`, `/repos/{repo}`, `/repos/{repo}/issues`,
+  `/repos/{repo}/commits`, `/repos/{repo}/pulls/{n}/commits`). The cockpit and
+  the effective-grants rows always say: "Uses the operator's local gh login
+  (full gh scope; Seraph only issues read GETs)." See the
+  [ADR-011 addendum](./decisions/011-finite-github-connection-consent.md#addendum-local-gh-login-as-an-activity-read-source-1264).
+- **Turning it on.** Run `gh auth login` yourself, in your own terminal. Then
+  open Settings → GitHub → **GitHub activity for reports** and press **Check
+  gh login**. Seraph runs `gh --version` and `GET /user` and shows the version,
+  path and login; it stores nothing. Choose the repositories, tick the
+  acknowledgement (optionally the model-analysis box) and press **Enable**. The
+  server reads `/user` again and refuses (409) if the account differs from the
+  one shown. **Collect now** collects today (in `USER_TIMEZONE`) and lists the
+  stored items.
+- **Turning it off.** **Switch off** in the panel, or revoke the
+  `github_activity` row in effective grants. After that no code path starts
+  `gh`. Stored items stay for audit. If `gh` is later logged in as a
+  different account, the next run stops the source (`gh_login_changed`) and it
+  stays off until you enable it again. Being logged out, `gh` missing or no
+  network only fail that run; the source resumes when the same account is back.
+  The source belongs to your ownership identity, not to one login. Any live
+  login of that identity sees it, its items and its effective-grants row, and
+  can switch it off. A new login, a logout or a login's idle or absolute
+  expiry does not stop it and does not need re-enabling. It is stopped by
+  revoking the identity (**Revoke ownership**), by a workspace restore (state
+  `stopped`, reason `workspace_restored`), and, for a source enabled in local
+  no-login mode, by that root being reset or the mode switched off. A password
+  login needs enrolled ownership before it can enable the source. Nothing
+  expires by time. Switching off cannot recall a request already in flight: one
+  read-only GET may still reach GitHub just after you switch off, and its
+  result is discarded.
+- **Where it works.** Only where the backend runs directly on your computer as
+  you (`./manage.sh -e dev local ...`) with `gh` installed. `gh` is looked for
+  only at `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`,
+  `/home/linuxbrew/.linuxbrew/bin/gh`, or one absolute path you type, never
+  through `PATH`. The path must end in `gh` and must not be inside Seraph's
+  workspace or process runtime directory. The binary must be owned by you or
+  root and not group- or world-writable; its directory must be owned by you or
+  root and not world-writable. The resolved binary must stay under the
+  install prefix it had when you enabled the source (so `brew upgrade gh`
+  keeps working). Each run records the binary's path and SHA-256 and notes
+  when it changed; a changed hash does not stop the source. The Docker and
+  production compose images have no `gh`, so the panel reports it unavailable;
+  mounting host `gh` config into a container is not supported. On Linux a
+  keyring login needs `DBUS_SESSION_BUS_ADDRESS` in the backend's environment.
+- **The child process.** `gh api --method GET --hostname github.com -i` with a
+  fixed endpoint, no shell, `stdin` at `/dev/null`, a new empty private working
+  directory, a 30 s per-call liveness bound, 1 MiB stdout and 16 KiB stderr
+  (stderr is dropped). The environment is built from nothing: `HOME` from the
+  passwd database, `PATH=/usr/bin:/bin`, prompts and update checks off.
+  `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR`, `GH_DEBUG`, proxy, CA
+  and loader variables from Seraph's environment (including `.env.dev`) are
+  never passed. Proxy variables are deliberately not passed, so an operator
+  behind a mandatory proxy sees `gh_request_failed`.
+- **What counts.** The account `GET /user` returns, pinned by numeric id.
+  Commits whose GitHub author or committer is that account (on the default
+  branch, up to 3 branches you pushed that day, and your own pull requests
+  updated that day); your own pull requests opened, merged or closed; your own
+  issues opened or closed. Branch names are percent-encoded; a branch name Git
+  would refuse is skipped and named in the run's limitations. Reviews and comments are not collected yet. A commit
+  whose e-mail is not linked to the account cannot be attributed and is noted.
+- **Scope.** Default: repositories named by your own GitHub events that day.
+  You can always read listed repositories, limit discovery to owners, and
+  exclude repositories. GitHub's event feed can lag by minutes to hours and
+  covers only 30 days, so listing your main repository is recommended; a day
+  older than 30 days with no listed repository ends partial.
+- **The day.** `[local midnight, next local midnight)` in `USER_TIMEZONE`,
+  converted to UTC; DST days are 23 or 25 hours. Items store only the UTC
+  instant, and the day is derived when read. Collection for today stops at now.
+- **Storage.** `github_activity_sources` (the opt-in, keyed to the operator
+  identity; no token column),
+  `github_activity_runs` (one row per run with status, reason, limitations,
+  counts, call count and the binary) and `github_activity_items` (repository,
+  kind, number or sha, title, a URL Seraph builds itself, UTC time, and the
+  run that first and last saw it). Re-collecting a day updates rows in place.
+  Each run writes one audit event (`github_activity` / `gh_cli`).
+- **Limits.** One `gh` process at a time, at most 120 per run and 10
+  repositories, no retry and no sleep. A rate-limit answer, or a response with
+  no remaining quota, ends the run and keeps what was read. The calls count
+  against your own `gh` rate limit. A run that was blocked (switched off,
+  scope changed, login revoked) stores nothing; items are written only in the
+  same transaction that confirms the source is still on at the run's revision.
+- **States.** Every run ends `complete`, `partial`, `failed` or `blocked` with
+  one fixed sentence, for example "GitHub source blocked: gh is not logged in
+  to github.com for this user. Run gh auth login in your terminal." or
+  "GitHub source blocked: no gh command is available where Seraph's backend
+  runs." A run that started and never finished is reported as such; no state
+  deletes earlier items.
+- **Routes** (operator session required), under
+  `/api/capabilities/github/activity`: `GET` (status; starts nothing),
+  `POST /gh/check`, `PUT /source`, `POST /revoke`, `POST /collect`,
+  `GET /items?report_date=YYYY-MM-DD`.
+- **Residual risk.** Anything already running as you can replace `gh` or run
+  `gh auth token` itself; the binary checks do not defend against that. The
+  argv builder is the only limit on what is sent, so a change to
+  `github_cli.py` is a change to an authority boundary.
+- **Proof.** Fake `gh` runner and a fake `gh` executable in a temporary
+  directory; no test runs the real `gh` or reaches the network. Behaviour with
+  a real `gh` login is **external-unverified**: the first live call is the
+  operator's own **Check gh login**.
 
 ### Reading stored end-of-day reports
 

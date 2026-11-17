@@ -1098,6 +1098,113 @@ class ProjectSourceLink(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now, index=True)
 
 
+class GitHubActivitySource(SQLModel, table=True):
+    """The operator's opt-in to read their own GitHub activity through local ``gh`` (#1264).
+
+    There is no token column and no vault reference: ``gh`` keeps its own
+    login. The row records the operator's acknowledgement, the pinned account
+    and the pinned ``gh`` entry path. It belongs to the operator identity
+    (``owner_identity_id``), which survives logins: any live login of that
+    identity sees and controls it. ``revision`` changes on every state or
+    scope change. Nothing here expires by time: the source stops only on real
+    changes (toggle-off or revoke, a different gh account, the identity being
+    revoked, a workspace restore, or the enabling local no-login root being
+    retired), never on a login's idle or absolute expiry or a new login.
+    """
+
+    __tablename__ = "github_activity_sources"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_identity_id: str = Field(index=True, unique=True)
+    # Provenance of the enable: the principal and root that turned it on.
+    enabled_principal_id: str
+    owner_session_id: str
+    credential_kind: str = Field(default="local_gh_cli_login")
+    gh_entry_path: str
+    gh_install_prefix: str
+    state: str = Field(default="active", index=True)
+    stopped_reason: Optional[str] = Field(default=None)
+    revision: int = Field(default=1)
+    scope_json: str = Field(sa_column=Column(Text, nullable=False))
+    scope_digest: str
+    acknowledged_gh_ambient_login: bool = Field(default=False)
+    model_context_allowed: bool = Field(default=False)
+    identity_id: int
+    identity_login: str
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+    revoked_at: Optional[datetime] = Field(default=None)
+
+
+class GitHubActivityRun(SQLModel, table=True):
+    """One collection attempt: the provenance of its items and its honest status."""
+
+    __tablename__ = "github_activity_runs"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_identity_id: str = Field(index=True)
+    source_id: str = Field(index=True)
+    source_revision: int
+    trigger: str
+    report_date: str = Field(index=True)
+    timezone: str
+    window_start_utc: datetime
+    window_end_utc: datetime
+    collected_until_utc: datetime
+    status: str = Field(default="running", index=True)
+    reason_code: Optional[str] = Field(default=None)
+    limitations_json: str = Field(default="[]", sa_column=Column(Text, nullable=False))
+    counts_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
+    repositories_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
+    call_count: int = Field(default=0)
+    identity_id: Optional[int] = Field(default=None)
+    identity_login: Optional[str] = Field(default=None)
+    gh_real_path: Optional[str] = Field(default=None)
+    gh_sha256: Optional[str] = Field(default=None)
+    rate_limit_remaining: Optional[int] = Field(default=None)
+    rate_limit_reset_at: Optional[datetime] = Field(default=None)
+    started_at: datetime = Field(default_factory=_now, index=True)
+    finished_at: Optional[datetime] = Field(default=None)
+
+
+class GitHubActivityItem(SQLModel, table=True):
+    """One provenance-carrying record of the operator's own GitHub activity.
+
+    ``html_url`` is built by Seraph from repository and number/sha/id, never
+    copied from a response. The day an item belongs to is derived at read
+    time from ``occurred_at`` (UTC), so a timezone change re-buckets it.
+    """
+
+    __tablename__ = "github_activity_items"
+    __table_args__ = (
+        Index("ux_github_activity_items_owner_dedupe", "owner_identity_id", "dedupe_key", unique=True),
+        Index("ix_github_activity_items_owner_time", "owner_identity_id", "occurred_at"),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_identity_id: str
+    source_id: str = Field(index=True)
+    dedupe_key: str
+    repository: str
+    repository_id: int
+    repository_private: bool = Field(default=False)
+    kind: str = Field(index=True)
+    number: Optional[int] = Field(default=None)
+    external_id: Optional[str] = Field(default=None)
+    title: str
+    html_url: str
+    occurred_at: datetime
+    actor_id: int
+    actor_login: str
+    detail_json: str = Field(default="{}", sa_column=Column(Text, nullable=False))
+    content_digest: str
+    api_path: str
+    first_run_id: str
+    last_run_id: str
+    first_seen_at: datetime = Field(default_factory=_now)
+    last_seen_at: datetime = Field(default_factory=_now)
+
+
 class GuardianInboxDisposition(SQLModel, table=True):
     """Owner/session-bound disposition for one verified source packet.
 

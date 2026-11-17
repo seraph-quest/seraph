@@ -27,6 +27,7 @@ from src.execution.repo_sandbox import (
     load_persisted_repo_sandbox_settings,
     persist_repo_sandbox_settings,
 )
+from tests.support.sync import wait_until_blocking
 
 pytestmark = [
     pytest.mark.filterwarnings("error::ResourceWarning"),
@@ -275,6 +276,20 @@ def test_local_executor_rejects_child_created_output_symlink(tmp_path: Path):
     assert external.read_text(encoding="utf-8") == "keep-this-file"
 
 
+def _worker_started(runner, job_id, *, command_word=None):
+    """The durable worker_started marker and a live selected process, or None."""
+
+    marker = runner._read_job_marker(job_id)
+    with runner._active_lock:
+        active = runner._active.get(job_id)
+        process = active.get("process") if active else None
+    if not (marker and marker.get("phase") == "worker_started" and process is not None and process.poll() is None):
+        return None
+    if command_word is not None and command_word not in " ".join(map(str, process.args)):
+        return None
+    return marker
+
+
 def test_local_cancel_requires_authority_and_reconciles_unknown(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(mode=0o700)
@@ -291,15 +306,10 @@ def test_local_cancel_requires_authority_and_reconciles_unknown(tmp_path: Path):
 
     thread = threading.Thread(target=run)
     thread.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        marker = runner._read_job_marker(job.job_id)
-        with runner._active_lock:
-            active = runner._active.get(job.job_id)
-            process = active.get("process") if active else None
-        if marker and marker.get("phase") == "worker_started" and process is not None and process.poll() is None and "pytest" in " ".join(map(str, process.args)):
-            break
-        time.sleep(0.02)
+    # Never falls through: cancelling before the worker started proves nothing.
+    wait_until_blocking(lambda: _worker_started(runner, job.job_id, command_word="pytest"),
+                        what="the selected pytest worker reached its durable start marker",
+                        state=lambda: runner._read_job_marker(job.job_id))
     assert runner.cancel(job_id=job.job_id, authority={"authority_digest": "wrong"})["status"] == "unknown_external_effect"
     cancel = runner.cancel(job_id=job.job_id, authority={"authority_digest": job.authority_digest})
     assert cancel["status"] == "cancel_requested"
@@ -332,15 +342,9 @@ def test_local_fresh_executor_cancel_fences_original_worker_and_cleans_stage(tmp
 
     thread = threading.Thread(target=run)
     thread.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        marker = runner._read_job_marker(job.job_id)
-        with runner._active_lock:
-            active = runner._active.get(job.job_id)
-            process = active.get("process") if active else None
-        if marker and marker.get("phase") == "worker_started" and process is not None and process.poll() is None:
-            break
-        time.sleep(0.02)
+    marker = wait_until_blocking(lambda: _worker_started(runner, job.job_id),
+                                 what="the worker reached its durable start marker",
+                                 state=lambda: runner._read_job_marker(job.job_id))
     assert marker and marker.get("phase") == "worker_started", marker
 
     fresh = LocalRepoRepairExecutor(_local_settings(), workspace_dir=workspace)
@@ -924,3 +928,66 @@ def test_local_marker_corruption_fails_closed(tmp_path: Path):
     marker.write_text("not-json", encoding="utf-8")
     marker.chmod(0o600)
     assert runner.reconcile({"job_id": "corrupt"})["marker"] is None
+
+
+def test_worker_kill_reap_bound_matches_the_shared_owner_bound():
+    # repo_worker runs standalone in the container, so it keeps its own copy.
+    from src.execution import process_reap, repo_worker
+    assert repo_worker.KILL_REAP_LIVENESS_SECONDS == process_reap.KILL_REAP_LIVENESS_SECONDS
+
+
+def _observed_run_fixed(tmp_path: Path, script: str, observer=None):
+    """Run one fixed command; return the raised error and the owner's Popen."""
+
+    seen: list[subprocess.Popen[bytes]] = []
+
+    def observe(process: subprocess.Popen[bytes] | None) -> None:
+        if process is not None:
+            seen.append(process)
+            if observer is not None:
+                observer(process)
+
+    with pytest.raises(BaseException) as error:
+        # The production call shape: a deadline bounds every cleanup wait, so
+        # a regression fails here instead of at the per-test watchdog.
+        repo_worker._run_fixed(["/bin/sh", "-c", script], cwd=tmp_path, timeout=300,
+                               deadline_at=time.monotonic() + 120,
+                               allowed_executables=("/bin/sh",), process_observer=observe)
+    [process] = seen
+    return error.value, process
+
+
+def test_run_fixed_closes_pipes_held_by_a_rejected_nested_process(tmp_path: Path):
+    """The nested writer is killed and the owner raises; the pipes still close (#1235)."""
+
+    error, process = _observed_run_fixed(tmp_path, "sleep 300 & echo started")
+    assert isinstance(error, repo_worker.WorkerInputError)
+    assert str(error) == "worker left a nested process running"
+    assert process.returncode == 0
+    assert not repo_worker._process_group_members(process.pid)
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_run_fixed_reaps_the_child_when_its_wait_fails(tmp_path: Path):
+    """An error before the reap still leaves nothing for ``Popen.__del__`` (#1235)."""
+
+    def fail_first_wait(process: subprocess.Popen[bytes]) -> None:
+        original = process.wait
+        calls: list[float | None] = []
+
+        def wait(timeout: float | None = None) -> int:
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise RuntimeError("owner interrupted while waiting")
+            return original(timeout=timeout)
+
+        process.wait = wait  # type: ignore[method-assign]
+
+    error, process = _observed_run_fixed(tmp_path, "exec sleep 300", fail_first_wait)
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "owner interrupted while waiting"
+    assert process.returncode == -9
+    assert not repo_worker._process_group_members(process.pid)
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed

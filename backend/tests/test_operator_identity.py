@@ -1,7 +1,6 @@
 """Real authenticated API/SQLite continuity with provider-free negative proof."""
 from datetime import datetime, timedelta, timezone
 import json
-from contextlib import asynccontextmanager
 import pytest
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import select
@@ -339,7 +338,6 @@ async def test_expired_cookie_device_forget_and_explicit_new_scope(client, app, 
 
 @pytest.mark.asyncio
 async def test_atomic_claim_failure_no_partial_scope_and_idempotency_conflict(client, async_db, monkeypatch):
-    import src.db.engine as database
     first = await login(client)
     await enroll(client)
     g = await goal(client)
@@ -348,16 +346,26 @@ async def test_atomic_claim_failure_no_partial_scope_and_idempotency_conflict(cl
     selections = [{"kind": "goal", "record_id": g["id"]}]
     preview = (await client.post("/api/auth/ownership/recovery/preview", headers=HEADERS, json={"selections": selections})).json()
     body = {"selections": selections, "idempotency_key": "crash-proof", "preview_digest": preview["preview_digest"], "acknowledge_read_only": True}
-    original = database.get_session
-    @asynccontextmanager
-    async def fail_before_commit():
-        async with original() as db:
-            yield db
-            raise RuntimeError("injected precommit crash")
-    monkeypatch.setattr(database, "get_session", fail_before_commit)
-    with pytest.raises(RuntimeError, match="injected"):
-        await client.post("/api/auth/ownership/recovery/confirm", headers=HEADERS, json=body)
-    monkeypatch.setattr(database, "get_session", original)
+    from tests.support.db import install_session_factory
+    crashed = []
+    def fail_before_commit():
+        # Every get_session caller (request auth included) opens sessions here;
+        # crash only the unit of work that is about to commit the claim.
+        db = async_db.factory()
+        real_commit = db.commit
+        async def crash_claim_before_commit():
+            # The claim flushes its journal before the unit of work commits.
+            if any(isinstance(row, OperatorRecoveryJournal) for row in db.identity_map.values()):
+                crashed.append(True)
+                raise RuntimeError("injected precommit crash")
+            await real_commit()
+        db.commit = crash_claim_before_commit
+        return db
+    with monkeypatch.context() as crashing:
+        install_session_factory(crashing, fail_before_commit)
+        with pytest.raises(RuntimeError, match="injected"):
+            await client.post("/api/auth/ownership/recovery/confirm", headers=HEADERS, json=body)
+    assert crashed == [True]
     async with async_db() as db:
         assert (await db.execute(select(OperatorRecoveryJournal))).scalars().all() == []
         assert (await db.get(Goal, g["id"])).owner_session_id == first["session_id"]
@@ -370,14 +378,13 @@ async def test_atomic_claim_failure_no_partial_scope_and_idempotency_conflict(cl
 
 @pytest.mark.asyncio
 async def test_file_database_existing_schema_migration_and_engine_restart(client, monkeypatch, tmp_path):
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
     from sqlmodel import SQLModel
-    from src.db.engine import _ensure_operator_session_columns, _ensure_operator_principals
-    from unittest.mock import patch
+    from src.db.engine import (_ensure_operator_session_columns, _ensure_operator_principals,
+        create_database_engine, session_scope)
+    from tests.support.db import install_database
     path = tmp_path / "persisted-owner.db"
     url = f"sqlite+aiosqlite:///{path}"
-    engine = create_async_engine(url)
+    engine = create_database_engine(url)
     async with engine.begin() as conn:
         await conn.exec_driver_sql("CREATE TABLE operator_sessions (id VARCHAR PRIMARY KEY, token_hash VARCHAR UNIQUE, created_at DATETIME, last_seen_at DATETIME, idle_expires_at DATETIME, absolute_expires_at DATETIME, revoked_at DATETIME, replaced_by_id VARCHAR)")
         await conn.exec_driver_sql("INSERT INTO operator_sessions VALUES ('legacy-history', 'legacy-hash', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)")
@@ -386,40 +393,27 @@ async def test_file_database_existing_schema_migration_and_engine_restart(client
         await _ensure_operator_principals(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    @asynccontextmanager
-    async def persisted_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-    patches = [patch(target, persisted_session) for target in (
-        "src.db.engine.get_session", "src.auth.service.get_session",
-        "src.goals.repository.get_session", "src.audit.repository.get_session",
-    )]
-    for item in patches: item.start()
+    # The migrated file becomes the default database; each restart installs
+    # a fresh production engine on the same file (#1241).
+    factory = install_database(monkeypatch, engine)
     try:
         first = await login(client)
         await enroll(client)
         g = await goal(client)
         await client.post("/api/auth/logout", headers=HEADERS)
         await engine.dispose()
-        engine = create_async_engine(url)
-        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        engine = create_database_engine(url)
+        factory = install_database(monkeypatch, engine)
         second = await login(client)
         assert second["session_id"] != first["session_id"]
         await recover(client, [{"kind": "goal", "record_id": g["id"]}])
         await engine.dispose()
-        engine = create_async_engine(url)
-        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        engine = create_database_engine(url)
+        factory = install_database(monkeypatch, engine)
         assert (await client.get("/api/goals")).json()[0]["id"] == g["id"]
-        async with persisted_session() as db:
+        async with session_scope(factory) as db:
             legacy = await db.get(OperatorSession, "legacy-history")
             assert legacy.operator_identity_id is None and legacy.revoked_at is not None
             assert (await db.get(Goal, g["id"])).owner_session_id == first["session_id"]
     finally:
-        for item in reversed(patches): item.stop()
         await engine.dispose()

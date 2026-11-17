@@ -778,6 +778,26 @@ def _invalidate_transport_credentials(connection) -> int:
     return connection.total_changes - before
 
 
+def _stop_github_activity_sources(connection) -> int:
+    """A restored workspace never resumes the local-gh GitHub activity source (#1264).
+
+    The source reads with the operator's ambient gh login, so a restore stops
+    it explicitly (state ``stopped``, reason ``workspace_restored``, new
+    revision); the operator enables it again after reviewing the restore.
+    """
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(github_activity_sources)")}
+    if not columns:
+        return 0
+    if not {"state", "stopped_reason", "revision"}.issubset(columns):
+        raise ProductionWorkspaceReconciliationError("github activity source invalidation schema is unavailable")
+    before = connection.total_changes
+    connection.execute(
+        "UPDATE github_activity_sources SET state = 'stopped', stopped_reason = 'workspace_restored', "
+        "revision = revision + 1 WHERE state = 'active'"
+    )
+    return connection.total_changes - before
+
+
 def _invalidate_continuity_credentials(connection) -> int:
     """A restored proof snapshot must never resurrect consumed/revoked hashes."""
     columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(operator_continuity_credentials)")}
@@ -880,6 +900,7 @@ def reconcile_production_restore(
                     "WHERE revoked_at IS NULL"
                 )
             invalidated_continuity = _invalidate_continuity_credentials(connection)
+            _stop_github_activity_sources(connection)
             _invalidate_transport_credentials(connection)
             if "production_workflow_authority_states" in table_names:
                 tables_present.append("production_workflow_authority_states")
@@ -1048,6 +1069,7 @@ def reconcile_production_rollback(
                 )
 
             invalidated_continuity = _invalidate_continuity_credentials(target_connection)
+            _stop_github_activity_sources(target_connection)
             _invalidate_transport_credentials(target_connection)
             if "production_workflow_authority_states" in target_tables:
                 columns = set(

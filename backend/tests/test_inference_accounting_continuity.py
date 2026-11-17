@@ -17,6 +17,8 @@ from src.model_fabric.remote_inference_admission import RemoteInferenceAdmission
 from src.workflows.job_runtime import DurableJobRepository
 from src.workspace.accounting_continuity import acknowledge_accounting_period
 from src.workspace.production import ProductionWorkspace, read_lifecycle_receipt
+from tests.support.brokers import use_inference_broker
+from tests.support.db import install_database
 
 # ADR-035: pins historical OpenRouter ledger continuity, restore and period-review mechanics that still settle retained liabilities
 pytestmark = pytest.mark.openrouter_legacy
@@ -62,20 +64,9 @@ async def test_empty_other_root_cannot_bootstrap_and_managed_rebind_retains_liab
     async with new_engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
     await new_engine.dispose()
-    from contextlib import asynccontextmanager
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.orm import sessionmaker
-    target_factory = sessionmaker(new_engine, class_=AsyncSession, expire_on_commit=False)
-    @asynccontextmanager
-    async def target_sessions():
-        async with target_factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except BaseException:
-                await session.rollback()
-                raise
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", target_sessions)
+    # The operator now points Seraph at the new, empty root: its database
+    # becomes the default for every get_session caller (#1241).
+    install_database(monkeypatch, new_engine)
     monkeypatch.setattr(settings, "workspace_dir", str(target))
     calls = []
     with pytest.raises(RuntimeError, match="binding_unavailable"):
@@ -251,7 +242,7 @@ async def test_authenticated_period_reserve_review_and_current_revision_regrant(
         "openrouter_api_key": "intercepted-test-key"}.items():
         monkeypatch.setattr(settings, name, value)
     _reset_login_throttle_for_tests()
-    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", RemoteInferenceAdmissionBroker(durable_accounting=True))
+    use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(durable_accounting=True))
     original_post = httpx.AsyncClient.post
     calls, charge = [], ["0.000101"]
     async def route_post(client, url, **kwargs):

@@ -224,7 +224,7 @@ def test_unknown_formula_objects_never_serialize_repr():
     "profile_missing", "profile_moved", "profile_stop", "upload_orphan"])
 async def test_authenticated_private_source_upload_seal_read_delete(accounting_db, monkeypatch, fmt):
     from config.settings import settings
-    from src.api import auth, documents
+    from src.api import auth
     from src.api.router import api_router
     from src.auth.middleware import OperatorAuthMiddleware
     from src.vault import crypto
@@ -233,7 +233,6 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
     if fmt not in {"pdf", "docx", "xlsx", "csv"}:
         fmt = "csv"
     root, _engine, factory = accounting_db
-    monkeypatch.setattr(documents, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(crypto, "_fernet", None)
     monkeypatch.setattr(settings, "vault_encryption_key", "")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
@@ -535,12 +534,10 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
                             if mode == "goal_pause": goal_row.status = "paused"
                             else: goal_row.revision += 1
                         elif mode == "original_deadline":
-                            from src.work_board import pipelines
+                            # The process clock (which pipelines.now() reads) stands past the original deadline.
+                            from src.utils import clock as clock_module
                             expired_clock = datetime.fromisoformat(original_deadline)+timedelta(seconds=1)
-                            class ExpiredClock(datetime):
-                                @classmethod
-                                def now(cls, tz=None): return expired_clock
-                            monkeypatch.setattr(pipelines, "datetime", ExpiredClock)
+                            monkeypatch.setattr(clock_module, "_clock", clock_module.FakeClock(start=expired_clock))
                     if mode == "late_cancel": asyncio.current_task().cancel()
                     return parsed
                 monkeypatch.setattr(app.state.document_service, "parse", change_after_positive_parse)
@@ -556,6 +553,9 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
                 else:
                     refused = await client.post("/api/documents/read", json=read_request(fmt, identifier).model_dump())
                     assert refused.status_code in {401, 409}, refused.text
+                    if mode == "original_deadline":
+                        # The fake clock is past the original window: that, not another expiry, refused it.
+                        assert refused.json()["detail"]["code"] == "document_original_execution_window_expired", refused.text
                 async with factory.accounting_sessions() as db:
                     source_row = await db.get(WorkBoardInputArtifact, identifier)
                     retained_value = json.loads(source_row.document_metadata_json)

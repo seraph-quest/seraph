@@ -119,8 +119,8 @@ Screen analysis is opt-in and runs **on context switch** (not a timer). The daem
 | `--ocr` | off | Enable screen capture on context switch |
 | `--ocr-provider` | `apple-vision` | Local OCR provider: `apple-vision` (on-device) is the only choice. The cloud-backed `codex-local` provider was removed by operator decision on 2026-11-13 (ADR-035); the CLI refuses it, and a `codex-local` value from backend settings falls back to `apple-vision` |
 | `--ocr-model` | — | Deprecated and ignored (`apple-vision` takes no model) |
-| `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts for future re-analysis |
-| `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local directory for preserved artifacts |
+| `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts locally when the backend did not store the upload (unpaired, failed, blocked, oversize); a capture the backend stored is not archived again |
+| `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Local directory for preserved artifacts; pruned to the backend's `archive_max_mb` and `archive_retention_days` (#1263) |
 | `--edge-device-id` | `$SERAPH_EDGE_DEVICE_ID` | Paired edge device id used to authenticate capture uploads |
 | `--edge-pairing-id` | `$SERAPH_EDGE_PAIRING_ID` | Paired edge pairing id used to authenticate capture uploads |
 | `--edge-credential-file` | `$SERAPH_EDGE_CREDENTIAL_FILE` | Private (`0600`) file holding the paired edge credential. `SERAPH_EDGE_CREDENTIAL` also works; there is deliberately no flag for the raw credential |
@@ -145,10 +145,10 @@ When screen analysis is enabled and the upload is configured, each allowed captu
 
 - **Authentication:** the scoped paired-edge credential returned once by node pairing (`POST /api/nodes/pairings/pair`; the same credential the paired edge transport uses), sent as `Authorization: Bearer` with `X-Seraph-Node-Device` / `X-Seraph-Node-Pairing`. The daemon sends no `Origin` and no cookie; for this one path the backend then checks only the host allow-list, and the credential stays mandatory. A request that carries a cookie or an `Origin` must still pass the normal origin check, and a browser session cookie is never upload authority. The pairing's stored policy must allow capability `media.ingest`, purpose `screen_capture`, the image type and its size.
 - **Backend checks:** screen analysis must be enabled; built-in blocklisted apps are rejected (a local `allowed_apps` override does not apply to uploads); only real PNG/JPEG bytes up to 8 MiB and 50 megapixels (read from the header before decoding); at most 30 uploads per minute per pairing; a repeated `capture_id` is idempotent.
-- **Storage:** private (`0700` directory, `0600` file, atomic rename) under the screenshot folder's `.seraph-daemon-captures/`, which must be a real directory owned by the backend user (a symlinked store is refused and never cleaned). The observation goes through the same dedupe as folder images and is queued for the governed vision analysis job. `screen_cleanup` deletes uploaded files after the observation retention period. These files are not backed up (see #1141).
+- **Storage:** private (`0700` directory, `0600` file, atomic rename) under the screenshot folder's `.seraph-daemon-captures/`, which must be a real directory owned by the backend user (a symlinked store is refused and never cleaned). The observation goes through the same dedupe as folder images and is queued for the governed vision analysis job. After each accepted upload the backend prunes the oldest stored files until the store is at or under `archive_max_mb` (`0` = no cap); `screen_cleanup` also deletes files older than the shorter of the observation retention and `archive_retention_days`. These files are not backed up (see #1141).
 - **Bounded retries:** at most two attempts per capture (only on network or 5xx errors), then a cool-down that doubles from 30 s up to 10 min (or the server's `Retry-After`) during which captures are not uploaded. There is no upload queue or poll loop.
 
-When an upload is stored, the context post carries only `active_window`, so the same moment is not recorded twice. Without upload configuration, the daemon keeps posting the on-device OCR observation as JSON.
+When an upload is stored, the context post carries only `active_window`, so the same moment is not recorded twice. When a paired upload is not stored (blocked app, refused or failed upload), the context post carries the on-device OCR observation as JSON. Without pairing, the backend refuses context posts (see below).
 
 ### App Blocklist
 
@@ -215,7 +215,7 @@ OCR mode captures screenshots to extract visible text. This requires the Screen 
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots of allowed apps are captured only on context switch (or the periodic capture mode). `apple-vision` OCR runs on this Mac. Captures are uploaded only to the loopback backend described above; the daemon contacts no model provider. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir`. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured.
+**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots of allowed apps are captured only on context switch (or the periodic capture mode). `apple-vision` OCR runs on this Mac. Captures are uploaded only to the loopback backend described above; the daemon contacts no model provider. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir` only when the backend did not store the upload. The daemon prunes that archive (oldest whole captures first, only files it named, never through symlinks) to the `archive_max_mb` and `archive_retention_days` it received from the backend: after each archive write, when those limits change, and at UTC day rollover. Before the first successful settings fetch it deletes nothing, and it keeps the last received limits through a backend outage. The daemon reads those limits from `GET /api/settings/screen-analysis` without an operator session: unless the backend runs in local no-login mode that read returns 401, the daemon never receives limits, and the archive is never pruned. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured.
 
 Preserved capture artifacts can be inspected through the backend from localhost only:
 
@@ -225,7 +225,13 @@ curl http://localhost:8004/api/observer/screen-artifacts/{observation_id}/provid
 open http://localhost:8004/api/observer/screen-artifacts/{observation_id}/image
 ```
 
-The daemon posts context to `POST /api/observer/context` (the `observation` is omitted when the capture upload was stored):
+The daemon posts context to `POST /api/observer/context` (the `observation` is omitted when the capture upload was stored).
+
+- **Authentication ([#1248](https://github.com/seraph-quest/seraph/issues/1248)):** when this Mac is paired (the same `SERAPH_EDGE_DEVICE_ID`, `SERAPH_EDGE_PAIRING_ID` and `SERAPH_EDGE_CREDENTIAL_FILE` the capture upload uses), the context post carries the same paired-edge headers (`Authorization: Bearer`, `X-Seraph-Node-Device` / `-Pairing` / `-Extension` / `-Reference`) and no `Origin` or cookie, and goes only to the validated loopback backend. The backend verifies that credential exactly as for captures (active pairing, matching identity, pairing policy allowing `media.ingest` / `screen_capture`); a missing, invalid or revoked credential is refused. This works with or without `--ocr`.
+- **Unpaired:** the daemon still posts without the credential, which the backend refuses. It logs once that context posting needs pairing and, when screen capture is enabled, keeps capturing locally.
+- **Refusals:** a refused context post is logged once per state change (for example `HTTP 403, pairing_revoked`), and again only when it is accepted again or the refusal changes. `last_context_post_at` in daemon status records only accepted posts.
+
+Example payload:
 ```json
 {
   "active_window": "VS Code — main.py",
@@ -263,6 +269,8 @@ This is a first presence path, not a full desktop shell:
 - pending, claimed, display-attempted, acknowledged, failed, cancelled, and unknown states are durable in the backend
 - an expired lease or daemon failure becomes `unknown` and requires explicit operator reconciliation before retry
 - broader channel controls and richer desktop presence are still future work
+
+**Receipt authentication ([#1258](https://github.com/seraph-quest/seraph/issues/1258)):** the display-attempted, ack and fail receipts are mutations sent without an `Origin`, so the backend accepts them only with the paired-edge credential, exactly like the context post. When this Mac is paired, the daemon adds the same paired-edge headers to each receipt (alongside `X-Seraph-Daemon-Id`) and sends them only to the validated loopback backend. Unpaired, the receipts are refused, so the daemon will not display a notification it cannot fence.
 
 ## How It Works
 

@@ -449,17 +449,12 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
     from datetime import datetime, timezone, timedelta
     from src.db.models import OperatorSession
     from src.auth import service as auth
-    from src.workflows.job_runtime import _as_utc
+    if auth_event == "touch":
+        await _age_session_until_touch_due(jobs, kwargs["owner"].session_id)
     async with jobs._session() as db:
         session = await db.get(OperatorSession, kwargs["owner"].session_id)
         old_auth = session.model_dump(mode="json")
-        until_due = max(0, (auth._AUTH_TOUCH_INTERVAL - (datetime.now(timezone.utc)
-            - _as_utc(session.last_seen_at))).total_seconds())
     if auth_event == "touch":
-        import asyncio
-        assert until_due <= 30
-        assert (_as_utc(run.deadline_at) - datetime.now(timezone.utc)).total_seconds() > until_due + 5
-        await asyncio.sleep(until_due + 0.02)
         current_operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=True)
         assert current_operator.session_id == kwargs["owner"].session_id
     elif auth_event == "refresh":
@@ -530,8 +525,9 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
 @pytest.mark.parametrize("kind", ["fifo", "symlink", "hardlink", "directory", "oversize"])
 def test_existing_cleanup_reader_denies_actual_unsafe_entry_without_blocking(tmp_path, kind):
     import os
-    import time
+    import threading
     from types import SimpleNamespace
+    from tests.support.sync import LivenessTimeout, Signal
     from src.workflows.repo_repair_source_recovery import _read_original_cleanup_envelope_if_present
     folder = tmp_path / "artifacts" / "repo-repair" / "model"
     folder.mkdir(parents=True, mode=0o700)
@@ -554,11 +550,34 @@ def test_existing_cleanup_reader_denies_actual_unsafe_entry_without_blocking(tmp
         path.write_bytes(b"x" * (1048576 + 1))
         path.chmod(0o600)
     service = SimpleNamespace(_workspace=lambda: tmp_path)
-    started = time.monotonic()
-    with pytest.raises(RepositorySourceRecoveryError, match="original_producer_artifact_changed"):
-        _read_original_cleanup_envelope_if_present(service,
-            "artifacts/repo-repair/model/iteration-original-cleanup.json")
-    assert time.monotonic() - started < 2
+    # A blocking open of a FIFO with no writer never returns, so "without
+    # blocking" is proven by the reader returning at all: it runs on a worker
+    # and a hang fails at the liveness bound (then the FIFO is unblocked).
+    outcome: list[BaseException | None] = []
+    returned = Signal("cleanup reader returned")
+
+    def read() -> None:
+        try:
+            _read_original_cleanup_envelope_if_present(service,
+                "artifacts/repo-repair/model/iteration-original-cleanup.json")
+            outcome.append(None)
+        except BaseException as error:  # noqa: BLE001 - asserted below
+            outcome.append(error)
+        finally:
+            returned.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        returned.wait_blocking()
+    except LivenessTimeout:
+        if kind == "fifo":
+            os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
+        raise AssertionError(f"the cleanup reader blocked on the {kind} entry") from None
+    finally:
+        reader.join()
+    assert isinstance(outcome[0], RepositorySourceRecoveryError), outcome
+    assert "original_producer_artifact_changed" in str(outcome[0])
 
 
 def test_existing_cleanup_reader_denies_actual_named_replacement_during_read(tmp_path, monkeypatch):
@@ -654,6 +673,19 @@ async def test_actual_source_completion_denies_changed_original_reservation_fact
         assert _source_record_absent(root, registration["iteration_id"])
 
 
+async def _age_session_until_touch_due(jobs, session_id):
+    """Make the operator session's touch due by ageing its stored last-seen time
+    past the touch interval, instead of waiting the interval out in real time."""
+    from datetime import timedelta
+    from src.auth import service as auth
+    from src.db.models import OperatorSession
+    async with jobs._session() as db:
+        session = await db.get(OperatorSession, session_id)
+        session.last_seen_at = session.last_seen_at - auth._AUTH_TOUCH_INTERVAL - timedelta(seconds=1)
+        db.add(session)
+        await db.commit()
+
+
 def _source_record_absent(root, iteration):
     from src.workflows import repo_repair_source as source
     return (source._repository_record(root, "repository:cleanup:" + iteration) is None
@@ -714,10 +746,6 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
         registration = read_registered_repository_producer(root, iteration_index=1)
         session = await db.get(OperatorSession, kwargs["owner"].session_id)
         old_auth = session.model_dump(mode="json")
-        until_due = max(0, (auth._AUTH_TOUCH_INTERVAL - (datetime.now(timezone.utc)
-            - _as_utc(session.last_seen_at))).total_seconds())
-        assert until_due <= 30
-        assert (_as_utc(root.deadline_at) - datetime.now(timezone.utc)).total_seconds() > until_due + 5
     path = service._workspace() / ("artifacts/repo-repair/model/iteration-" + registration["iteration_id"] + "-cleanup.json")
     original_bytes = path.read_bytes()
     original_envelope = json.loads(original_bytes)
@@ -729,7 +757,9 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
     predecessor = next(item["payload"]["predecessor_projection"] for item in json.loads(actual_unknown["checkpoint_receipts_json"])
         if item["checkpoint_id"] == "repository:stop-uncertainty-successor:v1")
     assert commitment["root_static_digest"] != _static_digest_v4({**actual_unknown, **predecessor}, "WorkflowRunState", "root")
-    await asyncio.sleep(until_due + 0.02)
+    await _age_session_until_touch_due(jobs, kwargs["owner"].session_id)
+    async with jobs._session() as db:
+        old_auth = (await db.get(OperatorSession, kwargs["owner"].session_id)).model_dump(mode="json")
     operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=True)
     assert operator.session_id == kwargs["owner"].session_id
     async with jobs._session() as db:

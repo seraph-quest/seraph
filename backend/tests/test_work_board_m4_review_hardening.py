@@ -138,9 +138,8 @@ async def test_dispatcher_service_root_can_complete_review_and_materialize_hando
         dispatcher = WorkBoardDispatcher(session_provider=async_db)
         spec, _inputs, expected_job_id, _owner, _runtime = dispatcher._build_spec(parent, attempt)
         # Use the exact service-owned durable shape emitted by _build_spec.
-        # The fixture's StaticPool deliberately avoids opening a second DB
-        # session here; admission identity is still produced by the real
-        # dispatcher root builder.
+        # Seeded in this session rather than through a second one; admission
+        # identity is still produced by the real dispatcher root builder.
         db.add(Session(id=OWNER.session_id, owner_principal_id=OWNER.principal_id))
         db.add(
             WorkflowRunState(

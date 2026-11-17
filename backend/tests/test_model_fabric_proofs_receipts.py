@@ -19,6 +19,7 @@ from src.model_fabric import (
 )
 from src.model_fabric.hooks import PersistedRouteReceiptHooks, RouteReceiptSession, persist_denied_route
 from src.model_fabric.probe import CapabilityProbeObservation, run_capability_probe
+from tests.support.brokers import use_inference_broker
 from src.model_fabric.proofs import (
     build_model_route_proof,
     proof_is_fresh,
@@ -65,10 +66,7 @@ def allow_legacy_probe_contract_fixture(monkeypatch):
     OpenRouter-only and is covered by the focused policy suites.
     """
     monkeypatch.setattr(settings, "openrouter_provider_only", False)
-    monkeypatch.setattr(
-        "src.model_fabric.probe.remote_inference_admission_broker",
-        _InlineProbeAdmission(),
-    )
+    use_inference_broker(monkeypatch, _InlineProbeAdmission())
 
 
 def _profile(*, endpoint: str = "http://192.168.1.26:8001/v1") -> ProviderProfile:

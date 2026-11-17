@@ -7,6 +7,7 @@ while retaining the original hostname for Host and TLS SNI.
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 import ipaddress
 import json
@@ -18,6 +19,8 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 import httpx
+
+from src.utils.clock import get_clock
 
 
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -379,11 +382,11 @@ async def _request_pinned_https(
     # and response/context cleanup.  HTTPX's per-read timeout alone would let
     # a peer keep a request alive indefinitely by sending tiny chunks.
     try:
-        async with asyncio.timeout(bounded_timeout):
+        async with get_clock().timeout(bounded_timeout):
             if handoff_check is not None:
                 await handoff_check()
             try:
-                addresses = await asyncio.wait_for(
+                addresses = await get_clock().wait_for(
                     _resolve(resolver, parsed.hostname or "", parsed.port or 443),
                     timeout=resolve_timeout,
                 )
@@ -458,16 +461,18 @@ async def _request_pinned_https(
                             "encoded source responses are not allowed"
                         )
                     content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        if handoff_check is not None:
-                            await handoff_check()
-                        # Check before extending so an overflow chunk is never
-                        # retained in the bounded response buffer.
-                        if len(content) + len(chunk) > max_bytes:
-                            raise PinnedTransportError(
-                                "source response exceeds the bounded byte limit"
-                            )
-                        content.extend(chunk)
+                    # Closed on every exit (a bound raises mid-stream), not by the collector.
+                    async with contextlib.aclosing(response.aiter_bytes()) as chunks:
+                        async for chunk in chunks:
+                            if handoff_check is not None:
+                                await handoff_check()
+                            # Check before extending so an overflow chunk is never
+                            # retained in the bounded response buffer.
+                            if len(content) + len(chunk) > max_bytes:
+                                raise PinnedTransportError(
+                                    "source response exceeds the bounded byte limit"
+                                )
+                            content.extend(chunk)
                     response_headers = {
                         str(k).lower(): str(v) for k, v in response.headers.items()
                     }

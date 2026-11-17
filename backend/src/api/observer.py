@@ -1,5 +1,6 @@
 """Observer API — context state and daemon integration endpoints."""
 
+import contextlib
 import json
 import logging
 import mimetypes
@@ -7,7 +8,7 @@ import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -151,6 +152,11 @@ class NativeNotificationListResponse(BaseModel):
 class NativeNotificationRecoveryResponse(BaseModel):
     recoveries: list[dict[str, Any]]
     recovery_count: int
+
+
+_ReceiptT = TypeVar(
+    "_ReceiptT", NotificationAckRequest, NotificationFailureRequest, NotificationDisplayAttemptRequest
+)
 
 
 class NotificationRecoveryRequest(BaseModel):
@@ -481,9 +487,42 @@ async def get_observer_state(request: Request):
     ).to_dict()
 
 
-@router.post("/observer/context")
-async def post_screen_context(body: ScreenContextRequest):
-    """Receive screen context from native daemon."""
+_MAX_CONTEXT_REQUEST_BYTES = 1024 * 1024
+
+
+async def _require_context_ingress_auth(request: Request) -> None:
+    """Authenticate a context post before any body byte is read (#1248).
+
+    The daemon posts with no Origin and no cookie; the middleware then marks
+    the request as native edge ingress and establishes no operator session,
+    so the paired-edge credential is mandatory. Any other request must carry
+    the operator session the middleware established.
+    """
+    if getattr(request.state, "native_edge_ingress", False):
+        await _authenticate_paired_daemon(request)
+    elif getattr(request.state, "operator", None) is None:
+        raise HTTPException(status_code=401, detail={"code": "authenticated_operator_required"})
+
+
+@router.post(
+    "/observer/context",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ScreenContextRequest.model_json_schema()}},
+        }
+    },
+)
+async def post_screen_context(request: Request):
+    """Receive screen context from the native daemon or the operator path."""
+    await _require_context_ingress_auth(request)
+    raw = await _read_bounded_body(
+        request, limit=_MAX_CONTEXT_REQUEST_BYTES, too_large_code="context_request_too_large"
+    )
+    try:
+        body = ScreenContextRequest.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_context_request"}) from exc
     context_manager.update_screen_context(body.active_window, body.screen_context)
     await log_integration_event(
         integration_type="observer_daemon",
@@ -588,8 +627,11 @@ _CAPTURE_CAPABILITY = "media.ingest"
 _CAPTURE_DATA_PURPOSE = "screen_capture"
 
 
-async def _authenticate_capture_uploader(request: Request):
+async def _authenticate_paired_daemon(request: Request):
     """Authenticate the daemon with its scoped paired-edge credential.
+
+    Shared by the capture upload and the native context post (#1248), so both
+    native ingress paths enforce one credential, lifecycle and policy check.
 
     This reuses the paired-edge credential path (vault-held secret, owner
     principal re-authentication, active pairing lifecycle); it never accepts
@@ -668,21 +710,23 @@ async def _authenticate_capture_uploader(request: Request):
     )
 
 
-async def _read_bounded_body(request: Request, *, limit: int) -> bytes:
+async def _read_bounded_body(request: Request, *, limit: int, too_large_code: str = "capture_too_large") -> bytes:
     declared = request.headers.get("content-length")
     if declared is not None:
         try:
             if int(declared) > limit:
-                raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
+                raise HTTPException(status_code=413, detail={"code": too_large_code})
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": "invalid_content_length"}) from exc
     chunks: list[bytes] = []
     received = 0
-    async for chunk in request.stream():
-        received += len(chunk)
-        if received > limit:
-            raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
-        chunks.append(chunk)
+    # Closed on every exit (the bound raises mid-stream), not by the collector.
+    async with contextlib.aclosing(request.stream()) as body_chunks:
+        async for chunk in body_chunks:
+            received += len(chunk)
+            if received > limit:
+                raise HTTPException(status_code=413, detail={"code": too_large_code})
+            chunks.append(chunk)
     return b"".join(chunks)
 
 
@@ -707,7 +751,7 @@ async def upload_local_capture(request: Request):
     from src.observer.screen_analysis_settings import effective_screen_analysis_enabled
 
     # Authenticate before reading or parsing any bytes.
-    uploader, policy = await _authenticate_capture_uploader(request)
+    uploader, policy = await _authenticate_paired_daemon(request)
     if not effective_screen_analysis_enabled():
         raise HTTPException(status_code=403, detail={"code": "screen_capture_disabled"})
     if not upload_rate_limiter.allow(f"{uploader['device_id']}:{uploader['pairing_id']}"):
@@ -744,17 +788,30 @@ async def upload_local_capture(request: Request):
             details={"reason": exc.code, "device_id": uploader["device_id"]},
         )
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    upload_details: dict[str, Any] = {
+        "reason": result.reason,
+        "capture_id": result.capture_id,
+        "observation_id": result.observation_id,
+        "device_id": uploader["device_id"],
+    }
+    if result.pruned_files:
+        upload_details["pruned_files"] = result.pruned_files
+        upload_details["pruned_bytes"] = result.pruned_bytes
+    if result.capture_store_over_cap:
+        upload_details["capture_store_over_cap"] = True
     await log_integration_event(
         integration_type="observer_daemon",
         name="local_capture_upload",
         outcome=result.status,
-        details={
-            "reason": result.reason,
-            "capture_id": result.capture_id,
-            "observation_id": result.observation_id,
-            "device_id": uploader["device_id"],
-        },
+        details=upload_details,
     )
+    if result.prune_skipped_reason:
+        await log_integration_event(
+            integration_type="observer_daemon",
+            name="capture_store_prune",
+            outcome="failed",
+            details={"reason": result.prune_skipped_reason, "device_id": uploader["device_id"]},
+        )
     return JSONResponse(
         {
             "schema": "seraph.local_capture_upload.v1",
@@ -763,6 +820,9 @@ async def upload_local_capture(request: Request):
             "capture_id": result.capture_id,
             "observation_id": result.observation_id,
             "content_hash": f"sha256:{result.image_sha256}",
+            # True when the private store is still above archive_max_mb after
+            # this request's bounded prune (or the prune was cut short).
+            "capture_store_over_cap": result.capture_store_over_cap,
         },
         status_code=201 if result.status == "accepted" else 200,
     )
@@ -800,16 +860,49 @@ def _screen_artifact_path(raw_path: str | None) -> Path:
     return _artifact_path(raw_path, allowed_roots=[_screen_artifact_root()])
 
 
-def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
+def _resolve_artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
+    """Resolve a stored artifact path inside the allowed roots; no existence check."""
     if not raw_path:
         raise HTTPException(status_code=404, detail="Screen artifact is missing")
     path = Path(raw_path).expanduser().resolve()
     roots = [root.expanduser().resolve() for root in allowed_roots]
     if not any(path.is_relative_to(root) for root in roots):
         raise HTTPException(status_code=403, detail="Screen artifact is outside the configured archive")
+    return path
+
+
+def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
+    path = _resolve_artifact_path(raw_path, allowed_roots=allowed_roots)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Screen artifact file not found")
     return path
+
+
+def _artifact_path_if_present(raw_path: str | None, *, allowed_roots: list[Path]) -> Path | None:
+    """The resolved artifact file, or ``None`` when retention (or anything) removed it.
+
+    A path outside the allowed roots is still refused with 403 before any
+    existence check.
+    """
+    path = _resolve_artifact_path(raw_path, allowed_roots=allowed_roots)
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _screen_artifact_image_available(artifacts: dict[str, Any]) -> bool:
+    if artifacts.get("provider") == "paired_edge":
+        return True
+    raw_path = str(artifacts.get("image_path") or "")
+    if not raw_path:
+        return False
+    try:
+        return _artifact_path_if_present(raw_path, allowed_roots=_artifact_allowed_roots(artifacts)) is not None
+    except (HTTPException, OSError, RuntimeError, ValueError):
+        # One malformed stored path (``~nouser/...``, a NUL byte) must not
+        # break the whole artifact list.
+        return False
 
 
 def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
@@ -865,6 +958,9 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "provider": artifacts.get("provider"),
         "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
         "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
+        # False when retention or the size cap removed the stored image; the
+        # record itself stays readable.
+        "image_available": _screen_artifact_image_available(artifacts),
     }
     if artifacts.get("provider") != "screenshot_folder":
         artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/provider-output"
@@ -989,7 +1085,7 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
             "analysis": None,
         }
     if artifacts.get("provider") == "screenshot_folder" and not artifacts.get("analysis_path"):
-        image_path = _artifact_path(
+        image_path = _artifact_path_if_present(
             str(artifacts.get("image_path") or ""),
             allowed_roots=_artifact_allowed_roots(artifacts),
         )
@@ -997,9 +1093,23 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
             "provider": artifacts.get("provider") or "screenshot_folder",
             "summary": observation.summary,
             "image_sha256": artifacts.get("image_sha256"),
+            "image_available": image_path is not None,
             "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
         }
-    path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
+    path = _artifact_path_if_present(
+        str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts)
+    )
+    if path is None:
+        # The saved analysis sidecar was removed (retention, size cap or by
+        # hand): the observation row is still readable.
+        return {
+            "provider": artifacts.get("provider") or None,
+            "summary": observation.summary,
+            "activity": observation.activity_type,
+            "project": observation.project,
+            "analysis": None,
+            "analysis_available": False,
+        }
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -1097,7 +1207,7 @@ def _image_media_type(path: Path) -> str:
 
 
 def _screenshot_folder_image_analysis(
-    image_path: Path,
+    image_path: Path | None,
     artifacts: dict[str, Any],
     observation: ScreenObservation,
 ) -> dict[str, Any]:
@@ -1108,7 +1218,15 @@ def _screenshot_folder_image_analysis(
         semantic_analysis_status_from_details,
     )
 
-    metadata = local_image_metadata(image_path)
+    metadata: dict[str, Any] | None = None
+    if image_path is not None:
+        try:
+            metadata = local_image_metadata(image_path)
+        except OSError:
+            metadata = None  # removed between the check and the read
+    image_available = metadata is not None
+    if metadata is None:
+        metadata = {key: artifacts.get(key) for key in ("image_bytes", "file_format", "width", "height")}
     details = _screen_observation_details(observation)
     semantic_analysis = semantic_analysis_from_details(details)
     semantic_error = semantic_analysis_error_from_details(details)
@@ -1132,7 +1250,8 @@ def _screenshot_folder_image_analysis(
         "analysis_owner": "seraph",
         "semantic_status": semantic_status,
         "semantic_status_detail": persisted_status or None,
-        "image_path": str(image_path),
+        "image_path": str(image_path) if image_path is not None else str(artifacts.get("image_path") or ""),
+        "image_available": image_available,
         "image_sha256": artifacts.get("image_sha256"),
         "image_bytes": metadata.get("image_bytes"),
         "file_format": metadata.get("file_format"),
@@ -1146,7 +1265,15 @@ def _screenshot_folder_image_analysis(
         "notes": [
             "The screenshot folder source produced only the image file.",
             "Seraph computed this local image analysis from the configured screenshot directory.",
-        ],
+        ]
+        + (
+            []
+            if image_available
+            else [
+                "The stored image is no longer available: capture retention or the size cap removed it. "
+                "Metadata shown is what Seraph recorded when the capture was ingested."
+            ]
+        ),
     }
 
 
@@ -2985,16 +3112,64 @@ async def get_next_native_notification(
     return {"notification": notification.to_dict()}
 
 
-@router.post("/observer/notifications/{notification_id}/ack", response_model=NotificationAckResponse)
+_MAX_NOTIFICATION_RECEIPT_BYTES = 4096
+
+
+def _receipt_body_schema(model: type[BaseModel]) -> dict[str, Any]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": model.model_json_schema()}},
+        }
+    }
+
+
+async def _authenticated_notification_receipt(request: Request, model: type[_ReceiptT]) -> tuple[_ReceiptT, str, str]:
+    """Authenticate a daemon notification receipt before reading its body (#1258).
+
+    The daemon posts ack/fail/display-attempted with no Origin and no cookie;
+    the middleware then marks the request as native edge ingress and resolves
+    the local operator session the claim was made under. That path requires
+    the paired-edge credential, owned by that operator, before any body byte
+    is read. Any other request must carry the operator session the middleware
+    established. The daemon identity header still binds the receipt to the
+    claiming worker.
+    """
+    if getattr(request.state, "native_edge_ingress", False):
+        uploader, _policy = await _authenticate_paired_daemon(request)
+        owner_principal_id, _session_id = _require_authenticated_operator_binding(request)
+        if uploader["owner_principal_id"] != owner_principal_id:
+            raise HTTPException(status_code=403, detail={"code": "pairing_owner_mismatch"})
+    elif getattr(request.state, "operator", None) is None:
+        raise HTTPException(status_code=401, detail="authenticated daemon request is required")
+    raw = await _read_bounded_body(
+        request,
+        limit=_MAX_NOTIFICATION_RECEIPT_BYTES,
+        too_large_code="notification_receipt_too_large",
+    )
+    try:
+        body = model.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_notification_receipt"}) from exc
+    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    return body, owner_principal_id, operator_session_id
+
+
+@router.post(
+    "/observer/notifications/{notification_id}/ack",
+    response_model=NotificationAckResponse,
+    openapi_extra=_receipt_body_schema(NotificationAckRequest),
+)
 async def ack_native_notification(
     notification_id: str,
-    body: NotificationAckRequest,
     request: Request,
 ):
     """Acknowledge a native notification after the daemon displays it."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    body, owner_principal_id, operator_session_id = await _authenticated_notification_receipt(
+        request, NotificationAckRequest
+    )
     notification = await native_notification_queue.get(
         notification_id,
         owner_principal_id=owner_principal_id,
@@ -3038,14 +3213,16 @@ async def ack_native_notification(
 @router.post(
     "/observer/notifications/{notification_id}/fail",
     response_model=NotificationFailureResponse,
+    openapi_extra=_receipt_body_schema(NotificationFailureRequest),
 )
 async def fail_native_notification(
     notification_id: str,
-    body: NotificationFailureRequest,
     request: Request,
 ):
     """Record an ambiguous native-display failure for operator recovery."""
-    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    body, owner_principal_id, operator_session_id = await _authenticated_notification_receipt(
+        request, NotificationFailureRequest
+    )
     failed = await native_notification_queue.fail(
         notification_id,
         reason=body.reason,
@@ -3066,14 +3243,16 @@ async def fail_native_notification(
 @router.post(
     "/observer/notifications/{notification_id}/display-attempted",
     response_model=NotificationDisplayAttemptResponse,
+    openapi_extra=_receipt_body_schema(NotificationDisplayAttemptRequest),
 )
 async def mark_native_notification_display_attempted(
     notification_id: str,
-    body: NotificationDisplayAttemptRequest,
     request: Request,
 ):
     """Record the fenced handoff immediately before an OS display attempt."""
-    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    body, owner_principal_id, operator_session_id = await _authenticated_notification_receipt(
+        request, NotificationDisplayAttemptRequest
+    )
     marked = await native_notification_queue.mark_display_attempted(
         notification_id,
         worker_id=body.worker_id,

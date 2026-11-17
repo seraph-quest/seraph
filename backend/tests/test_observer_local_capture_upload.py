@@ -108,7 +108,6 @@ async def capture_env(tmp_path, monkeypatch, async_db):
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", ORIGIN)
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(shots))
     monkeypatch.setenv("SERAPH_SCREEN_ANALYSIS_ENABLED", "1")
-    monkeypatch.setattr(nodes, "get_session", async_db)
     # Observe the queued marker only; no analysis or provider call happens.
     monkeypatch.setattr(screenshot_folder_source, "screenshot_semantic_analysis_enabled", lambda: True)
     local_capture_upload.upload_rate_limiter.reset()
@@ -606,3 +605,410 @@ async def test_uploaded_local_analysis_feeds_digest_report_and_status(capture_en
 
     status = await _screenshot_folder_pipeline_summary(capture_env["shots"])
     assert status["total_observation_count"] == 1
+
+
+# ── Capture store cap (#1263) ──────────────────────────────────────────
+
+
+def _noise_png(seed: int, *, side: int = 400) -> bytes:
+    """An incompressible PNG of about ``side * side * 3`` bytes; distinct seeds
+    are never visual duplicates of each other."""
+    import random
+
+    from PIL import Image
+
+    image = Image.frombytes("RGB", (side, side), random.Random(seed).randbytes(side * side * 3))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", compress_level=0)
+    return buffer.getvalue()
+
+
+def _stored_files(shots: Path) -> list[Path]:
+    return sorted((shots / LOCAL_CAPTURE_UPLOAD_DIRNAME).rglob("*.png"))
+
+
+def _age_stored_files(shots: Path, base: int) -> None:
+    # Fixed, increasing mtimes in upload order (capture ids sort that way).
+    for index, path in enumerate(sorted(_stored_files(shots), key=lambda item: item.name)):
+        os.utime(path, (base + index, base + index))
+
+
+@pytest.mark.asyncio
+async def test_upload_past_cap_prunes_oldest_and_keeps_records_readable(capture_env, monkeypatch):
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    client = capture_env["client"]
+    headers = _headers(capture_env["credential"])
+    images = [_noise_png(seed) for seed in (1, 2, 3)]
+    assert all(450_000 < len(image) < 524_288 for image in images)
+    ids = ["cap-cap-00001", "cap-cap-00002", "cap-cap-00003"]
+
+    responses = []
+    for index, (capture_id, image) in enumerate(zip(ids, images, strict=True)):
+        _age_stored_files(capture_env["shots"], 1_700_000_000 + index * 10)
+        response = await client.post("/api/observer/captures", headers=headers, json=_body(image, capture_id=capture_id))
+        assert response.status_code == 201, response.text
+        responses.append(response.json())
+
+    assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-cap-00002.png", "cap-cap-00003.png"]
+    assert sum(path.stat().st_size for path in _stored_files(capture_env["shots"])) <= 1024 * 1024
+    assert [item["capture_store_over_cap"] for item in responses] == [False, False, False]
+    assert len(await _observations(capture_env["db"])) == 3
+
+    operator_client = capture_env["operator_client"]
+    listing = await operator_client.get("/api/observer/screen-artifacts")
+    assert listing.status_code == 200, listing.text
+    available = {item["observation_id"]: item["artifacts"]["image_available"] for item in listing.json()["items"]}
+    assert available == {
+        responses[0]["observation_id"]: False,
+        responses[1]["observation_id"]: True,
+        responses[2]["observation_id"]: True,
+    }
+
+    first_id = responses[0]["observation_id"]
+    image = await operator_client.get(f"/api/observer/screen-artifacts/{first_id}/image")
+    assert image.status_code == 404
+    assert image.json()["detail"] == "Screen artifact file not found"
+    analysis = await operator_client.get(f"/api/observer/screen-artifacts/{first_id}/analysis")
+    assert analysis.status_code == 200, analysis.text
+    payload = analysis.json()
+    assert payload["image_available"] is False
+    assert payload["analysis"]["image_available"] is False
+    assert payload["analysis"]["width"] == 400 and payload["analysis"]["height"] == 400
+    assert payload["analysis"]["image_bytes"] == len(images[0])
+    assert payload["analysis"]["file_format"] == "png"
+    present = await operator_client.get(f"/api/observer/screen-artifacts/{responses[2]['observation_id']}/analysis")
+    assert present.json()["image_available"] is True
+
+    # Re-uploading the pruned capture id is idempotent and recreates nothing.
+    again = await client.post("/api/observer/captures", headers=headers, json=_body(images[0], capture_id=ids[0]))
+    assert again.status_code == 200
+    assert again.json()["status"] == "duplicate"
+    assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-cap-00002.png", "cap-cap-00003.png"]
+
+
+@pytest.mark.asyncio
+async def test_capture_larger_than_cap_is_kept_and_reported_over_cap(capture_env, monkeypatch):
+    from src.audit.repository import audit_repository
+
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    big = _noise_png(9, side=700)
+    assert len(big) > 1024 * 1024
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(big, capture_id="cap-big-00009")
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["capture_store_over_cap"] is True
+    # The file this request wrote is never pruned by the same request.
+    assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-big-00009.png"]
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        (event.get("details") or {}).get("name") == "local_capture_upload"
+        and event["details"].get("capture_store_over_cap") is True
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_settings_file_skips_capture_store_prune(capture_env, tmp_path, monkeypatch):
+    from src.audit.repository import audit_repository
+
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    (tmp_path / "workspace" / "screen-analysis-settings.json").write_text("{not json", encoding="utf-8")
+
+    def must_not_prune(**_kwargs):
+        raise AssertionError("limits are unknown: nothing may be pruned on defaults")
+
+    monkeypatch.setattr(local_capture_upload, "prune_local_capture_uploads", must_not_prune)
+    assert local_capture_upload.capture_store_limits() is None
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((90, 91, 92)))
+    )
+    assert response.status_code == 201, response.text
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        (event.get("details") or {}).get("name") == "capture_store_prune"
+        and event["details"].get("reason") == "settings_unreadable"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_uncapped_upload_never_walks_the_store(capture_env, monkeypatch):
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 0)
+
+    def must_not_prune(**_kwargs):
+        raise AssertionError("an uncapped store must not be pruned after a write")
+
+    monkeypatch.setattr(local_capture_upload, "prune_local_capture_uploads", must_not_prune)
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((60, 61, 62)))
+    )
+    assert response.status_code == 201, response.text
+    assert len(_stored_files(capture_env["shots"])) == 1
+
+
+@pytest.mark.asyncio
+async def test_prune_failure_never_fails_an_accepted_upload(capture_env, monkeypatch):
+    from src.audit.repository import audit_repository
+
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+
+    def broken_prune(**_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(local_capture_upload, "prune_local_capture_uploads", broken_prune)
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((70, 71, 72)))
+    )
+    assert response.status_code == 201, response.text
+    [observation] = await _observations(capture_env["db"])
+    assert observation.id == response.json()["observation_id"]
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        (event.get("details") or {}).get("name") == "capture_store_prune"
+        and event["details"].get("reason") == "prune_failed"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_upload_image_keeps_digest_and_report_until_analysis_marks_it(capture_env, monkeypatch):
+    from zoneinfo import ZoneInfo
+
+    from src.scheduler.jobs import end_of_day_goal_report, screenshot_observation_digest as digest
+
+    captured_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    response = await capture_env["client"].post(
+        "/api/observer/captures",
+        headers=_headers(capture_env["credential"]),
+        json=_body(
+            _png((80, 81, 82)),
+            captured_at=captured_at,
+            local_analysis={"provider": "apple-vision", "activity": "coding", "project": "seraph",
+                            "summary": "Pruned capture still reported"},
+        ),
+    )
+    assert response.status_code == 201, response.text
+    [stored] = _stored_files(capture_env["shots"])
+    stored.unlink()
+
+    start = captured_at - timedelta(minutes=5)
+    end = captured_at + timedelta(minutes=5)
+    observations = await digest._screenshot_observations(start, end)
+    assert [obs.id for obs in observations] == [response.json()["observation_id"]]
+    summary = await end_of_day_goal_report._screen_summary_for_local_day(captured_at.date(), ZoneInfo("UTC"))
+    assert "Pruned capture still reported" in summary["samples"]
+
+    async def unexpected_analysis(_image_path, _artifacts):
+        raise AssertionError("a missing capture must not reach the provider")
+
+    monkeypatch.setattr(screenshot_folder_source, "analyze_screenshot_image", unexpected_analysis)
+    result = await screenshot_folder_source.analyze_pending_screenshot_folder_observations(limit=10)
+    assert result.failed == 1
+    [observation] = await _observations(capture_env["db"])
+    statuses = [
+        json.loads(item.removeprefix("screenshot_analysis_status:"))
+        for item in json.loads(observation.details_json or "[]")
+        if item.startswith("screenshot_analysis_status:")
+    ]
+    assert statuses[0]["status"] == "source_missing"
+    # Documented consequence: a capture pruned before its analysis ran leaves the digest.
+    assert await digest._screenshot_observations(start, end) == []
+
+
+# ── Native daemon context post (#1248) ─────────────────────────────────
+
+
+def _context_body(window: str = "Code — main.py") -> dict[str, object]:
+    return {"active_window": window, "screen_context": None}
+
+
+@pytest.fixture
+def context_manager_spy(monkeypatch):
+    from src.observer.manager import ContextManager
+
+    manager = ContextManager()
+    monkeypatch.setattr(observer, "context_manager", manager)
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_paired_daemon_context_post_without_origin_is_accepted(capture_env, context_manager_spy):
+    response = await capture_env["client"].post(
+        "/api/observer/context", headers=_headers(capture_env["credential"]), json=_context_body()
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "ok"}
+    context = context_manager_spy.get_context()
+    assert context.active_window == "Code — main.py"
+    assert context.last_daemon_post is not None
+
+
+@pytest.mark.asyncio
+async def test_daemon_context_post_requires_valid_paired_credential(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+
+    missing = await client.post("/api/observer/context", headers=_headers(None), json=_context_body())
+    assert missing.status_code == 401
+    bare = await client.post("/api/observer/context", json=_context_body())
+    assert bare.status_code == 401
+    assert bare.json()["detail"]["code"] == "authentication_required"
+    wrong = await client.post("/api/observer/context", headers=_headers("not-the-credential"), json=_context_body())
+    assert wrong.status_code == 401
+    no_identity = await client.post(
+        "/api/observer/context", headers={"Authorization": f"Bearer {credential}"}, json=_context_body()
+    )
+    assert no_identity.status_code == 401
+    wrong_device = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, **{"X-Seraph-Node-Device": "other-device"}),
+        json=_context_body(),
+    )
+    assert wrong_device.status_code == 403
+    assert wrong_device.json()["detail"]["code"] == "pairing_identity_mismatch"
+    # Authentication precedes body validation: an unauthenticated malformed
+    # body is refused as unauthenticated, not parsed.
+    malformed = await client.post(
+        "/api/observer/context", headers=_headers(None), content=b"{not json",
+    )
+    assert malformed.status_code == 401
+    # Once authenticated, a malformed or oversized body is refused.
+    bad_json = await client.post(
+        "/api/observer/context", headers=_headers(credential), content=b"{not json",
+    )
+    assert bad_json.status_code == 422
+    assert bad_json.json()["detail"]["code"] == "invalid_context_request"
+    oversized = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential),
+        json={"active_window": "x" * (observer._MAX_CONTEXT_REQUEST_BYTES + 1)},
+    )
+    assert oversized.status_code == 413
+    assert oversized.json()["detail"]["code"] == "context_request_too_large"
+    assert context_manager_spy.get_context().active_window is None
+    assert context_manager_spy.get_context().last_daemon_post is None
+
+
+@pytest.mark.asyncio
+async def test_revoked_pairing_cannot_post_context(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    before = await client.post("/api/observer/context", headers=_headers(credential), json=_context_body("Before"))
+    assert before.status_code == 200, before.text
+
+    revoke = await capture_env["operator_client"].post(
+        "/api/nodes/pairings/revoke",
+        headers={"Origin": ORIGIN},
+        json={
+            "extension_id": "seraph.openclaw-device-bridge",
+            "reference": "connectors/nodes/device.yaml",
+            "reason": "lost device",
+        },
+    )
+    assert revoke.status_code == 200, revoke.text
+
+    after = await client.post("/api/observer/context", headers=_headers(credential), json=_context_body("After"))
+    assert after.status_code in {401, 403}, after.text
+    assert context_manager_spy.get_context().active_window == "Before"
+
+
+@pytest.mark.asyncio
+async def test_context_post_pairing_policy_is_enforced(capture_env, context_manager_spy):
+    await _set_pairing_policy(allowed_capabilities=["presence.read"])
+    response = await capture_env["client"].post(
+        "/api/observer/context", headers=_headers(capture_env["credential"]), json=_context_body()
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "capability_scope_not_allowed"
+    assert context_manager_spy.get_context().active_window is None
+
+
+@pytest.mark.asyncio
+async def test_context_post_origin_rules_for_native_ingress(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    # A cookie on the no-Origin path keeps the browser rule, even with the
+    # paired credential.
+    with_cookie = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Cookie="seraph_session=x"),
+        json=_context_body(),
+    )
+    assert with_cookie.status_code == 403
+    assert with_cookie.json()["detail"]["code"] == "mutation_origin_required"
+    # A foreign Origin is refused before any credential check.
+    foreign = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Origin="http://evil"),
+        json=_context_body(),
+    )
+    assert foreign.status_code == 403
+    assert foreign.json()["detail"]["code"] == "origin_forbidden"
+    # The host allow-list still applies on the native path.
+    bad_host = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Host="evil.example"),
+        json=_context_body(),
+    )
+    assert bad_host.status_code == 403
+    assert bad_host.json()["detail"]["code"] == "origin_forbidden"
+    # Any Origin header, even empty or "null", keeps the browser rule.
+    empty_origin = await client.post(
+        "/api/observer/context", headers=_headers(credential, Origin=""), json=_context_body()
+    )
+    assert empty_origin.status_code == 403
+    assert empty_origin.json()["detail"]["code"] == "mutation_origin_required"
+    null_origin = await client.post(
+        "/api/observer/context", headers=_headers(credential, Origin="null"), json=_context_body()
+    )
+    assert null_origin.status_code == 403
+    assert null_origin.json()["detail"]["code"] == "origin_forbidden"
+    # The exemption is exact: another path or method gets no native pass.
+    trailing = await client.post("/api/observer/context/", headers=_headers(credential), json=_context_body())
+    assert trailing.status_code == 403
+    assert trailing.json()["detail"]["code"] == "mutation_origin_required"
+    put = await client.put("/api/observer/context", headers=_headers(credential), json=_context_body())
+    assert put.status_code == 403
+    assert put.json()["detail"]["code"] == "mutation_origin_required"
+    assert context_manager_spy.get_context().active_window is None
+
+
+@pytest.mark.asyncio
+async def test_browser_context_post_keeps_origin_and_operator_path(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    # The browser cockpit path (allowed Origin + operator cookie) is unchanged.
+    browser = await capture_env["operator_client"].post(
+        "/api/observer/context", headers={"Origin": ORIGIN}, json=_context_body("Cockpit")
+    )
+    assert browser.status_code == 200, browser.text
+    assert context_manager_spy.get_context().active_window == "Cockpit"
+    # An allowed Origin without an operator session is refused, and the paired
+    # credential is not browser authority.
+    with_origin_and_credential = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Origin=ORIGIN),
+        json=_context_body("Credential via browser"),
+    )
+    assert with_origin_and_credential.status_code == 401
+    assert context_manager_spy.get_context().active_window == "Cockpit"
+
+
+@pytest.mark.asyncio
+async def test_paired_daemon_context_observation_is_persisted(capture_env, context_manager_spy):
+    response = await capture_env["client"].post(
+        "/api/observer/context",
+        headers=_headers(capture_env["credential"]),
+        json={
+            "active_window": "1Password — Vault",
+            "observation": {"app": "1Password", "window_title": "Vault", "blocked": True},
+            "switch_timestamp": datetime.now(timezone.utc).timestamp(),
+        },
+    )
+    assert response.status_code == 200, response.text
+    [observation] = await _observations(capture_env["db"])
+    assert observation.app_name == "1Password"
+    assert observation.window_title == "Vault"
+    assert observation.blocked is True

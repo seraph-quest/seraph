@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-import time
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +26,8 @@ from config.settings import settings
 from src.app import create_app
 from src.auth import service as auth_service
 from src.db.engine import _configure_sqlite_connection, _ensure_search_indexes, override_session_factory
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
+from tests.support.sqlite_locks import assert_only_bounded_writes, bounded_write_watch
 
 COCKPIT_BASELINE = (
     "/api/auth/session",
@@ -43,14 +44,10 @@ COCKPIT_BASELINE = (
     "/api/work-board/tasks",
 )
 # Before #702 these reads queued for the 5s busy timeout (the cockpit's own
-# fetch timeout is also 5s). Some endpoints are CPU-bound (catalog scans) and
-# host-load sensitive, so the writer's cost is measured against the same
-# fan-out without a writer: a deferred bookkeeping write may add its short lock
-# wait plus scheduling jitter (about 1s on an idle host, more on a saturated
-# one), never the busy timeout. The writer also outlives every fan-out, so no
-# answer can come from the lock being released.
-_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
-_WRITER_ADDED_LATENCY_BOUND_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS - 1.0
+# fetch timeout is also 5s). The proof is causal rather than a stopwatch: the
+# writer outlives every fan-out, so no answer can come from the lock being
+# released, and every writer-lock attempt a read makes in that window must run
+# under a bounded lock wait (``bound_lock_wait``), never the standard timeout.
 _WRITER_HOLD_SECONDS = 60.0
 
 
@@ -87,16 +84,20 @@ async def _cockpit(tmp_path, monkeypatch):
                 cookies={settings.operator_auth_cookie_name: token},
                 timeout=30,
             ) as client:
-                yield client, path
+                with bounded_write_watch(engine.sync_engine) as writes:
+                    yield client, path, writes
+            # Deferred audit retries (#1074) write to this engine: let them
+            # finish before it is disposed, as the `db` fixture does (#1223).
+            await drain_tracked_tasks(timeout_seconds=5.0)
+            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
     finally:
         await engine.dispose()
 
 
-async def _fan_out(client: AsyncClient, paths=COCKPIT_BASELINE) -> dict[str, tuple[int, float, object]]:
+async def _fan_out(client: AsyncClient, paths=COCKPIT_BASELINE) -> dict[str, tuple[int, object]]:
     async def one(path: str):
-        started = time.monotonic()
         response = await client.get(path)
-        return path, (response.status_code, time.monotonic() - started, response.json())
+        return path, (response.status_code, response.json())
 
     return dict(await asyncio.gather(*(one(path) for path in paths)))
 
@@ -144,14 +145,11 @@ def _last_seen(path) -> str:
     return _sql(path, "SELECT last_seen_at FROM operator_sessions")[0][0]
 
 
-def _assert_cockpit_answered(results, baseline, label: str) -> None:
-    for path, (status, elapsed, body) in results.items():
+def _assert_cockpit_answered(results, writes, label: str) -> None:
+    for path, (status, body) in results.items():
         assert status == 200, f"{label}: {path} answered {status}: {body}"
-        added = elapsed - baseline[path][1]
-        assert added < _WRITER_ADDED_LATENCY_BOUND_SECONDS, (
-            f"{label}: {path} took {elapsed:.2f}s ({added:.2f}s over the writer-free fan-out)"
-        )
-    runtime = results["/api/runtime/status"][2]
+    assert_only_bounded_writes(writes, label)
+    runtime = results["/api/runtime/status"][1]
     # Accounting may be blocked in a test workspace, but the effective
     # provider path must still be reported rather than collapsing to unknown.
     assert runtime["provider"] and runtime["provider"] != "unknown", runtime
@@ -162,31 +160,33 @@ def _assert_cockpit_answered(results, baseline, label: str) -> None:
 async def _writer_free_baseline(client):
     await _fan_out(client)  # imports, caches and table checks
     baseline = await _fan_out(client)
-    assert all(status == 200 for status, _elapsed, _body in baseline.values()), baseline
-    return baseline
+    assert all(status == 200 for status, _body in baseline.values()), baseline
 
 
 @pytest.mark.asyncio
 async def test_cockpit_reads_do_not_queue_behind_a_foreign_writer(tmp_path, monkeypatch):
-    async with _cockpit(tmp_path, monkeypatch) as (client, path):
-        baseline = await _writer_free_baseline(client)
+    async with _cockpit(tmp_path, monkeypatch) as (client, path, writes):
+        await _writer_free_baseline(client)
         # A loaded host can make the baseline outlast the 30s touch interval;
         # pin the session as just seen so this case really has no touch due.
         _sql(path, "UPDATE operator_sessions SET last_seen_at = ?", _sqlite_now())
+        writes.clear()
         with _foreign_writer(path):
             # Two polls: nothing deferred by the first may stall the second.
-            _assert_cockpit_answered(await _fan_out(client), baseline, "touch not due")
-            _assert_cockpit_answered(await _fan_out(client), baseline, "touch not due, second poll")
+            _assert_cockpit_answered(await _fan_out(client), writes, "touch not due")
+            _assert_cockpit_answered(await _fan_out(client), writes, "touch not due, second poll")
 
 
 @pytest.mark.asyncio
 async def test_due_session_touch_defers_under_a_foreign_writer(tmp_path, monkeypatch):
-    async with _cockpit(tmp_path, monkeypatch) as (client, path):
-        baseline = await _writer_free_baseline(client)
+    async with _cockpit(tmp_path, monkeypatch) as (client, path, writes):
+        await _writer_free_baseline(client)
         stale = _sqlite_now(timedelta(minutes=-10))
         _sql(path, "UPDATE operator_sessions SET last_seen_at = ?", stale)
+        writes.clear()
         with _foreign_writer(path):
-            _assert_cockpit_answered(await _fan_out(client), baseline, "touch due")
+            _assert_cockpit_answered(await _fan_out(client), writes, "touch due")
+            assert writes, "the due touch was attempted (bounded) while the writer held its lock"
             # The touch could not persist: the validated operator was served
             # and the session was not extended.
             assert _last_seen(path) == stale
@@ -201,14 +201,14 @@ async def test_due_session_touch_defers_under_a_foreign_writer(tmp_path, monkeyp
 
 @pytest.mark.asyncio
 async def test_expired_session_fails_closed_under_a_foreign_writer(tmp_path, monkeypatch):
-    async with _cockpit(tmp_path, monkeypatch) as (client, path):
+    async with _cockpit(tmp_path, monkeypatch) as (client, path, writes):
         assert (await client.get("/api/auth/session")).status_code == 200
         expired = _sqlite_now(timedelta(seconds=-1))
         _sql(path, "UPDATE operator_sessions SET idle_expires_at = ?", expired)
+        writes.clear()
         with _foreign_writer(path):
-            started = time.monotonic()
             response = await client.get("/api/auth/session")
-            assert time.monotonic() - started < _WRITER_ADDED_LATENCY_BOUND_SECONDS
+            assert_only_bounded_writes(writes, "expired session")
             # The revocation write is deferred, never the expiry verdict.
             assert response.status_code == 401
             assert response.json()["detail"]["code"] == "session_expired"
@@ -232,15 +232,17 @@ READ_PATH_PANES = (
 
 @pytest.mark.asyncio
 async def test_memory_panes_and_housekeeping_reads_do_not_wait_for_a_foreign_writer(tmp_path, monkeypatch):
-    async with _cockpit(tmp_path, monkeypatch) as (client, path):
+    async with _cockpit(tmp_path, monkeypatch) as (client, path, writes):
         await _fan_out(client, READ_PATH_PANES)
         baseline = await _fan_out(client, READ_PATH_PANES)
-        assert all(status == 200 for status, _elapsed, _body in baseline.values()), baseline
+        assert all(status == 200 for status, _body in baseline.values()), baseline
         _sql(path, "UPDATE operator_sessions SET last_seen_at = ?", _sqlite_now())
+        writes.clear()
         with _foreign_writer(path):
             results = await _fan_out(client, READ_PATH_PANES)
-        for pane, (status, elapsed, body) in results.items():
+            contended = list(writes)
+        for pane, (status, body) in results.items():
             assert status == 200, f"{pane} answered {status}: {body}"
-            assert elapsed - baseline[pane][1] < _WRITER_ADDED_LATENCY_BOUND_SECONDS, f"{pane} took {elapsed:.2f}s"
-        memory = results["/api/operator/guardian-memory-live-control"][2]
+        assert_only_bounded_writes(contended, "memory panes")
+        memory = results["/api/operator/guardian-memory-live-control"][1]
         assert "degraded" not in str(memory.get("operator_status", "")), memory

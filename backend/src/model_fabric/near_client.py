@@ -14,6 +14,7 @@ callers keep those inside their admitted broker lease.
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 from collections.abc import Callable
 import json
@@ -102,10 +103,12 @@ async def read_near_response(
                 if response.status_code != 200:
                     raise error(prefix + "_http_error")
                 raw = bytearray()
-                async for chunk in response.aiter_raw():
-                    if len(raw) + len(chunk) > cap:
-                        raise error(prefix + "_response_too_large")
-                    raw.extend(chunk)
+                # Closed on every exit (a bound raises mid-stream), not by the collector.
+                async with contextlib.aclosing(response.aiter_raw()) as chunks:
+                    async for chunk in chunks:
+                        if len(raw) + len(chunk) > cap:
+                            raise error(prefix + "_response_too_large")
+                        raw.extend(chunk)
                 return bytes(raw), response.headers
     except (httpx.HTTPError, TimeoutError):
         raise error(prefix + "_transport_uncertain") from None
@@ -161,6 +164,7 @@ async def stream_near_events(
             response = await client.send(request, stream=True, follow_redirects=False)
     except (httpx.HTTPError, TimeoutError):
         raise error(prefix + "_transport_uncertain") from None
+    iterator = None
     try:
         on_open(response.headers)
         if response.headers.get("content-encoding", "identity").lower() != "identity":
@@ -169,7 +173,7 @@ async def stream_near_events(
             raise error(prefix + "_http_error")
         if response.headers.get("content-type", "").split(";")[0].strip().lower() != "text/event-stream":
             raise error(prefix + "_stream_content_type_invalid")
-        iterator = response.aiter_raw().__aiter__()
+        iterator = response.aiter_raw()
         total = 0
         buffer = bytearray()
         data_lines: list[bytes] = []
@@ -213,7 +217,12 @@ async def stream_near_events(
         # The provider closed without the terminal marker.
         raise error(prefix + "_stream_incomplete")
     finally:
-        await response.aclose()
+        try:
+            # Closed on every exit, not by the collector (#1223).
+            if iterator is not None:
+                await iterator.aclose()
+        finally:
+            await response.aclose()
 
 
 async def read_near_billing(

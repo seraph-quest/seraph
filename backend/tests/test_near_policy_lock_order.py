@@ -12,6 +12,7 @@ from sqlalchemy import event, select
 from src.db.models import Goal, WorkBoardAttempt, WorkflowRunState
 from src.work_board import near_text_native as native
 from src.work_board.repository import BoardError
+from tests.support.db import install_session_factory
 from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth
 from tests.test_near_accounting_work_journey import actual_billing_journey, drive, state
@@ -199,26 +200,29 @@ async def test_sqlite_writer_can_take_policy_lock_while_near_waits(actual_billin
 @pytest.mark.asyncio
 @pytest.mark.parametrize('phase', ['admit', 'queue', 'claim', 'terminal'])
 async def test_policy_lock_survives_real_session_commit(actual_billing_journey, monkeypatch, scopes, phase):
-    from src.workflows import job_runtime
     client, factory, _jobs, dispatcher, _controls, engine = actual_billing_journey
     task_id, _ = await create_actual_near_task(client, factory)
     database, lock_path = _paths(engine)
-    original_sessions = factory.accounting_sessions
     observed = []
 
-    @asynccontextmanager
-    async def sessions():
-        selected = False
-        async with original_sessions() as db:
-            yield db
+    def sessions():
+        # Every get_session opens this session; the real session_scope commits it.
+        db = factory()
+        commit = db.commit
+
+        async def observed_commit():
             scope = scopes[-1] if scopes else None
             selected = scope is not None and scope.entered and scope.phase == phase and scope.db is db
             if selected:
                 observed.append(('before_commit', await _probe(database, lock_path)))
-        if selected:
-            observed.append(('after_commit', await _probe(database, lock_path)))
+            await commit()
+            if selected:
+                observed.append(('after_commit', await _probe(database, lock_path)))
 
-    monkeypatch.setattr(job_runtime, 'get_session', sessions)
+        db.commit = observed_commit
+        return db
+
+    install_session_factory(monkeypatch, sessions)
     await asyncio.wait_for(drive(dispatcher), 35)
     assert observed == [('before_commit', 'busy'), ('after_commit', 'busy')]
     assert (await state(factory, task_id))[1].status == 'succeeded'
@@ -229,11 +233,9 @@ async def test_policy_lock_survives_real_session_commit(actual_billing_journey, 
 @pytest.mark.parametrize('phase', ['admit', 'queue', 'claim', 'terminal'])
 @pytest.mark.parametrize('failure', ['guard', 'cancel', 'commit'])
 async def test_error_cancellation_and_real_commit_failure_release_policy_lock(actual_billing_journey, monkeypatch, scopes, phase, failure):
-    from src.workflows import job_runtime
     client, factory, _jobs, dispatcher, controls, engine = actual_billing_journey
     task_id, _ = await create_actual_near_task(client, factory)
     database, lock_path = _paths(engine)
-    original_sessions = factory.accounting_sessions
     original_guard = native.recheck_provider_contact
     failures = []
     bindings = []
@@ -250,16 +252,30 @@ async def test_error_cancellation_and_real_commit_failure_release_policy_lock(ac
 
     @asynccontextmanager
     async def sessions():
-        async with original_sessions() as db:
-            def rollback_finished(_session):
-                scope = scopes[-1] if scopes else None
-                if scope is not None and scope.entered and scope.phase == phase and scope.db is db:
-                    rolled_back.append(_sync_probe(database, lock_path))
-            event.listen(db.sync_session, 'after_rollback', rollback_finished)
-            yield db
+        # Every get_session opens this session; the real session_scope commits
+        # it on success and rolls it back on error. session_scope leaves a
+        # cancelled unit of work to close(), so roll it back here, as this
+        # fixture's session helper always did, to observe the rollback.
+        async with factory() as db:
+            try:
+                yield await _instrument(db)
+            except asyncio.CancelledError:
+                await db.rollback()
+                raise
+
+    async def _instrument(db):
+        commit = db.commit
+
+        def rollback_finished(_session):
+            scope = scopes[-1] if scopes else None
+            if scope is not None and scope.entered and scope.phase == phase and scope.db is db:
+                rolled_back.append(_sync_probe(database, lock_path))
+        event.listen(db.sync_session, 'after_rollback', rollback_finished)
+
+        async def failing_commit():
             scope = scopes[-1] if scopes else None
             if scope is None or not scope.entered or scope.phase != phase or scope.db is not db:
-                return
+                return await commit()
             if failure == 'cancel':
                 bindings.append((scope.witness.task_id, scope.witness.attempt_id, scope.witness.job_id))
                 failures.append('cancel')
@@ -271,9 +287,13 @@ async def test_error_cancellation_and_real_commit_failure_release_policy_lock(ac
                     failures.append('commit')
                     raise BoardError('near_policy_changed', 'fixture failure during original commit')
                 event.listen(db.sync_session, 'before_commit', fail_commit, once=True)
+            return await commit()
+
+        db.commit = failing_commit
+        return db
 
     monkeypatch.setattr(native, 'recheck_provider_contact', guard)
-    monkeypatch.setattr(job_runtime, 'get_session', sessions)
+    install_session_factory(monkeypatch, sessions)
     if failure == 'cancel':
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(_drive_until_marker(dispatcher, failures), 35)

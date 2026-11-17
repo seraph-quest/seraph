@@ -25,7 +25,6 @@ async def copied_evidence_fixture(task_runtime, monkeypatch, *, delegate_input_m
     from tests.general_task_test_transport import prepare_literal_planner
     from src.auth.service import authenticate_session
     sessions, workspace = task_runtime
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", sessions)
     monkeypatch.setattr(settings, "use_delegation", True)
     owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     registry = ToolRegistry()

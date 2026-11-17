@@ -1,16 +1,15 @@
 """Existing target jobs cannot retain stale execution authority after rebind."""
 
-from contextlib import asynccontextmanager
 import shutil
 import sqlite3
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from config.settings import settings
 from tests.test_inference_accounting import accounting_db, request, setup_configuration
 from tests.test_inference_accounting_continuity import run_cli
+from tests.support.db import install_database
 from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 from src.workflows.job_runtime import DurableJobRepository, DurableJobError
 from src.workspace import maintenance_fence
@@ -52,17 +51,9 @@ def database_dump(root):
 
 def bind_target_sessions(monkeypatch, target):
     engine = create_async_engine(f"sqlite+aiosqlite:///{target / 'seraph.db'}", connect_args={"timeout": 5})
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", sessions)
+    # The rebound root's database becomes the default for every get_session
+    # caller (#1241).
+    install_database(monkeypatch, engine)
     monkeypatch.setattr(settings, "workspace_dir", str(target))
     return engine
 

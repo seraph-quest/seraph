@@ -131,13 +131,14 @@ class GeneralTaskPlanner:
         from src.model_fabric.hooks import RouteReceiptSession
         from src.model_fabric.remote_inference_admission import (
             GpuAdmissionRequest, prepare_bound_remote_inference,
-            remote_inference_admission_broker as broker,
+            get_remote_inference_admission_broker,
         )
         from src.llm_runtime import (_provider_profile, _profile_options,
             _governed_preflight_target_async, _governed_research_chat_completion,
             _token_usage_from_payload)
         from src.work_board.general_task import digest
         from src.vault.redaction import redact_secrets_in_text_readonly
+        broker = get_remote_inference_admission_broker()
 
         if _continuation is not None and _specialist is not None:
             raise BoardError("general_task_specialist_not_bound", "Planning roles cannot be combined", status_code=409)

@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -38,6 +39,11 @@ try:
     from capture_upload import CaptureUploadResult, LocalCaptureUploader
 except ImportError:  # pragma: no cover - package import fallback
     from .capture_upload import CaptureUploadResult, LocalCaptureUploader
+
+try:
+    from capture_archive import MIB, prune_capture_archive
+except ImportError:  # pragma: no cover - package import fallback
+    from .capture_archive import MIB, prune_capture_archive
 
 # The paired edge transport is provider-free and can be used by the native
 # capture loop when a node is provisioned.  Keep the import compatible with
@@ -119,6 +125,36 @@ def _archive_provider_capture(
         "analysis_path": str(analysis_path),
         "created_at": now.isoformat(),
     }
+
+
+def _archive_capture(
+    screen_runtime,
+    *,
+    png_bytes: bytes,
+    app_name: str,
+    analysis: dict,
+    upload: "CaptureUploadResult | None",
+) -> dict[str, str] | None:
+    """Archive one capture locally only when the backend does not hold it (#1263).
+
+    When the backend stored the upload (accepted, duplicate or suppressed),
+    its private upload store is the one copy. The archive is the fallback for
+    unpaired, failed, blocked or oversize uploads, and is size-pruned after
+    each write under the limits received from the backend.
+    """
+    if not screen_runtime.preserve_captures or (upload is not None and upload.stored):
+        return None
+    artifacts = _archive_provider_capture(
+        archive_dir=screen_runtime.archive_dir,
+        png_bytes=png_bytes,
+        app_name=app_name,
+        provider_name=screen_runtime.provider.name,
+        analysis=analysis,
+    )
+    prune = getattr(screen_runtime, "prune_archive", None)
+    if callable(prune):
+        prune(reason="write")
+    return artifacts
 
 
 def _analysis_usage(provider_name: str, *, duration_ms: int | None, success: bool) -> dict[str, object]:
@@ -330,6 +366,17 @@ async def fetch_screen_analysis_settings(client: httpx.AsyncClient, url: str) ->
         return None
 
 
+def _receipt_headers(worker: str, edge_headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Daemon identity plus, when paired, the paired-edge credential (#1258).
+
+    The backend accepts a no-Origin notification receipt only with the paired
+    credential; the identity header binds it to the claiming worker.
+    """
+    headers = dict(edge_headers or {})
+    headers["X-Seraph-Daemon-Id"] = worker
+    return headers
+
+
 async def fetch_next_notification(
     client: httpx.AsyncClient,
     url: str,
@@ -356,6 +403,8 @@ async def ack_notification(
     notification_id: str,
     fencing_token: int | None = None,
     worker_id: str | None = None,
+    *,
+    edge_headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Acknowledge a displayed native notification under its lease fence."""
     if fencing_token is None:
@@ -365,7 +414,7 @@ async def ack_notification(
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/ack",
             json={"worker_id": worker, "fencing_token": fencing_token},
-            headers={"X-Seraph-Daemon-Id": worker},
+            headers=_receipt_headers(worker, edge_headers),
         )
         if r.status_code == 200:
             return bool(r.json().get("acked"))
@@ -382,6 +431,7 @@ async def fail_notification(
     reason: str = "display_failed",
     fencing_token: int | None = None,
     worker_id: str | None = None,
+    edge_headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Record an ambiguous display failure for operator reconciliation."""
     if fencing_token is None:
@@ -396,7 +446,7 @@ async def fail_notification(
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/fail",
             json=payload,
-            headers={"X-Seraph-Daemon-Id": worker},
+            headers=_receipt_headers(worker, edge_headers),
         )
         if r.status_code == 200:
             return bool(r.json().get("failed"))
@@ -411,6 +461,8 @@ async def mark_display_attempted(
     notification_id: str,
     fencing_token: int | None,
     worker_id: str | None = None,
+    *,
+    edge_headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Fence the OS handoff before invoking ``osascript``."""
     if fencing_token is None:
@@ -420,13 +472,28 @@ async def mark_display_attempted(
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/display-attempted",
             json={"worker_id": worker, "fencing_token": fencing_token},
-            headers={"X-Seraph-Daemon-Id": worker},
+            headers=_receipt_headers(worker, edge_headers),
         )
         if r.status_code == 200:
             return bool(r.json().get("display_attempted"))
     except Exception:
         pass
     return False
+
+
+def _received_archive_limits(payload: dict | None) -> tuple[int, int] | None:
+    """``(retention_days, max_mb)`` only when the backend sent both as integers."""
+    if not isinstance(payload, dict):
+        return None
+    retention = payload.get("archive_retention_days")
+    max_mb = payload.get("archive_max_mb")
+    if isinstance(retention, bool) or isinstance(max_mb, bool):
+        return None
+    if not isinstance(retention, int) or not isinstance(max_mb, int):
+        return None
+    if retention < 1 or max_mb < 0:
+        return None
+    return retention, max_mb
 
 
 class ScreenAnalysisRuntime:
@@ -442,7 +509,9 @@ class ScreenAnalysisRuntime:
         archive_dir: str,
         blocklist_file: str | None,
         uploader: LocalCaptureUploader | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
+        self._now: Callable[[], datetime] = now or (lambda: datetime.now(timezone.utc))
         self._fallback = {
             "enabled": enabled,
             "provider": provider,
@@ -464,15 +533,23 @@ class ScreenAnalysisRuntime:
         self.archive_retention_days = 365
         self.archive_max_mb = 0
         self._last_capture_monotonic = 0.0
-        self._daily_capture_date = datetime.now(timezone.utc).date().isoformat()
+        self._daily_capture_date = self._now().date().isoformat()
         self._daily_capture_count = 0
+        # The archive is pruned only under limits received from the backend in
+        # this process; before the first successful settings fetch nothing is
+        # deleted, and a failed fetch keeps the last received limits (#1263).
+        self._archive_limits_known = False
+        self._archive_limits_fetched_now = False
+        self._archive_policy: tuple[str, int, int] | None = None
+        self._last_archive_prune: dict[str, object] | None = None
 
     async def refresh(self, client: httpx.AsyncClient, url: str, *, force: bool = False) -> None:
         now = time.time()
         if not force and now - self._last_refresh < 30:
             return
         self._last_refresh = now
-        payload = await fetch_screen_analysis_settings(client, url) or self._fallback
+        fetched = await fetch_screen_analysis_settings(client, url)
+        payload = fetched or self._fallback
         enabled = bool(payload.get("enabled", self._fallback["enabled"]))
         provider_name = str(payload.get("provider") or self._fallback["provider"])
         # ADR-035: the backend's provider names its governed vision route, not
@@ -491,8 +568,17 @@ class ScreenAnalysisRuntime:
         archive_dir = str(payload.get("archive_dir") or self._fallback["archive_dir"])
         min_seconds = max(0, int(payload.get("min_seconds_between_captures") or 0))
         max_daily = max(0, int(payload.get("max_daily_captures") or 0))
-        retention_days = max(1, int(payload.get("archive_retention_days") or 365))
-        archive_max_mb = max(0, int(payload.get("archive_max_mb") or 0))
+        received = _received_archive_limits(fetched)
+        if received is not None:
+            retention_days, archive_max_mb = received
+            self._archive_limits_known = True
+        else:
+            # No usable limits (failed fetch, or a 200 without both keys, e.g.
+            # an error body or a backend whose settings file is unreadable):
+            # keep the last received limits instead of dropping to defaults.
+            retention_days = self.archive_retention_days
+            archive_max_mb = self.archive_max_mb
+        self._archive_limits_fetched_now = received is not None
         signature = (
             enabled,
             provider_name,
@@ -619,12 +705,49 @@ class ScreenAnalysisRuntime:
         self.max_daily_captures = max_daily
         self.archive_retention_days = retention_days
         self.archive_max_mb = archive_max_mb
+        policy = (str(self.archive_dir), retention_days, archive_max_mb)
+        # Prune on a change of received limits (including the first successful
+        # fetch). A failed fetch never triggers this prune, even when the
+        # fallback archive directory differs.
+        if self._archive_limits_known and self._archive_limits_fetched_now and policy != self._archive_policy:
+            self._archive_policy = policy
+            self.prune_archive(reason="settings")
 
     def _refresh_daily_counter(self) -> None:
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = self._now().date().isoformat()
         if today != self._daily_capture_date:
             self._daily_capture_date = today
             self._daily_capture_count = 0
+            self.prune_archive(reason="day_rollover")
+
+    def prune_archive(self, *, reason: str) -> None:
+        """Enforce received ``archive_retention_days`` / ``archive_max_mb`` on the archive.
+
+        ``write`` prunes for size only, and only when a cap is set. Never raises.
+        """
+        if not self._archive_limits_known:
+            return
+        if reason == "write" and self.archive_max_mb <= 0:
+            return
+        try:
+            result = prune_capture_archive(
+                str(self.archive_dir),
+                max_bytes=self.archive_max_mb * MIB,
+                retention_days=None if reason == "write" else self.archive_retention_days,
+                now=self._now(),
+            )
+        except Exception:  # pragma: no cover - prune_capture_archive never raises
+            logger.warning("Capture archive prune failed", exc_info=True)
+            return
+        self._last_archive_prune = {"trigger": reason, "at": self._now().isoformat(), **result.as_status()}
+        if result.deleted_captures:
+            logger.info(
+                "Capture archive pruned (%s): %d captures, %d bytes freed, %d bytes kept",
+                reason,
+                result.deleted_captures,
+                result.freed_bytes,
+                result.remaining_bytes,
+            )
 
     def budget_skip_reason(self, *, now: float) -> str | None:
         self._refresh_daily_counter()
@@ -652,6 +775,7 @@ class ScreenAnalysisRuntime:
             "daily_capture_date": self._daily_capture_date,
             "archive_retention_days": self.archive_retention_days,
             "archive_max_mb": self.archive_max_mb,
+            "archive_prune": self._last_archive_prune,
         }
 
     async def close(self) -> None:
@@ -736,6 +860,84 @@ def _context_observation_payload(observation: dict | None, upload: CaptureUpload
     return {key: value for key, value in observation.items() if key != "capture_upload"}
 
 
+_PAIRING_HINT = (
+    "pair this Mac and set SERAPH_EDGE_DEVICE_ID, SERAPH_EDGE_PAIRING_ID and "
+    "SERAPH_EDGE_CREDENTIAL_FILE"
+)
+
+
+def _response_code(response: object) -> str:
+    try:
+        data = response.json()  # type: ignore[attr-defined]
+    except Exception:
+        return ""
+    detail = data.get("detail") if isinstance(data, dict) else None
+    code = detail.get("code") if isinstance(detail, dict) else None
+    return str(code) if code else ""
+
+
+class ContextPoster:
+    """Posts window context to ``/api/observer/context`` (#1248).
+
+    Paired: the uploader's paired-edge credential headers, no Origin and no
+    cookie, to its validated loopback origin. Unpaired: the plain post, which
+    the backend refuses; the daemon says once that pairing is needed and keeps
+    capturing locally. Refusals are logged once per state change, never on
+    every poll.
+    """
+
+    def __init__(self, url: str, uploader: LocalCaptureUploader | None) -> None:
+        self._url = url
+        self._uploader = uploader
+        self._state: str | None = None
+
+    @property
+    def paired(self) -> bool:
+        return self._uploader is not None
+
+    @property
+    def uploader(self) -> LocalCaptureUploader | None:
+        return self._uploader
+
+    async def post(self, client: httpx.AsyncClient, payload: dict) -> bool:
+        """Post once; return ``False`` only when the backend did not accept it."""
+        if self._uploader is None:
+            if self._state is None:
+                self._state = "unpaired"
+                logger.warning(
+                    "Context posting needs pairing: the backend accepts window context only with the "
+                    "paired edge credential (%s). Screen captures, if enabled, stay local until then.",
+                    _PAIRING_HINT,
+                )
+            response = await client.post(f"{self._url}/api/observer/context", json=payload)
+        else:
+            response = await self._uploader.post_context(client, payload)
+        status = getattr(response, "status_code", None)
+        if not isinstance(status, int):
+            # A response without a status is not proof of acceptance.
+            return False
+        accepted = 200 <= status < 300
+        if self._uploader is None:
+            # The one pairing notice above covers every unpaired refusal.
+            return accepted
+        code = "" if accepted else _response_code(response)
+        state = "accepted" if accepted else f"refused:{status}:{code}"
+        if state != self._state:
+            previous, self._state = self._state, state
+            if accepted:
+                if previous is not None:
+                    logger.info("Context post accepted by the backend again")
+            else:
+                logger.warning(
+                    "Context post not accepted (HTTP %s%s): window context is not reaching the backend; "
+                    "check the paired edge credential and pairing (%s).",
+                    status,
+                    f", {code}" if code else "",
+                    _PAIRING_HINT,
+                )
+        return accepted
+
+
 # ─── Main loop ────────────────────────────────────────────
 
 
@@ -746,6 +948,7 @@ async def poll_loop(
     verbose: bool,
     screen_runtime: ScreenAnalysisRuntime | None = None,
     worker_id: str | None = None,
+    context_poster: ContextPoster | None = None,
 ) -> None:
     """Core polling loop — detect window changes, post to backend.
 
@@ -756,6 +959,13 @@ async def poll_loop(
     was_idle = False
     shown_notification_ids: set[str] = set()
     daemon_worker_id = worker_id or DAEMON_WORKER_ID
+    if context_poster is None:
+        context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
+    # Notification receipts are mutations: when paired they carry the paired
+    # credential, only to the uploader's validated loopback origin (#1258).
+    edge = context_poster.uploader
+    receipt_url = edge.origin if edge is not None else url
+    receipt_headers = edge.edge_headers() if edge is not None else None
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -771,10 +981,11 @@ async def poll_loop(
                     if notification_id in shown_notification_ids:
                         acked = await ack_notification(
                             client,
-                            url,
+                            receipt_url,
                             notification_id,
                             fencing_token,
                             daemon_worker_id,
+                            edge_headers=receipt_headers,
                         )
                         if acked:
                             shown_notification_ids.discard(notification_id)
@@ -783,10 +994,11 @@ async def poll_loop(
                         # backend durably records this exact fenced handoff.
                         display_started = await mark_display_attempted(
                             client,
-                            url,
+                            receipt_url,
                             notification_id,
                             fencing_token,
                             daemon_worker_id,
+                            edge_headers=receipt_headers,
                         ) if notification_id else False
                         if not display_started:
                             if verbose:
@@ -806,10 +1018,11 @@ async def poll_loop(
                                 shown_notification_ids.add(notification_id)
                             acked = await ack_notification(
                                 client,
-                                url,
+                                receipt_url,
                                 notification["id"],
                                 fencing_token,
                                 daemon_worker_id,
+                                edge_headers=receipt_headers,
                             )
                             if acked and notification_id:
                                 shown_notification_ids.discard(notification_id)
@@ -819,10 +1032,11 @@ async def poll_loop(
                         elif notification_id:
                             await fail_notification(
                                 client,
-                                url,
+                                receipt_url,
                                 notification_id,
                                 fencing_token=fencing_token,
                                 worker_id=daemon_worker_id,
+                                edge_headers=receipt_headers,
                             )
 
                 # Check idle state
@@ -958,14 +1172,16 @@ async def poll_loop(
                                             ),
                                         }
                                         observation.update(analysis)
-                                        if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
-                                            observation["capture_artifacts"] = _archive_provider_capture(
-                                                archive_dir=screen_runtime.archive_dir,
+                                        if "capture_artifacts" not in observation:
+                                            archived = _archive_capture(
+                                                screen_runtime,
                                                 png_bytes=png_bytes,
                                                 app_name=app_name,
-                                                provider_name=screen_runtime.provider.name,
                                                 analysis=analysis,
+                                                upload=upload_result,
                                             )
+                                            if archived is not None:
+                                                observation["capture_artifacts"] = archived
                                         if verbose:
                                             ts = time.strftime("%H:%M:%S")
                                             logger.info(
@@ -1027,10 +1243,7 @@ async def poll_loop(
                         payload["observation"] = context_observation
                         payload["switch_timestamp"] = time.time()
 
-                    await client.post(
-                        f"{url}/api/observer/context",
-                        json=payload,
-                    )
+                    context_accepted = await context_poster.post(client, payload)
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
                         logger.info("[%s] \u2192 %s", ts, active_window)
@@ -1054,9 +1267,10 @@ async def poll_loop(
                             and not observation.get("blocked")
                             and capture_error is None
                         ),
-                        "last_context_post_at": datetime.now(timezone.utc).isoformat(),
                         "last_poll_at": poll_at,
                     }
+                    if context_accepted:
+                        status_update["last_context_post_at"] = datetime.now(timezone.utc).isoformat()
                     if capture_error:
                         status_update.update(
                             {
@@ -1087,6 +1301,7 @@ async def periodic_capture_loop(
     idle_timeout: float,
     verbose: bool,
     screen_runtime: ScreenAnalysisRuntime | None = None,
+    context_poster: ContextPoster | None = None,
 ) -> None:
     """Periodic capture loop — takes screenshots at intervals within the same app.
 
@@ -1098,6 +1313,8 @@ async def periodic_capture_loop(
     last_periodic = 0.0
     mode_poll_interval = 60  # poll setting every 60s
     check_interval = 10  # check timer every 10s
+    if context_poster is None:
+        context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -1182,9 +1399,9 @@ async def periodic_capture_loop(
                         last_error_kind=budget_skip_reason,
                         capture_budget=screen_runtime.budget_status(),
                     )
-                    await client.post(
-                        f"{url}/api/observer/context",
-                        json={
+                    await context_poster.post(
+                        client,
+                        {
                             "active_window": active_window,
                             "observation": observation,
                             "switch_timestamp": now,
@@ -1235,14 +1452,16 @@ async def periodic_capture_loop(
                                 ),
                             }
                             observation.update(analysis)
-                            if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
-                                observation["capture_artifacts"] = _archive_provider_capture(
-                                    archive_dir=screen_runtime.archive_dir,
+                            if "capture_artifacts" not in observation:
+                                archived = _archive_capture(
+                                    screen_runtime,
                                     png_bytes=png_bytes,
                                     app_name=app_name,
-                                    provider_name=screen_runtime.provider.name,
                                     analysis=analysis,
+                                    upload=upload_result,
                                 )
+                                if archived is not None:
+                                    observation["capture_artifacts"] = archived
                             if verbose:
                                 ts = time.strftime("%H:%M:%S")
                                 logger.info(
@@ -1302,21 +1521,23 @@ async def periodic_capture_loop(
                     context_observation = _context_observation_payload(observation, upload_result)
                     if context_observation is not None:
                         payload["observation"] = context_observation
-                    await client.post(f"{url}/api/observer/context", json=payload)
+                    context_accepted = await context_poster.post(client, payload)
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
                         logger.info("[%s] periodic capture → %s", ts, app_name)
-                    _write_daemon_status(
-                        state="running",
-                        active_window=active_window,
-                        frontmost_app=app_name,
-                        window_title=window_title,
-                        capture_ready=bool(
+                    periodic_status: dict = {
+                        "state": "running",
+                        "active_window": active_window,
+                        "frontmost_app": app_name,
+                        "window_title": window_title,
+                        "capture_ready": bool(
                             not observation.get("blocked") and "capture_error" not in observation
                         ),
-                        last_context_post_at=datetime.now(timezone.utc).isoformat(),
-                        last_poll_at=poll_at,
-                    )
+                        "last_poll_at": poll_at,
+                    }
+                    if context_accepted:
+                        periodic_status["last_context_post_at"] = datetime.now(timezone.utc).isoformat()
+                    _write_daemon_status(**periodic_status)
                 except httpx.ConnectError:
                     logger.warning("Backend not reachable at %s — will retry", url)
                 except httpx.HTTPError as exc:
@@ -1491,6 +1712,8 @@ async def main() -> None:
             _write_daemon_status(state="running")
             logger.info("heartbeat — daemon alive (poll every %gs)", args.interval)
 
+    # One poster for both loops, so each refusal state is logged once.
+    context_poster = ContextPoster(args.url, uploader)
     heartbeat_task = asyncio.create_task(heartbeat_loop())
     poll_task = asyncio.create_task(
         poll_loop(
@@ -1499,6 +1722,7 @@ async def main() -> None:
             args.idle_timeout,
             args.verbose,
             screen_runtime=screen_runtime,
+            context_poster=context_poster,
         )
     )
     periodic_task = asyncio.create_task(
@@ -1507,6 +1731,7 @@ async def main() -> None:
             args.idle_timeout,
             args.verbose,
             screen_runtime=screen_runtime,
+            context_poster=context_poster,
         )
     )
 

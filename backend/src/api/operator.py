@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 import logging
 import re
@@ -1355,8 +1356,8 @@ def _runtime_status_payload() -> dict[str, Any]:
     # Same chat identity as /api/runtime/status (#1189); local metadata only.
     runtime, _ = _adr035_chat_identity(runtime, _effective_runtime_route_status(runtime, {}))
     return {
-        "version": "2026.11.15",
-        "build_id": "SERAPH_PRIME_v2026.11.15",
+        "version": "2026.11.17",
+        "build_id": "SERAPH_PRIME_v2026.11.17",
         **runtime,
         "provider_profiles": provider_profile_statuses(),
         "timezone": settings.user_timezone,
@@ -3667,6 +3668,24 @@ async def get_operator_benchmark_proof():
     return await asyncio.to_thread(_run_operator_benchmark_proof_sync)
 
 
+async def _benchmark_reports_in_order(*reports):
+    """Await the benchmark reports one after another.
+
+    Their scenarios patch process globals with ``unittest.mock.patch`` across
+    awaits; run concurrently, the patches unwound out of order and left mocks
+    installed after the request (#1223). Reports not reached are closed.
+    """
+    results = []
+    try:
+        for report in reports:
+            results.append(await report)
+    finally:
+        for report in reports[len(results) + 1:]:
+            if inspect.iscoroutine(report):
+                report.close()
+    return results
+
+
 def _run_operator_benchmark_proof_sync() -> dict[str, Any]:
     return asyncio.run(_build_operator_benchmark_proof_payload())
 
@@ -3753,7 +3772,7 @@ async def _build_operator_benchmark_proof_payload() -> dict[str, Any]:
         full_parity_release_gate,
         post_dq_dw_claim_readiness,
         post_dx_final_claim_lift,
-    ) = await asyncio.gather(
+    ) = await _benchmark_reports_in_order(
         build_production_parity_readiness_report(),
         build_guardian_memory_benchmark_report(),
         build_guardian_user_model_benchmark_report(),

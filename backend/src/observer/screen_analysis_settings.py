@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from config.settings import settings
@@ -100,12 +102,18 @@ def read_screen_analysis_settings() -> dict[str, object]:
     """Return persisted screen-analysis settings with env/config overrides applied."""
     payload = _default_screen_analysis_settings()
     path = screen_analysis_settings_path()
+    # ``settings_unreadable`` tells readers that a settings file exists but
+    # could not be read, so the values below are defaults, not the operator's
+    # choices. Destructive readers (capture pruning) must not act on them.
+    payload["settings_unreadable"] = False
     if path.exists():
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            loaded = {}
-        if isinstance(loaded, dict):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            loaded = None
+        if not isinstance(loaded, dict):
+            payload["settings_unreadable"] = True
+        else:
             for key in (
                 "enabled",
                 "provider",
@@ -199,11 +207,31 @@ def read_screen_analysis_settings() -> dict[str, object]:
 
 
 def write_screen_analysis_settings(payload: dict[str, object]) -> None:
-    """Persist local screen-analysis settings with private permissions."""
+    """Persist local screen-analysis settings atomically with private permissions.
+
+    A temp file in the same directory is written, fsynced and renamed into
+    place, so a reader never sees a half-written (corrupt) settings file.
+    """
     path = screen_analysis_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    path.chmod(0o600)
+    content = json.dumps(
+        {key: value for key, value in payload.items() if key != "settings_unreadable"},
+        indent=2,
+        sort_keys=True,
+    )
+    fd, temporary = tempfile.mkstemp(prefix=".screen-analysis-settings-", suffix=".tmp", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
 
 
 def effective_screen_analysis_provider() -> str:

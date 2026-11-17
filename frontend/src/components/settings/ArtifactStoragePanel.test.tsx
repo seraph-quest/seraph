@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ArtifactStoragePanel } from "./ArtifactStoragePanel";
+import { ArtifactStoragePanel, captureStoreLabel } from "./ArtifactStoragePanel";
 import { isGreenModelFabricCanary } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
 
@@ -12,6 +12,30 @@ function mockResponse(data: unknown, ok = true, status = ok ? 200 : 503) {
     json: async () => data,
   };
 }
+
+it("labels stored capture usage for capped, uncapped and unavailable stores", () => {
+  expect(captureStoreLabel({ bytes: 242 * 1024 * 1024, file_count: 269, max_mb: 10240, retention_days: 90 })).toBe(
+    "242 MiB of 10240 MiB cap · kept 90 days",
+  );
+  expect(captureStoreLabel({ bytes: 242 * 1024 * 1024, file_count: 269, max_mb: 0, retention_days: 90 })).toBe(
+    "242 MiB · no size cap · kept 90 days",
+  );
+  expect(captureStoreLabel({ bytes: 3 * 1024 * 1024 + 512 * 1024, file_count: 4, max_mb: 0, retention_days: 90 })).toBe(
+    "3.5 MiB · no size cap · kept 90 days",
+  );
+  expect(captureStoreLabel({ bytes: 500, file_count: 1, max_mb: 0, retention_days: 90 })).toBe(
+    "1 KiB · no size cap · kept 90 days",
+  );
+  expect(captureStoreLabel({ bytes: 0, file_count: 0, max_mb: 8, retention_days: 90 })).toBe(
+    "0 MiB of 8 MiB cap · kept 90 days",
+  );
+  expect(captureStoreLabel({ bytes: null, file_count: null, max_mb: 0, retention_days: 30 })).toBe(
+    "usage unavailable · no size cap · kept 30 days",
+  );
+  expect(
+    captureStoreLabel({ bytes: 2048, file_count: 1, max_mb: null, retention_days: null, limits_status: "settings_unreadable" }),
+  ).toBe("2 KiB · limits unavailable (settings file unreadable) · nothing pruned");
+});
 
 it("does not treat persistence-degraded canaries as green", () => {
   expect(isGreenModelFabricCanary({
@@ -607,6 +631,14 @@ describe("ArtifactStoragePanel", () => {
           exists: true,
           readable: true,
           stored_artifacts: ["image"],
+          capture_store: {
+            bytes: 242 * 1024 * 1024,
+            file_count: 269,
+            max_mb: 10240,
+            retention_days: 90,
+            cap_scope: "per_store",
+            enforced_by: "backend",
+          },
           analysis: {
             provider: "openrouter",
             model: "openrouter/google/gemini-2.5-flash",
@@ -730,6 +762,8 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.getByText("Local screenshot images")).toBeInTheDocument();
     expect(screen.getByText("every 5m · up to 100 images")).toBeInTheDocument();
     expect(screen.getByText("local image files only")).toBeInTheDocument();
+    expect(screen.getByText("Stored captures")).toBeInTheDocument();
+    expect(screen.getByText("242 MiB of 10240 MiB cap · kept 90 days")).toBeInTheDocument();
     expect(screen.getByText("openrouter · openrouter/google/gemini-2.5-flash")).toBeInTheDocument();
     expect(screen.getByText("Local Gemma runtime")).toBeInTheDocument();
     expect(screen.getByText("openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF")).toBeInTheDocument();
@@ -1253,6 +1287,8 @@ describe("ArtifactStoragePanel", () => {
     expect(screen.queryByDisplayValue("on_switch")).not.toBeInTheDocument();
     expect(screen.queryByText("Artifact storage settings unavailable.")).not.toBeInTheDocument();
     expect(screen.queryByText("Screenshot folder settings unavailable.")).not.toBeInTheDocument();
+    // Fallback metadata carries no capture_store: the row is omitted, not invented.
+    expect(screen.queryByText("Stored captures")).not.toBeInTheDocument();
   });
 
   it("shows degraded metadata warning when artifact metadata has an invalid shape", async () => {

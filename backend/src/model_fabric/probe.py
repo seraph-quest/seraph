@@ -33,7 +33,7 @@ from .repository import ModelFabricRepository, ProofPersistenceResult, model_fab
 from .remote_inference_admission import (
     RemoteInferenceAdmissionError,
     RemoteInferenceAdmissionRequest,
-    remote_inference_admission_broker,
+    get_remote_inference_admission_broker,
     prepare_bound_remote_inference,
 )
 from .selector import preflight_candidate
@@ -128,7 +128,7 @@ async def run_capability_probe(
 
     started = time.time()
     timeout_seconds = max(context.deadline_at - started, 0.0)
-    broker = admission_broker if admission_broker is not None else remote_inference_admission_broker
+    broker = admission_broker if admission_broker is not None else get_remote_inference_admission_broker()
     admission_request = RemoteInferenceAdmissionRequest.from_inference_context(
         context,
         operation_id=f"{context.request_id}:capability_probe:{candidate.profile.id}",

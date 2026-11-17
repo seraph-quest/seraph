@@ -12,6 +12,9 @@ from src.observer.context import CurrentContext
 from src.scheduler.jobs.daily_briefing import run_daily_briefing
 from src.scheduler.jobs.evening_review import run_evening_review
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def _slow_run(*args, **kwargs):
     time.sleep(5)

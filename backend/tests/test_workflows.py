@@ -56,6 +56,9 @@ from src.tools.approval import ApprovalTool
 from src.workflows.durable_state import workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 class DummyTool:
     def __init__(self, name: str, responder):
@@ -1497,74 +1500,73 @@ def test_workflow_tool_resume_rejects_legacy_checkpoint_for_authenticated_surfac
         self,
         async_db,
     ):
-        with patch("src.workflows.manager.get_session", async_db):
-            older_call = await audit_repository.log_event(
-                session_id="session-1",
-                actor="agent",
-                event_type="tool_call",
-                tool_name="workflow_web_brief_to_file",
-                summary="Calling workflow",
-                details={"run_fingerprint": "shared-fingerprint", "arguments": {"query": "seraph"}},
-            )
-            await audit_repository.log_event(
-                session_id="session-1",
-                actor="agent",
-                event_type="tool_result",
-                tool_name="workflow_web_brief_to_file",
-                summary="workflow_web_brief_to_file succeeded",
-                details={
-                    "workflow_name": "web-brief-to-file",
-                    "run_fingerprint": "shared-fingerprint",
-                    "call_event_id": older_call.id,
-                    "checkpoint_context": {
-                        "search": {
-                            "tool": "web_search",
-                            "arguments": {"query": "seraph"},
-                            "result": "older cached result",
-                        }
-                    },
-                    "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+        older_call = await audit_repository.log_event(
+            session_id="session-1",
+            actor="agent",
+            event_type="tool_call",
+            tool_name="workflow_web_brief_to_file",
+            summary="Calling workflow",
+            details={"run_fingerprint": "shared-fingerprint", "arguments": {"query": "seraph"}},
+        )
+        await audit_repository.log_event(
+            session_id="session-1",
+            actor="agent",
+            event_type="tool_result",
+            tool_name="workflow_web_brief_to_file",
+            summary="workflow_web_brief_to_file succeeded",
+            details={
+                "workflow_name": "web-brief-to-file",
+                "run_fingerprint": "shared-fingerprint",
+                "call_event_id": older_call.id,
+                "checkpoint_context": {
+                    "search": {
+                        "tool": "web_search",
+                        "arguments": {"query": "seraph"},
+                        "result": "older cached result",
+                    }
                 },
-            )
-            newer_call = await audit_repository.log_event(
-                session_id="session-1",
-                actor="agent",
-                event_type="tool_call",
-                tool_name="workflow_web_brief_to_file",
-                summary="Calling workflow",
-                details={"run_fingerprint": "shared-fingerprint", "arguments": {"query": "seraph"}},
-            )
-            await audit_repository.log_event(
-                session_id="session-1",
-                actor="agent",
-                event_type="tool_result",
-                tool_name="workflow_web_brief_to_file",
-                summary="workflow_web_brief_to_file succeeded",
-                details={
-                    "workflow_name": "web-brief-to-file",
-                    "run_fingerprint": "shared-fingerprint",
-                    "call_event_id": newer_call.id,
-                    "checkpoint_context": {
-                        "search": {
-                            "tool": "web_search",
-                            "arguments": {"query": "seraph"},
-                            "result": "newer cached result",
-                        }
-                    },
-                    "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+                "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+            },
+        )
+        newer_call = await audit_repository.log_event(
+            session_id="session-1",
+            actor="agent",
+            event_type="tool_call",
+            tool_name="workflow_web_brief_to_file",
+            summary="Calling workflow",
+            details={"run_fingerprint": "shared-fingerprint", "arguments": {"query": "seraph"}},
+        )
+        await audit_repository.log_event(
+            session_id="session-1",
+            actor="agent",
+            event_type="tool_result",
+            tool_name="workflow_web_brief_to_file",
+            summary="workflow_web_brief_to_file succeeded",
+            details={
+                "workflow_name": "web-brief-to-file",
+                "run_fingerprint": "shared-fingerprint",
+                "call_event_id": newer_call.id,
+                "checkpoint_context": {
+                    "search": {
+                        "tool": "web_search",
+                        "arguments": {"query": "seraph"},
+                        "result": "newer cached result",
+                    }
                 },
-            )
+                "step_records": [{"id": "search", "tool": "web_search", "status": "succeeded"}],
+            },
+        )
 
-            from src.workflows.manager import _load_workflow_checkpoint_payload
+        from src.workflows.manager import _load_workflow_checkpoint_payload
 
-            details = await _load_workflow_checkpoint_payload(
-                build_workflow_run_identity(
-                    "session-1",
-                    "workflow_web_brief_to_file",
-                    "shared-fingerprint",
-                    run_discriminator=older_call.id,
-                )
+        details = await _load_workflow_checkpoint_payload(
+            build_workflow_run_identity(
+                "session-1",
+                "workflow_web_brief_to_file",
+                "shared-fingerprint",
+                run_discriminator=older_call.id,
             )
+        )
 
         assert details is not None
         assert details["checkpoint_context"]["search"]["result"] == "older cached result"

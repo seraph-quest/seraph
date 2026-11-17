@@ -22,6 +22,7 @@ from src.memory.procedure_selection import current_procedure_preference
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.procedure_service import ProcedureV2InvokeRequest
+from tests.support.db import install_session_factory
 from tests.test_procedure_v2_native_vertical import _activate_v2_routine, _seed_browser_source, _print_browser_canonical_failure
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
@@ -278,15 +279,17 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
             from src.memory import m5, repository as memory_repository_module
             writer = {"active": False, "entries": 0}
             real_begin = preferences._begin_sqlite_immediate
-            real_session = db_engine.get_session
+            real_factory = db_engine.async_session_factory
             async def begin(db):
                 await real_begin(db)
                 writer.update(active=True, entries=writer["entries"] + 1)
+            # Every get_session opens its session here (the real get_session and
+            # session_scope still commit or roll back inside it).
             @asynccontextmanager
             async def session():
                 assert not writer["active"], "nested session inside preference writer"
                 try:
-                    async with real_session() as db:
+                    async with real_factory() as db:
                         yield db
                 finally:
                     writer["active"] = False
@@ -300,7 +303,7 @@ async def test_two_real_manual_invocations_yield_verified_feedback_bundle(async_
                 assert not writer["active"], "Vault-backed redaction inside writer"
                 return await real_sanitize(text)
             monkeypatch.setattr(preferences, "_begin_sqlite_immediate", begin)
-            monkeypatch.setattr(db_engine, "get_session", session)
+            install_session_factory(monkeypatch, session)
             for module, name in ((builtins, "open"), (os, "open"), (Path, "read_bytes"), (Path, "read_text"),
                                  (preferences, "_effect_mac_key"), (memory_repository_module, "_effect_mac_key")):
                 monkeypatch.setattr(module, name, no_writer_io(getattr(module, name)))

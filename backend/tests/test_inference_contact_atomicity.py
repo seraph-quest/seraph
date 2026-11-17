@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.test_inference_accounting import accounting_db, request, setup_configuration
+from tests.support.sync import Signal, assert_blocked
 from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 from src.workflows.inference_accounting import InferenceAccountingError, InferenceProviderContactDenied
 from src.workflows.job_runtime import DurableJobRepository
@@ -72,13 +73,23 @@ async def test_settlement_writer_barrier_precedes_prefunded_sibling_contact(acco
     # Both real handles refer to the same canonical repository instance here.
     first.repository = sibling.repository = repository
     monkeypatch.setattr(repository, "_persist_accounting_witness", blocked_persist)
+    from sqlalchemy import event
+    contact_requested_writer_lock = Signal("sibling contact issued BEGIN IMMEDIATE")
+    def observe(_conn, _cursor, statement, *_args):
+        # Only the sibling contact starts a writer transaction once the
+        # settlement holds the lock (it began before ``entered``).
+        if entered.is_set() and statement.strip().upper().startswith("BEGIN IMMEDIATE"):
+            contact_requested_writer_lock.set()
+    event.listen(accounting_db[1].sync_engine, "before_cursor_execute", observe)
     settle = asyncio.create_task(broker._finish_accounting(first, payload={"usage":{"cost":"0.000150"}}))
     contact = None
     try:
         await asyncio.wait_for(entered.wait(), 3)
         contact = asyncio.create_task(broker._contact_accounting(sibling))
-        await asyncio.sleep(0.05)
-        assert not contact.done(), "second writer must wait for actual settlement transaction"
+        # The contact is observed queued on the SQLite writer lock the open
+        # settlement transaction holds, not merely slow to start.
+        await assert_blocked(contact, at=contact_requested_writer_lock,
+                             what="second writer must wait for actual settlement transaction")
         release.set()
         await asyncio.wait_for(settle, 5)
         with pytest.raises(InferenceProviderContactDenied, match="provider_charge_exceeded_reservation"):
@@ -86,6 +97,7 @@ async def test_settlement_writer_barrier_precedes_prefunded_sibling_contact(acco
     finally:
         release.set()
         await asyncio.gather(settle, *([contact] if contact is not None else []), return_exceptions=True)
+        event.remove(accounting_db[1].sync_engine, "before_cursor_execute", observe)
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
     assert snapshot["committed_microusd"] == 150 and snapshot["reserved_microusd"] == 100

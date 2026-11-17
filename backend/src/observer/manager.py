@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -11,6 +10,8 @@ from src.audit.runtime import log_background_task_event
 from src.observer.context import CurrentContext
 from src.observer.salience import derive_observer_assessment
 from src.observer.user_state import UserState, user_state_machine
+from src.utils.background import track_task
+from src.utils.clock import get_clock
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,7 @@ class ContextManager:
         ).last_daemon_post
         if last_post is None:
             return False
-        return (time.time() - last_post) < max_age_seconds
+        return (get_clock().time() - last_post) < max_age_seconds
 
     async def refresh(
         self,
@@ -330,7 +331,7 @@ class ContextManager:
                         "State transition %s → %s (epoch=%d) — delivering queued bundle",
                         old.user_state, new_user_state, epoch,
                     )
-                    asyncio.create_task(self._deliver_bundle(epoch))
+                    track_task(self._deliver_bundle(epoch), name=f"observer:deliver-bundle:{epoch}")
 
                 await log_background_task_event(
                     task_name="observer_context_refresh",
@@ -416,7 +417,7 @@ class ContextManager:
         """
         from config.settings import settings
 
-        now = datetime.now(timezone.utc)
+        now = get_clock().now(timezone.utc)
         reset_hour = settings.morning_briefing_hour
 
         if last_reset is None:
@@ -440,7 +441,7 @@ class ContextManager:
 
     def update_last_interaction(self) -> None:
         """Stamp the current time as last user interaction."""
-        self._context.last_interaction = datetime.now(timezone.utc)
+        self._context.last_interaction = get_clock().now(timezone.utc)
 
     def update_screen_context(self, active_window: str | None, screen_context: str | None) -> None:
         """Update screen context from native daemon POST.
@@ -453,7 +454,7 @@ class ContextManager:
             self._context.active_window = active_window
         if screen_context is not None:
             self._context.screen_context = screen_context
-        self._context.last_daemon_post = time.time()
+        self._context.last_daemon_post = get_clock().time()
 
     def record_native_notification(
         self,
@@ -465,7 +466,7 @@ class ContextManager:
         """Record the latest native-notification state for operator surfaces."""
         self._context.last_native_notification_title = title
         self._context.last_native_notification_outcome = outcome
-        self._context.last_native_notification_at = recorded_at or datetime.now(timezone.utc)
+        self._context.last_native_notification_at = recorded_at or get_clock().now(timezone.utc)
 
     def decrement_attention_budget(self) -> None:
         """Reduce attention budget by 1 (minimum 0)."""
@@ -497,7 +498,7 @@ class ContextManager:
         """Change interruption mode and reset budget to mode default."""
         self._context.interruption_mode = mode
         self._context.attention_budget_remaining = user_state_machine.get_default_budget(mode)
-        self._context.attention_budget_last_reset = datetime.now(timezone.utc)
+        self._context.attention_budget_last_reset = get_clock().now(timezone.utc)
         logger.info("Interruption mode set to %s (budget=%d)", mode, self._context.attention_budget_remaining)
 
 

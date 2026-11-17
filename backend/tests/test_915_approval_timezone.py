@@ -5,7 +5,7 @@ import json
 import pytest
 
 from tests.test_attention_recovery_journey import (
-    async_db, authenticated_setup_operator, setup_workspace,
+    authenticated_setup_operator, setup_workspace,
     explicit_test_external_permission, forbid_unintercepted_http,
     _prepare_actual_github_task,
 )

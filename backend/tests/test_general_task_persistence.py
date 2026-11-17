@@ -43,13 +43,6 @@ def task_runtime(isolated_runtime):
         from src.work_board.channel_capture import staged_captured_source_identity
         with staged_captured_source_identity():
             async with sessions() as db:
-                # The shared literal SQLite adapter predates input-artifact
-                # reservations; provide the real transaction method they require.
-                @asynccontextmanager
-                async def begin():
-                    with db._session.begin():
-                        yield db
-                db.begin = begin
                 yield db
     return extended_sessions, workspace
 

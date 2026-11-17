@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -12,8 +11,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 
 from config.settings import settings
 from src.auth.service import AuthenticatedOperator
@@ -940,135 +937,108 @@ async def test_pending_proposal_cannot_be_rejected(async_db):
     assert failure.value.code == "proposal_not_rejectable"
 
 
-async def _use_file_backed_proposal_database(tmp_path, monkeypatch):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'proposal-transitions.sqlite'}",
-        connect_args={"timeout": 10},
+@pytest.mark.asyncio
+async def test_concurrent_proposal_rejections_have_one_revision_winner(async_db):
+    # The test's own file database; the triage service reaches it through get_session.
+    session_scope = async_db
+    async with session_scope() as db:
+        proposal = WorkBoardProposal(
+            proposal_id="proposal-reject-race",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            parent_task_id="reject-race-parent",
+            kind="specify",
+            idempotency_key="reject-race-key",
+            status="proposed",
+            provider_contact_started=True,
+            provider_contact_state="succeeded",
+            proposal_json=json.dumps({"proposed_tasks": [], "proposed_links": []}),
+            expires_at=_now() + timedelta(minutes=10),
+        )
+        db.add(proposal)
+        await db.flush()
+        expected_revision = proposal.revision
+
+    results = await asyncio.gather(
+        triage_service.reject_proposal(
+            OWNER,
+            "proposal-reject-race",
+            WorkBoardProposalReject(expected_proposal_revision=expected_revision),
+        ),
+        triage_service.reject_proposal(
+            OWNER,
+            "proposal-reject-race",
+            WorkBoardProposalReject(expected_proposal_revision=expected_revision),
+        ),
+        return_exceptions=True,
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(WorkBoardProposal.__table__.create)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    @asynccontextmanager
-    async def session_scope():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
+    successes = [item for item in results if isinstance(item, dict)]
+    conflicts = [item for item in results if isinstance(item, BoardError)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "stale_proposal_revision"
+    assert successes[0]["status"] == "rejected"
+    assert successes[0]["proposal_revision"] == expected_revision + 1
 
-    monkeypatch.setattr(triage_service, "get_session", session_scope)
-    return engine, session_scope
+    with pytest.raises(BoardError) as stale:
+        await triage_service.reject_proposal(
+            OWNER,
+            "proposal-reject-race",
+            WorkBoardProposalReject(expected_proposal_revision=expected_revision),
+        )
+    assert stale.value.code == "stale_proposal_revision"
+
+    async with session_scope() as db:
+        stored = await db.get(WorkBoardProposal, "proposal-reject-race")
+        assert stored.status == "rejected"
+        assert stored.revision == expected_revision + 1
 
 
 @pytest.mark.asyncio
-async def test_concurrent_proposal_rejections_have_one_revision_winner(tmp_path, monkeypatch):
-    engine, session_scope = await _use_file_backed_proposal_database(tmp_path, monkeypatch)
-    try:
-        async with session_scope() as db:
-            proposal = WorkBoardProposal(
-                proposal_id="proposal-reject-race",
-                owner_principal_id=OWNER.principal_id,
-                owner_session_id=OWNER.session_id,
-                parent_task_id="reject-race-parent",
-                kind="specify",
-                idempotency_key="reject-race-key",
-                status="proposed",
-                provider_contact_started=True,
-                provider_contact_state="succeeded",
-                proposal_json=json.dumps({"proposed_tasks": [], "proposed_links": []}),
-                expires_at=_now() + timedelta(minutes=10),
-            )
-            db.add(proposal)
-            await db.flush()
-            expected_revision = proposal.revision
-
-        results = await asyncio.gather(
-            triage_service.reject_proposal(
-                OWNER,
-                "proposal-reject-race",
-                WorkBoardProposalReject(expected_proposal_revision=expected_revision),
-            ),
-            triage_service.reject_proposal(
-                OWNER,
-                "proposal-reject-race",
-                WorkBoardProposalReject(expected_proposal_revision=expected_revision),
-            ),
-            return_exceptions=True,
+async def test_expiry_and_rejection_race_persist_one_expired_revision(async_db):
+    # The test's own file database; the triage service reaches it through get_session.
+    session_scope = async_db
+    async with session_scope() as db:
+        proposal = WorkBoardProposal(
+            proposal_id="proposal-expiry-reject-race",
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            parent_task_id="expiry-race-parent",
+            kind="specify",
+            idempotency_key="expiry-race-key",
+            status="proposed",
+            provider_contact_started=True,
+            provider_contact_state="succeeded",
+            proposal_json=json.dumps({"proposed_tasks": [], "proposed_links": []}),
+            expires_at=_now() - timedelta(seconds=1),
         )
+        db.add(proposal)
+        await db.flush()
+        expected_revision = proposal.revision
 
-        successes = [item for item in results if isinstance(item, dict)]
-        conflicts = [item for item in results if isinstance(item, BoardError)]
-        assert len(successes) == 1
-        assert len(conflicts) == 1
-        assert conflicts[0].code == "stale_proposal_revision"
-        assert successes[0]["status"] == "rejected"
-        assert successes[0]["proposal_revision"] == expected_revision + 1
+    results = await asyncio.gather(
+        triage_service.get_proposal(OWNER, "proposal-expiry-reject-race"),
+        triage_service.reject_proposal(
+            OWNER,
+            "proposal-expiry-reject-race",
+            WorkBoardProposalReject(expected_proposal_revision=expected_revision),
+        ),
+        return_exceptions=True,
+    )
 
-        with pytest.raises(BoardError) as stale:
-            await triage_service.reject_proposal(
-                OWNER,
-                "proposal-reject-race",
-                WorkBoardProposalReject(expected_proposal_revision=expected_revision),
-            )
-        assert stale.value.code == "stale_proposal_revision"
+    read_receipts = [item for item in results if isinstance(item, dict)]
+    conflicts = [item for item in results if isinstance(item, BoardError)]
+    assert len(read_receipts) == 1, f"expected one expiry read receipt, got: {results!r}"
+    assert len(conflicts) == 1, f"expected one stale revision conflict, got: {results!r}"
+    assert conflicts[0].code == "stale_proposal_revision"
+    assert read_receipts[0]["status"] == "expired"
+    assert read_receipts[0]["proposal_revision"] == expected_revision + 1
 
-        async with session_scope() as db:
-            stored = await db.get(WorkBoardProposal, "proposal-reject-race")
-            assert stored.status == "rejected"
-            assert stored.revision == expected_revision + 1
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_expiry_and_rejection_race_persist_one_expired_revision(tmp_path, monkeypatch):
-    engine, session_scope = await _use_file_backed_proposal_database(tmp_path, monkeypatch)
-    try:
-        async with session_scope() as db:
-            proposal = WorkBoardProposal(
-                proposal_id="proposal-expiry-reject-race",
-                owner_principal_id=OWNER.principal_id,
-                owner_session_id=OWNER.session_id,
-                parent_task_id="expiry-race-parent",
-                kind="specify",
-                idempotency_key="expiry-race-key",
-                status="proposed",
-                provider_contact_started=True,
-                provider_contact_state="succeeded",
-                proposal_json=json.dumps({"proposed_tasks": [], "proposed_links": []}),
-                expires_at=_now() - timedelta(seconds=1),
-            )
-            db.add(proposal)
-            await db.flush()
-            expected_revision = proposal.revision
-
-        results = await asyncio.gather(
-            triage_service.get_proposal(OWNER, "proposal-expiry-reject-race"),
-            triage_service.reject_proposal(
-                OWNER,
-                "proposal-expiry-reject-race",
-                WorkBoardProposalReject(expected_proposal_revision=expected_revision),
-            ),
-            return_exceptions=True,
-        )
-
-        read_receipts = [item for item in results if isinstance(item, dict)]
-        conflicts = [item for item in results if isinstance(item, BoardError)]
-        assert len(read_receipts) == 1, f"expected one expiry read receipt, got: {results!r}"
-        assert len(conflicts) == 1, f"expected one stale revision conflict, got: {results!r}"
-        assert conflicts[0].code == "stale_proposal_revision"
-        assert read_receipts[0]["status"] == "expired"
-        assert read_receipts[0]["proposal_revision"] == expected_revision + 1
-
-        async with session_scope() as db:
-            stored = await db.get(WorkBoardProposal, "proposal-expiry-reject-race")
-            assert stored.status == "expired"
-            assert stored.revision == expected_revision + 1
-    finally:
-        await engine.dispose()
+    async with session_scope() as db:
+        stored = await db.get(WorkBoardProposal, "proposal-expiry-reject-race")
+        assert stored.status == "expired"
+        assert stored.revision == expected_revision + 1
 
 
 @pytest.mark.asyncio

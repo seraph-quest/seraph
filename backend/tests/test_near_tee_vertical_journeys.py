@@ -34,6 +34,7 @@ from tests.near_tee_support import (
 from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_general_task_planner import descriptor, forbid_external_inference  # noqa: F401
 from tests.test_general_task_planner import task_input as _legacy_task_input
+from tests.support.brokers import use_inference_broker
 
 
 NEAR_COST_MICROUSD = 1500  # the fixture's 1_500_000 nano-USD billing record
@@ -51,9 +52,7 @@ def isolated_broker(monkeypatch):
     from src import llm_runtime
     from src.model_fabric import execution, remote_inference_admission
     broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
-    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     return broker
 
 
@@ -238,7 +237,6 @@ async def _card_proposal_world(accounting_db, monkeypatch, *, key="card-near", *
     from tests.test_work_board_m6_provider_free_journey import _goal
 
     sessions = accounting_db[2].accounting_sessions
-    monkeypatch.setattr("src.work_board.triage.get_session", sessions)
     operator, owner = await operator_owner(monkeypatch)
     jobs = DurableJobRepository()
     near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, **near_options)
@@ -357,8 +355,6 @@ async def _guardian_world(isolated_runtime, monkeypatch, tmp_path, *, plans_per_
             return sessions, goal, watch, request, body.model_copy(update={"policy": policy})
         monkeypatch.setattr(policy_fixture, "setup_policy", setup_policy)
     sessions, goal, _watch, _request, row, packet = await policy_fixture.publish_source(isolated_runtime)
-    # The model-fabric receipt/proof store binds its session at import.
-    monkeypatch.setattr("src.model_fabric.repository.get_session", sessions)
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "guardian-lifecycle"))
     prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(settings.workspace_dir)))
     offered = read_snapshot(packet.opportunity_snapshot_artifact_id, packet.opportunity_snapshot_sha256)
@@ -480,19 +476,6 @@ async def _assessed_opportunity(isolated_runtime, monkeypatch, tmp_path):
     from tests.test_work_board_m6_provider_free_journey import SESSION
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
     sessions, row, offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path, plans_per_day=1)
-    monkeypatch.setattr("src.work_board.triage.get_session", sessions)
-    async with sessions() as db:
-        adapter = type(db)
-
-    async def scalars(self, statement, *args, **kwargs):
-        # The isolated synchronous-SQLite adapter mirrors AsyncSession.scalars.
-        return self._session.scalars(statement, *args, **kwargs)
-    monkeypatch.setattr(adapter, "scalars", scalars, raising=False)
-
-    def begin(self):
-        # ... and AsyncSession.begin (the Work input-artifact writer uses it).
-        return self._NestedTransaction(self._session) if self._session.in_transaction() else _Begin(self._session)
-    monkeypatch.setattr(adapter, "begin", begin, raising=False)
     jobs = DurableJobRepository()
     near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
     near.answer = assessment_answer(offered)
@@ -513,23 +496,6 @@ async def _assessed_opportunity(isolated_runtime, monkeypatch, tmp_path):
     request = {"expected_opportunity_revision": opportunity.revision,
         "expected_goal_revision": opportunity.goal_revision, "idempotency_key": "4d6f1f0e-5b7a-4c1e-9f1d-1159a0000001"}
     return sessions, jobs, near, operator, opportunity, request
-
-
-class _Begin:
-    def __init__(self, session):
-        self._session = session
-        self._transaction = None
-
-    async def __aenter__(self):
-        self._transaction = self._session.begin()
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        if exc_type is None:
-            self._transaction.commit()
-        else:
-            self._transaction.rollback()
-        return None
 
 
 @pytest.mark.asyncio
@@ -814,9 +780,7 @@ async def test_mail_reply_near_reservation_resumes_after_crash_before_contact(ac
     restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
     from src import llm_runtime
     from src.model_fabric import execution, remote_inference_admission
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(execution, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", restarted)
+    use_inference_broker(monkeypatch, restarted)
     dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=DurableJobRepository(),
         session_provider=sessions, runner_id="service:work-board")
     reconciled = await dispatcher.reconcile_linked_attempts()
@@ -996,9 +960,7 @@ async def test_calendar_meeting_prep_near_reservation_resumes_after_crash_before
     restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
     from src import llm_runtime
     from src.model_fabric import execution, remote_inference_admission
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(execution, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", restarted)
+    use_inference_broker(monkeypatch, restarted)
     dispatcher = WorkBoardDispatcher(repository=dispatcher.repository, jobs=DurableJobRepository(),
         session_provider=sessions)
     reconciled = await dispatcher.reconcile_linked_attempts()

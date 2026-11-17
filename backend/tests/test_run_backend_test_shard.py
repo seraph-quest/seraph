@@ -8,8 +8,6 @@ import pytest
 from _pytest.mark.expression import Expression
 
 from scripts.run_backend_test_shard import (
-    TRACKED_LEAK_FILES,
-    tracked_warning_args,
     lane_pytest_args,
     run_shard_single_process,
     CANCELLED_EVAL_CONSUMER_NODES,
@@ -927,21 +925,15 @@ def test_junit_dir_keeps_pytests_own_report_for_an_ordinary_failure(tmp_path: Pa
     assert report.read_text() == "<testsuites><testsuite name='pytest'/></testsuites>"
 
 
-def test_tracked_leak_filters_apply_only_to_the_listed_files(tmp_path: Path):
-    tracked = sorted(TRACKED_LEAK_FILES)[0]
-    assert tracked_warning_args(["tests/test_alpha.py"]) == []
-    args = tracked_warning_args([tracked])
-    assert "-Wignore:unclosed file <_io.BufferedReader name=1:ResourceWarning" in args
-    assert "-Wignore:unclosed file <_io.FileIO name=9:ResourceWarning" in args
-    assert "-Wignore:subprocess 4:ResourceWarning" in args
-    assert not any("name='" in arg or "name=0" in arg for arg in args)
+def test_no_file_carries_a_leak_warning_exception(tmp_path: Path):
+    # #1235 removed the last per-file leak exception: every file, including the
+    # one that used to carry it, runs under the same warnings-as-errors policy.
     with patch("scripts.run_backend_test_shard.subprocess.run",
                return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
-        assert run_shard_files(tmp_path, ["tests/test_alpha.py", tracked]) == 0
-    first, second = (call.args[0] for call in mock_run.call_args_list)
-    assert not any(arg.startswith("-W") for arg in first)
-    assert sum(arg.startswith("-W") for arg in second) == len(args)
-    assert all((Path(__file__).resolve().parents[1] / path).is_file() for path in TRACKED_LEAK_FILES)
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py", "tests/test_repo_repair_executors.py"]) == 0
+    commands = [call.args[0] for call in mock_run.call_args_list]
+    assert len(commands) == 2
+    assert not any(arg.startswith("-W") for command in commands for arg in command)
 
 
 def test_cli_files_runs_the_given_files_instead_of_a_shard():
@@ -1004,6 +996,30 @@ def test_single_process_command_keeps_retirement_and_writes_one_report(tmp_path:
     assert "--no-cov" in command
     assert any(arg.startswith("--deselect=tests/test_operator_api.py::") for arg in command)
     assert f"--junitxml={tmp_path / 'junit' / 'single-process.xml'}" in command
+
+
+def test_single_process_reverse_runs_the_files_backwards_with_its_own_report(tmp_path: Path):
+    files = ["tests/test_alpha.py", "tests/test_beta.py", "tests/test_gamma.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
+        assert run_shard_single_process(tmp_path, files, junit_dir=tmp_path / "junit", reverse=True) == 0
+    command = mock_run.call_args.args[0]
+    positions = [command.index(path) for path in files]
+    assert positions == sorted(positions, reverse=True)
+    assert f"--junitxml={tmp_path / 'junit' / 'single-process-reversed.xml'}" in command
+    assert "junit_suite_name=single-process-reversed" in command
+
+
+def test_cli_reverse_is_passed_to_the_single_process_run_and_refused_without_it(tmp_path: Path):
+    argv = ["runner", "--shard-count", "10", "--shard-index", "2", "--single-process", "--reverse"]
+    with patch.object(sys, "argv", argv), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ), patch("scripts.run_backend_test_shard.run_shard_single_process", return_value=0) as single:
+        assert main() == 0
+    assert single.call_args.kwargs["reverse"] is True
+    with patch.object(sys, "argv", ["runner", "--files", "tests/test_alpha.py", "--reverse"]), \
+            pytest.raises(SystemExit):
+        main()
 
 
 def test_single_process_timeout_leaves_a_synthetic_report(tmp_path: Path):

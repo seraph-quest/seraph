@@ -40,6 +40,8 @@ async def _root_state(jobs, job_id):
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="the live observation must finish inside the original producer child's kernel "
+                      "monotonic deadline and the bounded ACK window; the child's clock is not the test's (#1225)")
 async def test_authenticated_live_original_producer_pending_preserves_root_and_physical_bytes(
         accounting_db, monkeypatch, repository_admission_signer, record_property):
     captured, physical_pending = {}, []
@@ -134,9 +136,7 @@ async def test_authenticated_live_original_producer_pending_preserves_root_and_p
                 original_start_identity=ready.start_identity, original_guard_identity=list(ready.guard_identity),
                 original_registration_digest=captured["ack"].registration_digest)
             retain()
-            monkeypatch.setattr(workflows_api, "get_session", accounting_db[2].accounting_sessions)
             monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-            monkeypatch.setattr(work_board_api, "get_session", accounting_db[2].accounting_sessions)
             monkeypatch.setattr(work_board_api.dispatcher, "jobs", jobs)
             monkeypatch.setattr(work_board_api.dispatcher, "general_tasks", tasks)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),

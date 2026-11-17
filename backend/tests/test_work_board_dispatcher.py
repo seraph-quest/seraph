@@ -3266,13 +3266,25 @@ async def _research_cancel_fixture(monkeypatch):
     return dispatcher, worker, quiescing, calls
 
 
+@asynccontextmanager
+async def _finally_cancelled(coroutine):
+    """Run ``coroutine`` as a task; a failed assertion cancels and reaps it
+    rather than leaving it parked on a fake timer at teardown."""
+    task = asyncio.create_task(coroutine)
+    try:
+        yield task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_research_cancel_answers_pending_when_worker_outlives_its_wait(monkeypatch, fake_clock):
     """The ``cancellation_pending`` branch: the cancelled worker is still in its
     cleanup when the endpoint's wait expires (#1227 item 3). The fake clock
     moves only past the production bound, so nothing here races load."""
     dispatcher, worker, quiescing, calls = await _research_cancel_fixture(monkeypatch)
-    async with quiescing:
-        cancel = asyncio.create_task(dispatcher.cancel_research(OWNER, "research-task", object()))
+    async with quiescing, _finally_cancelled(dispatcher.cancel_research(OWNER, "research-task", object())) as cancel:
         await quiescing.wait_reached(task=cancel)
         # Exactly one timer, at the unchanged production bound.
         assert await timers_pending(fake_clock, what="cancel_research waits on the worker") == [
@@ -3298,10 +3310,11 @@ async def test_research_cancel_answers_pending_when_worker_outlives_its_wait(mon
 
 async def test_research_cancel_finishes_after_the_worker_completes_within_its_wait(monkeypatch, fake_clock):
     """The completed branch at the same seam: once the cancelled worker has
-    actually returned, the endpoint finishes the cancel without time moving."""
+    actually finished (here by re-raising its cancellation, so the wait takes
+    the ``CancelledError`` with ``worker.done()`` path), the endpoint finishes
+    the cancel without time moving."""
     dispatcher, worker, quiescing, calls = await _research_cancel_fixture(monkeypatch)
-    async with quiescing:
-        cancel = asyncio.create_task(dispatcher.cancel_research(OWNER, "research-task", object()))
+    async with quiescing, _finally_cancelled(dispatcher.cancel_research(OWNER, "research-task", object())) as cancel:
         await quiescing.wait_reached(task=cancel)
         assert await timers_pending(fake_clock, what="cancel_research waits on the worker") == [5]
         quiescing.release()

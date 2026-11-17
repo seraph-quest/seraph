@@ -344,7 +344,7 @@ class TestChatAPI:
     # #1197: on the old single shared StaticPool connection, the accepted
     # turn's tracked memory consolidation checking in could roll back this
     # request's flushed audit row. Every test database is now a per-test file
-    # with one connection per session, as in production (#1222), so the "file"
+    # with one connection per session, as in production (#1239, #1222), so the "file"
     # parameter below is only the retired spelling of the default.
     @pytest.mark.parametrize("async_db", ["file"], indirect=True)
     @patch("src.memory.vector_store.search_formatted", return_value="")

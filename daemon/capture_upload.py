@@ -104,9 +104,12 @@ def bounded_local_analysis(analysis: dict[str, object] | None) -> dict[str, obje
     return result if len(result) > 1 else None
 
 
+STORED_STATUSES = frozenset({"accepted", "duplicate", "suppressed"})
+
+
 @dataclass(frozen=True)
 class CaptureUploadResult:
-    status: str  # accepted | duplicate | suppressed | blocked | skipped | failed
+    status: str  # accepted | duplicate | suppressed | unconfirmed | blocked | skipped | failed
     reason: str
     capture_id: str = ""
     observation_id: str | None = None
@@ -115,7 +118,7 @@ class CaptureUploadResult:
     @property
     def stored(self) -> bool:
         """True when the backend holds this capture (new or already known)."""
-        return self.status in {"accepted", "duplicate", "suppressed"}
+        return self.status in STORED_STATUSES
 
 
 class LocalCaptureUploader:
@@ -273,10 +276,15 @@ class LocalCaptureUploader:
             detail = data.get("detail")
             code = str(detail.get("code")) if isinstance(detail, dict) and detail.get("code") else ""
             if 200 <= response.status_code < 300:
+                # Only an explicit stored status means the backend holds the
+                # capture; anything else is unconfirmed, so the daemon still
+                # archives it locally (#1263).
+                reported = data.get("status")
+                confirmed = isinstance(reported, str) and reported in STORED_STATUSES
                 return self._record_success(
                     CaptureUploadResult(
-                        status=str(data.get("status") or "accepted"),
-                        reason=str(data.get("reason_code") or "capture_accepted"),
+                        status=reported if confirmed else "unconfirmed",
+                        reason=str(data.get("reason_code") or ("capture_accepted" if confirmed else "upload_status_unconfirmed")),
                         capture_id=capture_id,
                         observation_id=data.get("observation_id") if isinstance(data.get("observation_id"), str) else None,
                         http_status=response.status_code,

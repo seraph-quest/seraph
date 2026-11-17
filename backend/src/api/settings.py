@@ -1,6 +1,7 @@
 """Settings API — runtime mode management."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -518,7 +519,7 @@ def _strip_derived_screen_fields(payload: dict[str, object], *, explicit_provide
     state and is never persisted here."""
     selected = payload.pop("provider_selected", None)
     for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff",
-            "near_tee_vision_available"):
+            "near_tee_vision_available", "settings_unreadable"):
         payload.pop(derived, None)
     if payload.get("provider") in {"", None} and selected == "near_tee" and not explicit_provider:
         # Keep the operator's NEAR TEE choice across a temporarily unavailable slot.
@@ -603,9 +604,14 @@ def _screen_artifact_summary(archive_dir: Path) -> dict[str, object]:
 
 
 def _screenshot_folder_summary(root: Path) -> dict[str, object]:
-    from src.observer.screenshot_folder_source import SUPPORTED_IMAGE_EXTENSIONS, _capture_timestamp
+    from src.observer.screenshot_folder_source import (
+        LOCAL_CAPTURE_UPLOAD_DIRNAME,
+        SUPPORTED_IMAGE_EXTENSIONS,
+        _capture_timestamp,
+    )
 
     resolved_root = root.resolve()
+    capture_store_root = root / LOCAL_CAPTURE_UPLOAD_DIRNAME
     if not root.exists():
         return {
             "status": "not_found",
@@ -614,6 +620,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "last_image_at_source": None,
             "exists": False,
             "readable": False,
+            "capture_store_bytes": 0,
+            "capture_store_file_count": 0,
         }
     if not root.is_dir():
         return {
@@ -623,14 +631,23 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "last_image_at_source": None,
             "exists": True,
             "readable": False,
+            "capture_store_bytes": None,
+            "capture_store_file_count": None,
         }
     image_count = 0
     latest_captured_at: datetime | None = None
     latest_captured_at_source: str | None = None
+    capture_store_bytes = 0
+    capture_store_file_count = 0
     try:
         for path in root.rglob("*"):
             if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
                 image_count += 1
+                if path.is_relative_to(capture_store_root) and not path.is_symlink():
+                    # Same walk: the private daemon upload store's usage.
+                    with contextlib.suppress(FileNotFoundError):
+                        capture_store_bytes += path.lstat().st_size
+                        capture_store_file_count += 1
                 captured_at, captured_at_source = _capture_timestamp(path, resolved_root)
                 if latest_captured_at is None or captured_at > latest_captured_at:
                     latest_captured_at = captured_at
@@ -644,6 +661,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
             "last_image_at_source": None,
             "exists": True,
             "readable": False,
+            "capture_store_bytes": None,
+            "capture_store_file_count": None,
         }
     return {
         "status": "ready" if image_count else "empty",
@@ -654,6 +673,8 @@ def _screenshot_folder_summary(root: Path) -> dict[str, object]:
         "readable": True,
         "summary_status": "ready",
         "summary_failure": None,
+        "capture_store_bytes": capture_store_bytes,
+        "capture_store_file_count": capture_store_file_count,
     }
 
 
@@ -669,6 +690,8 @@ def _fallback_screenshot_folder_summary(root: Path, *, status: str) -> dict[str,
         "readable": readable,
         "summary_status": "partial",
         "summary_failure": status,
+        "capture_store_bytes": None,
+        "capture_store_file_count": None,
     }
 
 
@@ -1118,7 +1141,13 @@ async def set_interruption_mode(body: InterruptionModeRequest):
 @router.get("/settings/screen-analysis")
 async def get_screen_analysis_settings():
     """Return screenshot analysis settings for local image-folder ingestion."""
-    return _read_screen_analysis_settings()
+    payload = _read_screen_analysis_settings()
+    if payload.get("settings_unreadable"):
+        # The stored limits are unknown: omit them so the daemon keeps the last
+        # limits it received instead of pruning its archive on defaults.
+        payload.pop("archive_retention_days", None)
+        payload.pop("archive_max_mb", None)
+    return payload
 
 
 @router.put("/settings/screen-analysis")
@@ -1182,6 +1211,14 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
             if value < 0:
                 raise HTTPException(status_code=422, detail=f"{field_name} must be >= 0")
             payload[field_name] = value
+    from src.observer.local_capture_upload import MIN_CAPTURE_STORE_CAP_MB
+
+    if body.archive_max_mb is not None and 0 < body.archive_max_mb < MIN_CAPTURE_STORE_CAP_MB:
+        # One capture may be up to 8 MiB: a smaller cap would delete every new file.
+        raise HTTPException(
+            status_code=422,
+            detail=f"archive_max_mb must be 0 (no cap) or at least {MIN_CAPTURE_STORE_CAP_MB}",
+        )
     if body.archive_retention_days is not None:
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
@@ -1300,6 +1337,11 @@ async def get_artifact_storage_settings():
         }
     )
     screen_analysis = await get_screen_analysis_settings()
+    from src.observer.local_capture_upload import MIB, capture_store_limits
+
+    capture_store_limit_values = capture_store_limits()
+    capture_store_max_mb = capture_store_limit_values[0] // MIB if capture_store_limit_values else None
+    capture_store_retention_days = capture_store_limit_values[1] if capture_store_limit_values else None
     vlm_status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
     chat_policy = effective_workload_policy("chat_agent")
     inference_policy = {
@@ -1356,6 +1398,16 @@ async def get_artifact_storage_settings():
             "summary_status": screenshot_source.get("summary_status", "ready"),
             "summary_failure": screenshot_source.get("summary_failure"),
             "stored_artifacts": ["image"],
+            "capture_store": {
+                "bytes": screenshot_source.get("capture_store_bytes"),
+                "file_count": screenshot_source.get("capture_store_file_count"),
+                "max_mb": capture_store_max_mb,
+                "retention_days": capture_store_retention_days,
+                "cap_scope": "per_store",
+                "enforced_by": "backend",
+                # "settings_unreadable": limits unknown, so nothing is pruned.
+                "limits_status": "ready" if capture_store_limit_values else "settings_unreadable",
+            },
             "analysis": {
                 "provider": effective_screen_analysis_provider() or "not_configured",
                 "model": effective_screen_analysis_model(),

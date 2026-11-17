@@ -18,6 +18,7 @@ import contextlib
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import stat
@@ -45,6 +46,9 @@ from src.observer.screenshot_folder_source import (
     validate_screenshot_folder_root,
 )
 
+logger = logging.getLogger(__name__)
+
+MIB = 1024 * 1024
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 # Base64 inflates by 4/3; leave headroom for metadata and OCR text.
 MAX_REQUEST_BYTES = (MAX_CAPTURE_BYTES * 4) // 3 + 256 * 1024
@@ -111,6 +115,24 @@ class LocalCaptureResult:
     capture_id: str
     observation_id: str | None
     image_sha256: str
+    pruned_files: int = 0
+    pruned_bytes: int = 0
+    prune_skipped_reason: str | None = None
+    capture_store_over_cap: bool = False
+
+
+@dataclass(frozen=True)
+class CaptureStorePruneResult:
+    """Outcome of one bounded prune of the private capture upload store."""
+
+    deleted_files: int = 0
+    deleted_expired: int = 0
+    deleted_for_size: int = 0
+    freed_bytes: int = 0
+    remaining_bytes: int = 0
+    remaining_files: int = 0
+    over_cap: bool = False
+    skipped_reason: str | None = None
 
 
 def is_blocked_app(app_name: str) -> bool:
@@ -385,12 +407,20 @@ async def ingest_local_capture(
             with contextlib.suppress(OSError):
                 final_path.unlink()
             raise
+        # Still inside the ingest lock: no other write, rename or capture-id
+        # check can interleave with this prune. A prune failure never fails
+        # the accepted capture.
+        prune = await _enforce_store_cap(screenshot_root, keep=final_path)
         return LocalCaptureResult(
             status="accepted",
             reason="capture_accepted",
             capture_id=capture_id,
             observation_id=observation.id,
             image_sha256=image_sha256,
+            pruned_files=prune.deleted_files,
+            pruned_bytes=prune.freed_bytes,
+            prune_skipped_reason=prune.skipped_reason,
+            capture_store_over_cap=prune.over_cap,
         )
 
 
@@ -421,6 +451,230 @@ def _local_summary(analysis: dict[str, object]) -> str | None:
     return summary[:512] or None
 
 
+SETTINGS_UNREADABLE = "settings_unreadable"
+# The smallest non-zero cap: one capture may be up to 8 MiB, so a smaller cap
+# would delete every new file immediately.
+MIN_CAPTURE_STORE_CAP_MB = MAX_CAPTURE_BYTES // (1024 * 1024)
+
+
+def capture_store_limits() -> tuple[int, int] | None:
+    """Return ``(max_bytes, retention_days)`` for the private upload store.
+
+    ``archive_max_mb`` caps this store on its own (per store; ``0`` keeps no
+    size cap). When the daemon is paired the upload store is the screenshot
+    archive, so ``archive_retention_days`` bounds it too: the shorter of it
+    and the observation retention applies.
+
+    ``None`` when the screen-analysis settings file exists but cannot be
+    read: the limits are then unknown and nothing may be pruned on defaults.
+    """
+    from config.settings import settings
+    from src.observer.screen_analysis_settings import read_screen_analysis_settings
+
+    current = read_screen_analysis_settings()
+    if current.get("settings_unreadable"):
+        return None
+    max_mb = max(0, int(current.get("archive_max_mb") or 0))
+    archive_days = max(1, int(current.get("archive_retention_days") or 365))
+    observation_days = max(1, int(settings.screen_observation_retention_days))
+    return max_mb * MIB, min(observation_days, archive_days)
+
+
+async def _enforce_store_cap(screenshot_root: Path, *, keep: Path | None = None) -> CaptureStorePruneResult:
+    """Size-prune the upload store after a write; returns without a walk when uncapped."""
+    try:
+        limits = capture_store_limits()
+        if limits is None:
+            logger.warning("capture store prune skipped: screen-analysis settings are unreadable")
+            return CaptureStorePruneResult(skipped_reason=SETTINGS_UNREADABLE)
+        max_bytes, _retention_days = limits
+        if max_bytes <= 0:
+            return CaptureStorePruneResult()
+        return await asyncio.to_thread(
+            prune_local_capture_uploads,
+            retention_days=None,
+            max_bytes=max_bytes,
+            screenshot_root=screenshot_root,
+            keep=keep,
+        )
+    except Exception:
+        logger.warning("capture store prune after upload failed", exc_info=True)
+        return CaptureStorePruneResult(skipped_reason="prune_failed")
+
+
+@dataclass
+class _StoreEntry:
+    path: Path
+    relative: str
+    size: int
+    mtime_ns: int
+
+
+_COUNTED_SUFFIXES = frozenset({".png", ".jpg", ".partial"})
+
+
+def _scan_capture_store(upload_root: Path, *, max_scan: int) -> tuple[list[_StoreEntry], bool]:
+    """List candidate files without following symlinks; oldest day directories first."""
+    entries: list[_StoreEntry] = []
+    scanned = 0
+    truncated = False
+    pending: list[Path] = [upload_root]
+    while pending:
+        directory = pending.pop(0)
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda item: item.name)
+        except OSError:
+            continue
+        subdirectories: list[Path] = []
+        for child in children:
+            scanned += 1
+            if scanned > max_scan:
+                truncated = True
+                break
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                subdirectories.append(Path(child.path))
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue  # symlinks and special files are never candidates
+            suffix = Path(child.name).suffix.lower()
+            if suffix not in _COUNTED_SUFFIXES:
+                continue
+            path = Path(child.path)
+            entries.append(
+                _StoreEntry(
+                    path=path,
+                    relative=path.relative_to(upload_root).as_posix(),
+                    size=int(info.st_size),
+                    mtime_ns=int(info.st_mtime_ns),
+                )
+            )
+        if truncated:
+            break
+        # Day directories are named YYYY-MM-DD, so name order is age order.
+        pending = subdirectories + pending
+    return entries, truncated
+
+
+def _unlink_regular_file(path: Path) -> bool:
+    """Delete one regular file; ``True`` when it is gone afterwards."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def prune_local_capture_uploads(
+    *,
+    retention_days: int | None,
+    max_bytes: int = 0,
+    screenshot_root: Path | None = None,
+    now: datetime | None = None,
+    max_files: int = 5_000,
+    max_scan: int = 200_000,
+    keep: Path | None = None,
+) -> CaptureStorePruneResult:
+    """Bounded age and size prune of the private upload store; oldest first.
+
+    Only regular ``.png``/``.jpg``/``.partial`` files inside the private
+    upload subdirectory are counted or deleted: never the operator's own
+    screenshot-folder images, never a symlink or its target. Every caller
+    holds the screenshot ingest lock, so no write is in flight and any
+    ``.partial`` is a crash leftover, pruned like a capture. ``keep`` (the
+    file the current request just wrote) is never deleted. ``max_bytes`` of
+    ``0`` keeps no size cap. Every failure deletes less, never more.
+    """
+    upload_root = local_capture_upload_root(screenshot_root)
+    try:
+        _require_private_store(upload_root)
+    except LocalCaptureRejected:
+        return CaptureStorePruneResult(skipped_reason="capture_store_unsafe")
+    if not upload_root.is_dir():
+        return CaptureStorePruneResult()
+    if retention_days is None and max_bytes <= 0:
+        return CaptureStorePruneResult()
+
+    keep_path = keep.resolve() if keep is not None else None
+    entries, truncated = _scan_capture_store(upload_root, max_scan=max_scan)
+    entries.sort(key=lambda entry: (entry.mtime_ns, entry.relative))
+    deleted_expired = 0
+    deleted_for_size = 0
+    freed = 0
+    bound_hit = False
+    touched_dirs: set[Path] = set()
+
+    def protected(entry: _StoreEntry) -> bool:
+        return keep_path is not None and entry.path.resolve() == keep_path
+
+    def delete(entry: _StoreEntry) -> bool:
+        nonlocal freed
+        if not _unlink_regular_file(entry.path):
+            return False
+        freed += entry.size
+        touched_dirs.add(entry.path.parent)
+        return True
+
+    survivors: list[_StoreEntry] = []
+    if retention_days is not None:
+        current = now or datetime.now(timezone.utc)
+        cutoff_ns = int((current - timedelta(days=max(1, retention_days))).timestamp() * 1_000_000_000)
+        for entry in entries:
+            if entry.mtime_ns < cutoff_ns and not protected(entry):
+                if deleted_expired >= max_files:
+                    bound_hit = True  # expired files remain: report it
+                elif delete(entry):
+                    deleted_expired += 1
+                    continue
+            survivors.append(entry)
+    else:
+        survivors = list(entries)
+
+    total = sum(entry.size for entry in survivors)
+    remaining: list[_StoreEntry] = []
+    if max_bytes > 0:
+        for entry in survivors:
+            if total > max_bytes and not protected(entry):
+                if deleted_expired + deleted_for_size >= max_files:
+                    bound_hit = True
+                elif delete(entry):
+                    deleted_for_size += 1
+                    total -= entry.size
+                    continue
+            remaining.append(entry)
+    else:
+        remaining = survivors
+
+    # Remove only the day directories this run emptied.
+    for directory in sorted(touched_dirs, reverse=True):
+        if directory != upload_root and directory.parent == upload_root and not directory.is_symlink():
+            with contextlib.suppress(OSError):
+                directory.rmdir()  # only succeeds when empty
+    return CaptureStorePruneResult(
+        deleted_files=deleted_expired + deleted_for_size,
+        deleted_expired=deleted_expired,
+        deleted_for_size=deleted_for_size,
+        freed_bytes=freed,
+        remaining_bytes=total,
+        remaining_files=len(remaining),
+        over_cap=(max_bytes > 0 and total > max_bytes) or truncated or bound_hit,
+    )
+
+
 def cleanup_local_capture_uploads(
     *,
     retention_days: int,
@@ -434,33 +688,9 @@ def cleanup_local_capture_uploads(
     operator's own screenshot-folder images. Leftover ``.partial`` temp files
     from interrupted writes are removed on the same schedule.
     """
-    upload_root = local_capture_upload_root(screenshot_root)
-    try:
-        _require_private_store(upload_root)
-    except LocalCaptureRejected:
-        return 0
-    if not upload_root.is_dir():
-        return 0
-    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=max(1, retention_days))
-    cutoff_ts = cutoff.timestamp()
-    deleted = 0
-    for dirpath, dirnames, filenames in os.walk(upload_root, followlinks=False):
-        # os.walk lists symlinked directories but never descends into them.
-        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
-        for name in sorted(filenames):
-            if deleted >= max_files:
-                break
-            path = Path(dirpath) / name
-            if path.suffix.lower() not in {".png", ".jpg", ".partial"}:
-                continue
-            try:
-                info = path.lstat()
-                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff_ts:
-                    path.unlink()
-                    deleted += 1
-            except OSError:
-                continue
-    for directory in sorted((p for p in upload_root.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True):
-        with contextlib.suppress(OSError):
-            directory.rmdir()  # only succeeds when empty
-    return deleted
+    return prune_local_capture_uploads(
+        retention_days=retention_days,
+        screenshot_root=screenshot_root,
+        now=now,
+        max_files=max_files,
+    ).deleted_files

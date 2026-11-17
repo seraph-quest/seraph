@@ -50,8 +50,8 @@ Inbox, follow progress on the Work board, and help Seraph learn what helps you.
 
 Available workflows depend on permissions, configuration, and host support.
 See [Development Status](docs/implementation/STATUS.md) for exact limits and
-[v2026.11.15 release notes](docs/implementation/24-release-2026-11-15.md) for the
-latest repository repair on NEAR TEE, composition profile and test determinism changes.
+[v2026.11.17 release notes](docs/implementation/25-release-2026-11-17.md) for the
+latest test determinism, daemon authentication, screenshot cap and GitHub activity changes.
 
 ## Quick Start
 

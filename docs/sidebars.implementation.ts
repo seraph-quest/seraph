@@ -31,6 +31,7 @@ const sidebars: SidebarsConfig = {
         },
         'docs-contract',
         'screenshot-folder-source',
+        'release-2026-11-17',
         'release-2026-11-15',
         'release-2026-11-14',
         'release-2026-10-07',

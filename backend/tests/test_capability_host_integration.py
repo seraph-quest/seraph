@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import inspect
 import multiprocessing
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +30,7 @@ from src.extensions.capability_execution import (
     current_capability_execution_host,
 )
 from src.db.models import ApprovalRequest
+from tests.support.db import install_fake_session
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.tools.approval import wrap_tools_for_approval
 from src.tools.filesystem_tool import read_file, write_file
@@ -522,11 +522,7 @@ async def test_repository_consumed_approval_issues_one_use_host_binding(monkeypa
 
     db = _Db()
 
-    @asynccontextmanager
-    async def _get_session():
-        yield db
-
-    monkeypatch.setattr("src.approval.repository.get_session", _get_session)
+    install_fake_session(monkeypatch, lambda: db)
 
     binding = await approval_repository.consume_approved(
         session_id="session:test",
@@ -628,11 +624,7 @@ async def test_repository_selector_ignores_other_owner_and_rejects_duplicate_exa
 
     db = _Db()
 
-    @asynccontextmanager
-    async def _get_session():
-        yield db
-
-    monkeypatch.setattr("src.approval.repository.get_session", _get_session)
+    install_fake_session(monkeypatch, lambda: db)
 
     assert await approval_repository.has_approved(
         session_id="conversation-selector",

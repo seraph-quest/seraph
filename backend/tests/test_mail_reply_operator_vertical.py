@@ -498,6 +498,7 @@ def pure_reply_writer_guard(monkeypatch):
     import os
     from src.integrations import mail_reply_runtime as runtime
     from src.db import engine
+    from tests.support.db import install_session_factory
     from src.vault import crypto as vault_crypto
     inside=ContextVar("inside_exact_mail_writer",default=False)
     original_writer=runtime.writer
@@ -516,11 +517,12 @@ def pure_reply_writer_guard(monkeypatch):
         return call
     for target,name in ((Path,"open"),(Path,"read_bytes"),(Path,"read_text"),(builtins,"open"),(os,"open"),(vault_crypto,"decrypt"),(runtime,"decrypt")):
         monkeypatch.setattr(target,name,guarded(getattr(target,name)))
-    original_session=engine.get_session
+    # Every get_session caller opens through the default factory: guard it (#1241).
+    original_factory=engine.async_session_factory
     def session():
         assert not inside.get(), "nested session inside immediate Mail writer"
-        return original_session()
-    monkeypatch.setattr(engine,"get_session",session)
+        return original_factory()
+    install_session_factory(monkeypatch,session)
 
 
 @pytest.mark.asyncio

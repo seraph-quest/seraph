@@ -8,7 +8,6 @@ The brief tool reads only from the local HTTP server created by this test.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager, ExitStack
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -20,16 +19,14 @@ from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
 import pytest
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 from unittest.mock import patch
 
 from config.settings import settings
 from src.auth.service import test_bypass_operator as _test_bypass_operator
 from src.approval.runtime import reset_runtime_context, set_runtime_context
-from src.db.engine import _ensure_search_indexes
+from src.db.engine import _ensure_search_indexes, create_database_engine
+from tests.support.db import install_database
 from src.goals.contracts import CriterionVerifierKind, GoalAdmissionBudget, GoalSuccessCriterion
 from src.goals.repository import goal_repository
 from src.extensions.source_operations import collect_source_evidence_bundle
@@ -44,52 +41,18 @@ from src.workflows.job_runtime import durable_job_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
-_SESSION_PATCH_TARGETS = (
-    "src.db.engine.get_session",
-    "src.goals.repository.get_session",
-    "src.audit.repository.get_session",
-    "src.memory.control.get_session",
-    "src.workflows.job_runtime.get_session",
-)
+async def _open_database(path: Path, monkeypatch):
+    """Open the journey's file database with the production engine and install it.
 
-
-async def _open_database(path: Path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{path}",
-        connect_args={"check_same_thread": False},
-        pool_size=5,
-        max_overflow=0,
-        pool_timeout=5,
-    )
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.close()
-
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    Every ``get_session`` caller then reaches it unpatched (#1222, #1241). A
+    restart disposes the engine and opens the same file again.
+    """
+    engine = create_database_engine(f"sqlite+aiosqlite:///{path}")
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
         await _ensure_search_indexes(connection)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    return engine, _get_session
-
-
-def _patch_database(stack: ExitStack, get_session):
-    for target in _SESSION_PATCH_TARGETS:
-        stack.enter_context(patch(target, get_session))
+    install_database(monkeypatch, engine)
+    return engine
 
 
 class _LocalSourceHandler(BaseHTTPRequestHandler):
@@ -255,9 +218,7 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
     source_thread.start()
     source_url = f"http://127.0.0.1:{source_server.server_port}/brief"
 
-    stack = ExitStack()
-    engine, get_session = await _open_database(database_path)
-    _patch_database(stack, get_session)
+    engine = await _open_database(database_path, monkeypatch)
     try:
         snapshot = await goal_repository.create(
             "Keep the local goal snapshot current",
@@ -389,11 +350,8 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
 
         # Re-open the same on-disk database as a new worker.  Durable job
         # identity and audit receipts must make the same calls replay-safe.
-        stack.close()
         await engine.dispose()
-        engine, get_session = await _open_database(database_path)
-        stack = ExitStack()
-        _patch_database(stack, get_session)
+        engine = await _open_database(database_path, monkeypatch)
         with patch.object(strategist_tick, "GoalSnapshotToFileService", snapshot_service):
             snapshot_after_restart = await strategist_tick._run_opted_in_goal_snapshot(
                 parent_job_id=snapshot_parent,
@@ -486,7 +444,6 @@ async def test_file_backed_goal_journey_survives_restart_and_reversible_correcti
         assert any(item["verification"] == "passed" for item in outcomes)
         assert all(item["learning"] == "no_learning" for item in outcomes)
     finally:
-        stack.close()
         await engine.dispose()
         source_server.shutdown()
         source_server.server_close()

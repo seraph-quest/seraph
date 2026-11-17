@@ -56,41 +56,26 @@ async def test_consumption_winner_is_spent_receipt_never_undo(client,async_db):
     assert spent['controls']==[]
 
 @pytest.mark.asyncio
-async def test_revoke_consume_race_file_database_has_one_winner(tmp_path,monkeypatch):
+async def test_revoke_consume_race_file_database_has_one_winner(async_db):
     import asyncio
-    from contextlib import asynccontextmanager
-    from sqlalchemy.ext.asyncio import create_async_engine,async_sessionmaker
-    from sqlmodel import SQLModel
     from src.approval import repository
     from src.db.models import ApprovalRequest,Session
-    engine=create_async_engine('sqlite+aiosqlite:///'+str(tmp_path/'approval-race.db'))
-    async with engine.begin() as conn:await conn.run_sync(SQLModel.metadata.create_all)
-    factory=async_sessionmaker(engine,expire_on_commit=False)
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback();raise
-    monkeypatch.setattr(repository,'get_session',sessions)
-    try:
-        async with sessions() as db:
-            db.add(Session(id='race-conversation',owner_principal_id='operator:race'));await db.flush()
-            row=ApprovalRequest(id='race-action',session_id='race-conversation',tool_name='exact-effect',
-                owner_principal_id='operator:race',operator_session_id='root-race',fingerprint='race',status='approved',
-                expires_at=datetime.now(timezone.utc)+timedelta(minutes=5))
-            db.add(row);await db.flush()
-        row=await repository.approval_repository.get('race-action')
-        outcome,consumed=await asyncio.gather(
-            repository.approval_repository.revoke_unconsumed('race-action',expected_revision=repository.approval_state_revision(row),
-                owner_principal_id='operator:race',operator_session_id='root-race'),
-            repository.approval_repository.consume_approved(session_id='race-conversation',tool_name='exact-effect',fingerprint='race',
-                approval_id='race-action',owner_principal_id='operator:race',owner_operator_session_id='root-race'))
-        final=await repository.approval_repository.get('race-action')
-        assert (outcome=='revoked' and not consumed and final.status=='denied') or (outcome=='already_consumed' and consumed and final.status=='consumed')
-    finally:await engine.dispose()
+    # The test's own file database: the racers use independent pooled connections.
+    sessions=async_db
+    async with sessions() as db:
+        db.add(Session(id='race-conversation',owner_principal_id='operator:race'));await db.flush()
+        row=ApprovalRequest(id='race-action',session_id='race-conversation',tool_name='exact-effect',
+            owner_principal_id='operator:race',operator_session_id='root-race',fingerprint='race',status='approved',
+            expires_at=datetime.now(timezone.utc)+timedelta(minutes=5))
+        db.add(row);await db.flush()
+    row=await repository.approval_repository.get('race-action')
+    outcome,consumed=await asyncio.gather(
+        repository.approval_repository.revoke_unconsumed('race-action',expected_revision=repository.approval_state_revision(row),
+            owner_principal_id='operator:race',operator_session_id='root-race'),
+        repository.approval_repository.consume_approved(session_id='race-conversation',tool_name='exact-effect',fingerprint='race',
+            approval_id='race-action',owner_principal_id='operator:race',owner_operator_session_id='root-race'))
+    final=await repository.approval_repository.get('race-action')
+    assert (outcome=='revoked' and not consumed and final.status=='denied') or (outcome=='already_consumed' and consumed and final.status=='consumed')
 
 @pytest.mark.asyncio
 async def test_current_owner_redacted_inventory_real_goal_revoke_and_stale_revision(client,async_db):

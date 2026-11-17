@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
-from contextlib import asynccontextmanager
 import re
 from threading import Event
 from types import SimpleNamespace
@@ -11,10 +10,9 @@ from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
+from tests.support.db import install_session_factory
 
 from config.settings import settings
 from src.auth.middleware import validate_request_boundary
@@ -174,27 +172,25 @@ async def test_refresh_tombstone_insert_failure_rolls_back_active_credential(
     operator = await authenticate_token(old_token, touch=False)
     flush_calls = 0
 
-    @asynccontextmanager
-    async def failing_get_session():
-        nonlocal flush_calls
-        async with async_db() as db:
-            original_flush = db.flush
+    def failing_flush_session():
+        db = async_db.factory()
+        original_flush = db.flush
 
-            async def flush(*args, **kwargs):
-                nonlocal flush_calls
-                flush_calls += 1
-                if flush_calls == 2:
-                    raise IntegrityError(
-                        "forced tombstone insert failure",
-                        {},
-                        RuntimeError("duplicate tombstone"),
-                    )
-                return await original_flush(*args, **kwargs)
+        async def flush(*args, **kwargs):
+            nonlocal flush_calls
+            flush_calls += 1
+            if flush_calls == 2:
+                raise IntegrityError(
+                    "forced tombstone insert failure",
+                    {},
+                    RuntimeError("duplicate tombstone"),
+                )
+            return await original_flush(*args, **kwargs)
 
-            monkeypatch.setattr(db, "flush", flush)
-            yield db
+        db.flush = flush
+        return db
 
-    monkeypatch.setattr("src.auth.service.get_session", failing_get_session)
+    install_session_factory(monkeypatch, failing_flush_session)
     with pytest.raises(IntegrityError):
         await create_session(
             replace_session_id=operator.session_id,
@@ -560,48 +556,25 @@ async def test_server_mints_operator_principal_and_conversation_id_is_only_scope
 
 
 @pytest.mark.asyncio
-async def test_concurrent_refresh_has_exactly_one_winner(tmp_path, monkeypatch):
-    # The normal auth fixture intentionally uses a StaticPool for speed.  CAS
-    # correctness needs two real SQLite connections so the database, rather
-    # than an in-memory connection-sharing artifact, arbitrates the race.
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'operator-auth.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
+async def test_concurrent_refresh_has_exactly_one_winner(db):
+    # CAS correctness needs two real SQLite connections so the database,
+    # rather than a connection-sharing artifact, arbitrates the race; the
+    # test's own file database has the production pool.
+    token, operator = await create_session()
+    operator = await authenticate_token(token, touch=False)
+    results = await asyncio.gather(
+        create_session(
+            replace_session_id=operator.session_id,
+            expected_token_hash=operator._token_hash,
+        ),
+        create_session(
+            replace_session_id=operator.session_id,
+            expected_token_hash=operator._token_hash,
+        ),
+        return_exceptions=True,
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def file_get_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr("src.auth.service.get_session", file_get_session)
-    try:
-        token, operator = await create_session()
-        operator = await authenticate_token(token, touch=False)
-        results = await asyncio.gather(
-            create_session(
-                replace_session_id=operator.session_id,
-                expected_token_hash=operator._token_hash,
-            ),
-            create_session(
-                replace_session_id=operator.session_id,
-                expected_token_hash=operator._token_hash,
-            ),
-            return_exceptions=True,
-        )
-        async with factory() as db:
-            rows = (await db.execute(select(OperatorSession))).scalars().all()
-    finally:
-        await engine.dispose()
+    async with db() as session:
+        rows = (await session.execute(select(OperatorSession))).scalars().all()
     assert sum(isinstance(result, tuple) for result in results) == 1, repr(results)
     loser = next(result for result in results if isinstance(result, Exception))
     assert isinstance(loser, AuthFailure)
@@ -611,32 +584,9 @@ async def test_concurrent_refresh_has_exactly_one_winner(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_http_refresh_returns_one_success_and_one_bounded_denial(
-    tmp_path,
-    monkeypatch,
-):
+async def test_concurrent_http_refresh_returns_one_success_and_one_bounded_denial(db):
     from src.app import create_app
 
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'operator-http-auth.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def file_get_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr("src.auth.service.get_session", file_get_session)
     app = create_app()
     clients = [
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test"),
@@ -661,7 +611,6 @@ async def test_concurrent_http_refresh_returns_one_success_and_one_bounded_denia
     finally:
         await clients[0].aclose()
         await clients[1].aclose()
-        await engine.dispose()
 
     assert sorted(response.status_code for response in results) == [200, 401]
     denied = next(response for response in results if response.status_code == 401)

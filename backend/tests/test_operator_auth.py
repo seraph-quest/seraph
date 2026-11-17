@@ -561,9 +561,9 @@ async def test_server_mints_operator_principal_and_conversation_id_is_only_scope
 
 @pytest.mark.asyncio
 async def test_concurrent_refresh_has_exactly_one_winner(tmp_path, monkeypatch):
-    # The normal auth fixture intentionally uses a StaticPool for speed.  CAS
-    # correctness needs two real SQLite connections so the database, rather
-    # than an in-memory connection-sharing artifact, arbitrates the race.
+    # CAS correctness needs two real SQLite connections so the database, not
+    # a shared connection, arbitrates the race. (The default fixture also has
+    # a connection per session since #1222; this engine predates that.)
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'operator-auth.db'}",
         connect_args={"check_same_thread": False},

@@ -151,6 +151,7 @@ CLOCK_SEAM_MODULES = (
     "browser/task_runner.py",
     "conversation/identity.py",
     "integrations/connection_sync.py",
+    "integrations/github_activity.py",
     "integrations/gmail_read.py",
     "model_fabric/near_tee_catalog.py",
     "observer/manager.py",

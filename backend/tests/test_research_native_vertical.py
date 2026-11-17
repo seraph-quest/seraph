@@ -300,12 +300,26 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                         monkeypatch.setattr(provider, "_adopt_child", interrupted_adoption)
                         try:
                             for child_id in creation["child_ids"]:
-                                claimed = await jobs.claim_job(child_id, owner=owner, lease_seconds=1,
+                                # The holder keeps a live lease for the whole
+                                # child execution: every fenced write inside
+                                # it (contact, receipt, reserved output)
+                                # requires lease_expires_at > now. A 1 s lease
+                                # raced those writes on a loaded runner (#1230).
+                                claimed = await jobs.claim_job(child_id, owner=owner, lease_seconds=120,
                                     continue_existing_attempt=True, claim_authority_check=coordinator._claim_guard(jobs, phase_binding))
                                 with pytest.raises(RuntimeError, match="declared crash boundary"):
                                     await provider.execute_funded_child(jobs, child_id=child_id, owner=owner,
                                         fence=claimed["lease"]["fencing_token"])
-                            await __import__("asyncio").sleep(1.1)
+                            # The crashed process never releases its child
+                            # leases; they lapse. Lapse them in the past instead
+                            # of waiting out a wall-clock lease (#1230).
+                            async with factory.accounting_sessions() as db:
+                                lapsed = datetime.now(timezone.utc).replace(tzinfo=None)-__import__("datetime").timedelta(seconds=1)
+                                for row in (await db.scalars(select(WorkflowRunState).where(
+                                        WorkflowRunState.run_identity.in_(creation["child_ids"])))).all():
+                                    assert row.status == "running" and row.lease_owner == owner and row.lease_expires_at > lapsed
+                                    row.lease_expires_at = lapsed
+                                    db.add(row)
                         finally:
                             monkeypatch.setattr(provider, "_adopt_child", original_adopt)
                 # A declared process interruption leaves the existing canonical

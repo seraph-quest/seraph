@@ -4291,9 +4291,50 @@ time, queued for the governed vision job. The daemon's bounded local
 analysis (Apple Vision text; any other `local_analysis.provider` is rejected
 with 422) becomes the
 observation's summary/activity/project and digest content until governed
-analysis exists. A repeated `capture_id` is idempotent. `screen_cleanup` removes uploaded files after the observation
-retention; these files are not backed up
+analysis exists. A repeated `capture_id` is idempotent. These files are not backed up
 ([#1141](https://github.com/seraph-quest/seraph/issues/1141)).
+
+**Stored screenshot limits ([#1263](https://github.com/seraph-quest/seraph/issues/1263), Partial):**
+`archive_max_mb` and `archive_retention_days` (screen-analysis settings) are
+enforced. A capture is stored once: when the backend stored the upload
+(accepted, duplicate or suppressed) the daemon writes no archive copy; it
+archives under `--capture-archive-dir` only when the backend did not store it
+(unpaired, failed, blocked, over 8 MiB) and `preserve_captures` is on. A
+near-duplicate the backend suppressed is kept nowhere. The cap applies **per
+store** (MiB, `0` = no size cap), and each store is pruned only by the process
+that writes it, oldest first, never following symlinks, bounded per run
+(5,000 deletions, 200,000 scanned entries; a cut-short run reports
+`over_cap`). The backend prunes `.seraph-daemon-captures/` for size after each
+accepted upload, inside the ingest lock, and for age plus size in the daily
+`screen_cleanup` job, using the shorter of the observation retention and
+`archive_retention_days`; it never touches operator screenshot-folder images
+or the daemon archive. The daemon prunes its archive (whole captures, PNG plus
+sidecars, only files it names) for size after each archive write, for age plus
+size when the limits received from the backend change, and at UTC day
+rollover. It deletes only under limits received from the backend in that
+process, nothing before the first successful settings fetch, and keeps the
+last received limits through a backend outage; its last result is in
+`daemon-status.json` as `capture_budget.archive_prune`. The daemon reads
+the limits from `GET /api/settings/screen-analysis` without an operator
+session, so unless local no-login mode is on that read returns 401 and the
+daemon never receives limits: its archive is then never pruned. A 200 that
+lacks either limit, or a backend whose `screen-analysis-settings.json` is
+unreadable (the GET then omits both limits), also leaves the last received
+limits in force; the backend skips its own pruning with `settings_unreadable`
+and reports `capture_store.limits_status`. A non-zero `archive_max_mb` below 8
+(one capture can be 8 MiB) is refused with 422, and the file a request just
+wrote is never pruned by that request. The settings file is written atomically. After a topology
+switch or a long run of failed uploads, the two stores together can hold up
+to twice the cap until retention ages the idle store out. A record whose
+image was pruned stays readable: `GET /api/observer/screen-artifacts` reports
+`artifacts.image_available: false`, `/analysis` returns 200 with the stored
+metadata and `image_available: false` (a legacy row whose sidecar is gone
+returns `analysis_available: false`), `/image` and `/provider-output` return
+404, and a capture pruned before its governed analysis ran becomes
+`source_missing` and leaves digests and reports. `GET
+/api/settings/artifact-storage` reports `screenshot_folder.capture_store`
+(bytes, file count, cap, retention), shown read-only in the cockpit as
+"Stored captures". Existing archive files are removed only by these rules.
 
 **Daemon context post ([#1248](https://github.com/seraph-quest/seraph/issues/1248), Partial):**
 the daemon's window-context post `POST /api/observer/context` uses the same

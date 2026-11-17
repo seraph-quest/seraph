@@ -1071,6 +1071,105 @@ async def test_artifact_storage_defaults_to_seraph_owned_screenshot_folder(clien
 
 
 @pytest.mark.asyncio
+async def test_artifact_storage_reports_capture_store_usage_and_limits(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shots = tmp_path / "shots"
+    store_day = shots / ".seraph-daemon-captures" / "2026-11-17"
+    store_day.mkdir(parents=True)
+    (store_day / "cap-a.png").write_bytes(b"a" * 300)
+    (store_day / "cap-b.jpg").write_bytes(b"b" * 200)
+    (shots / "Screenshot.png").write_bytes(b"c" * 5_000)  # operator image: not in the store
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "screen_capture_archive_dir", str(tmp_path / "archive"))
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 10240)
+    monkeypatch.setattr(settings, "screen_observation_retention_days", 90)
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(shots))
+    (workspace / "screen-analysis-settings.json").write_text(
+        json.dumps({"archive_retention_days": 30}), encoding="utf-8"
+    )
+
+    resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    assert resp.json()["screenshot_folder"]["capture_store"] == {
+        "bytes": 500,
+        "file_count": 2,
+        "max_mb": 10240,
+        "retention_days": 30,
+        "cap_scope": "per_store",
+        "enforced_by": "backend",
+        "limits_status": "ready",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unreadable_screen_analysis_settings_hide_capture_limits(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "screen_capture_archive_dir", str(tmp_path / "archive"))
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(tmp_path / "shots"))
+    (workspace / "screen-analysis-settings.json").write_text("{\"archive_max_mb\": 10", encoding="utf-8")
+
+    screen = (await client.get("/api/settings/screen-analysis")).json()
+    assert screen["settings_unreadable"] is True
+    # Omitted, so the daemon keeps the last limits it received.
+    assert "archive_max_mb" not in screen
+    assert "archive_retention_days" not in screen
+
+    storage = (await client.get("/api/settings/artifact-storage")).json()
+    capture_store = storage["screenshot_folder"]["capture_store"]
+    assert capture_store["limits_status"] == "settings_unreadable"
+    assert capture_store["max_mb"] is None and capture_store["retention_days"] is None
+
+
+@pytest.mark.asyncio
+async def test_screen_analysis_settings_reject_capture_cap_below_one_capture(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "screen_capture_archive_dir", str(tmp_path / "archive"))
+
+    for too_small in (1, 7):
+        response = await client.put("/api/settings/screen-analysis", json={"archive_max_mb": too_small})
+        assert response.status_code == 422, response.text
+    assert not (workspace / "screen-analysis-settings.json").exists()
+    for allowed in (0, 8):
+        response = await client.put("/api/settings/screen-analysis", json={"archive_max_mb": allowed})
+        assert response.status_code == 200, response.text
+        assert response.json()["archive_max_mb"] == allowed
+    stored = json.loads((workspace / "screen-analysis-settings.json").read_text(encoding="utf-8"))
+    assert stored["archive_max_mb"] == 8
+    assert "settings_unreadable" not in stored
+
+
+def test_screen_analysis_settings_write_is_atomic(tmp_path, monkeypatch):
+    import os
+
+    from src.observer import screen_analysis_settings as module
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    module.write_screen_analysis_settings({"archive_max_mb": 64})
+    path = workspace / "screen-analysis-settings.json"
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+    def failing_replace(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module.os, "replace", failing_replace)
+    with pytest.raises(OSError):
+        module.write_screen_analysis_settings({"archive_max_mb": 128})
+    monkeypatch.undo()
+
+    # The previous file is intact and no temp file is left behind.
+    assert json.loads(path.read_text(encoding="utf-8")) == {"archive_max_mb": 64}
+    assert sorted(os.listdir(workspace)) == ["screen-analysis-settings.json"]
+
+
+@pytest.mark.asyncio
 async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"

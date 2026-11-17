@@ -22,7 +22,7 @@ import contextlib
 import json
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -39,6 +39,11 @@ try:
     from capture_upload import CaptureUploadResult, LocalCaptureUploader
 except ImportError:  # pragma: no cover - package import fallback
     from .capture_upload import CaptureUploadResult, LocalCaptureUploader
+
+try:
+    from capture_archive import MIB, prune_capture_archive
+except ImportError:  # pragma: no cover - package import fallback
+    from .capture_archive import MIB, prune_capture_archive
 
 # The paired edge transport is provider-free and can be used by the native
 # capture loop when a node is provisioned.  Keep the import compatible with
@@ -120,6 +125,36 @@ def _archive_provider_capture(
         "analysis_path": str(analysis_path),
         "created_at": now.isoformat(),
     }
+
+
+def _archive_capture(
+    screen_runtime,
+    *,
+    png_bytes: bytes,
+    app_name: str,
+    analysis: dict,
+    upload: "CaptureUploadResult | None",
+) -> dict[str, str] | None:
+    """Archive one capture locally only when the backend does not hold it (#1263).
+
+    When the backend stored the upload (accepted, duplicate or suppressed),
+    its private upload store is the one copy. The archive is the fallback for
+    unpaired, failed, blocked or oversize uploads, and is size-pruned after
+    each write under the limits received from the backend.
+    """
+    if not screen_runtime.preserve_captures or (upload is not None and upload.stored):
+        return None
+    artifacts = _archive_provider_capture(
+        archive_dir=screen_runtime.archive_dir,
+        png_bytes=png_bytes,
+        app_name=app_name,
+        provider_name=screen_runtime.provider.name,
+        analysis=analysis,
+    )
+    prune = getattr(screen_runtime, "prune_archive", None)
+    if callable(prune):
+        prune(reason="write")
+    return artifacts
 
 
 def _analysis_usage(provider_name: str, *, duration_ms: int | None, success: bool) -> dict[str, object]:
@@ -446,6 +481,21 @@ async def mark_display_attempted(
     return False
 
 
+def _received_archive_limits(payload: dict | None) -> tuple[int, int] | None:
+    """``(retention_days, max_mb)`` only when the backend sent both as integers."""
+    if not isinstance(payload, dict):
+        return None
+    retention = payload.get("archive_retention_days")
+    max_mb = payload.get("archive_max_mb")
+    if isinstance(retention, bool) or isinstance(max_mb, bool):
+        return None
+    if not isinstance(retention, int) or not isinstance(max_mb, int):
+        return None
+    if retention < 1 or max_mb < 0:
+        return None
+    return retention, max_mb
+
+
 class ScreenAnalysisRuntime:
     """Runtime screen-analysis config that follows backend Settings."""
 
@@ -459,7 +509,9 @@ class ScreenAnalysisRuntime:
         archive_dir: str,
         blocklist_file: str | None,
         uploader: LocalCaptureUploader | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
+        self._now: Callable[[], datetime] = now or (lambda: datetime.now(timezone.utc))
         self._fallback = {
             "enabled": enabled,
             "provider": provider,
@@ -481,15 +533,23 @@ class ScreenAnalysisRuntime:
         self.archive_retention_days = 365
         self.archive_max_mb = 0
         self._last_capture_monotonic = 0.0
-        self._daily_capture_date = datetime.now(timezone.utc).date().isoformat()
+        self._daily_capture_date = self._now().date().isoformat()
         self._daily_capture_count = 0
+        # The archive is pruned only under limits received from the backend in
+        # this process; before the first successful settings fetch nothing is
+        # deleted, and a failed fetch keeps the last received limits (#1263).
+        self._archive_limits_known = False
+        self._archive_limits_fetched_now = False
+        self._archive_policy: tuple[str, int, int] | None = None
+        self._last_archive_prune: dict[str, object] | None = None
 
     async def refresh(self, client: httpx.AsyncClient, url: str, *, force: bool = False) -> None:
         now = time.time()
         if not force and now - self._last_refresh < 30:
             return
         self._last_refresh = now
-        payload = await fetch_screen_analysis_settings(client, url) or self._fallback
+        fetched = await fetch_screen_analysis_settings(client, url)
+        payload = fetched or self._fallback
         enabled = bool(payload.get("enabled", self._fallback["enabled"]))
         provider_name = str(payload.get("provider") or self._fallback["provider"])
         # ADR-035: the backend's provider names its governed vision route, not
@@ -508,8 +568,17 @@ class ScreenAnalysisRuntime:
         archive_dir = str(payload.get("archive_dir") or self._fallback["archive_dir"])
         min_seconds = max(0, int(payload.get("min_seconds_between_captures") or 0))
         max_daily = max(0, int(payload.get("max_daily_captures") or 0))
-        retention_days = max(1, int(payload.get("archive_retention_days") or 365))
-        archive_max_mb = max(0, int(payload.get("archive_max_mb") or 0))
+        received = _received_archive_limits(fetched)
+        if received is not None:
+            retention_days, archive_max_mb = received
+            self._archive_limits_known = True
+        else:
+            # No usable limits (failed fetch, or a 200 without both keys, e.g.
+            # an error body or a backend whose settings file is unreadable):
+            # keep the last received limits instead of dropping to defaults.
+            retention_days = self.archive_retention_days
+            archive_max_mb = self.archive_max_mb
+        self._archive_limits_fetched_now = received is not None
         signature = (
             enabled,
             provider_name,
@@ -636,12 +705,49 @@ class ScreenAnalysisRuntime:
         self.max_daily_captures = max_daily
         self.archive_retention_days = retention_days
         self.archive_max_mb = archive_max_mb
+        policy = (str(self.archive_dir), retention_days, archive_max_mb)
+        # Prune on a change of received limits (including the first successful
+        # fetch). A failed fetch never triggers this prune, even when the
+        # fallback archive directory differs.
+        if self._archive_limits_known and self._archive_limits_fetched_now and policy != self._archive_policy:
+            self._archive_policy = policy
+            self.prune_archive(reason="settings")
 
     def _refresh_daily_counter(self) -> None:
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = self._now().date().isoformat()
         if today != self._daily_capture_date:
             self._daily_capture_date = today
             self._daily_capture_count = 0
+            self.prune_archive(reason="day_rollover")
+
+    def prune_archive(self, *, reason: str) -> None:
+        """Enforce received ``archive_retention_days`` / ``archive_max_mb`` on the archive.
+
+        ``write`` prunes for size only, and only when a cap is set. Never raises.
+        """
+        if not self._archive_limits_known:
+            return
+        if reason == "write" and self.archive_max_mb <= 0:
+            return
+        try:
+            result = prune_capture_archive(
+                str(self.archive_dir),
+                max_bytes=self.archive_max_mb * MIB,
+                retention_days=None if reason == "write" else self.archive_retention_days,
+                now=self._now(),
+            )
+        except Exception:  # pragma: no cover - prune_capture_archive never raises
+            logger.warning("Capture archive prune failed", exc_info=True)
+            return
+        self._last_archive_prune = {"trigger": reason, "at": self._now().isoformat(), **result.as_status()}
+        if result.deleted_captures:
+            logger.info(
+                "Capture archive pruned (%s): %d captures, %d bytes freed, %d bytes kept",
+                reason,
+                result.deleted_captures,
+                result.freed_bytes,
+                result.remaining_bytes,
+            )
 
     def budget_skip_reason(self, *, now: float) -> str | None:
         self._refresh_daily_counter()
@@ -669,6 +775,7 @@ class ScreenAnalysisRuntime:
             "daily_capture_date": self._daily_capture_date,
             "archive_retention_days": self.archive_retention_days,
             "archive_max_mb": self.archive_max_mb,
+            "archive_prune": self._last_archive_prune,
         }
 
     async def close(self) -> None:
@@ -1065,14 +1172,16 @@ async def poll_loop(
                                             ),
                                         }
                                         observation.update(analysis)
-                                        if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
-                                            observation["capture_artifacts"] = _archive_provider_capture(
-                                                archive_dir=screen_runtime.archive_dir,
+                                        if "capture_artifacts" not in observation:
+                                            archived = _archive_capture(
+                                                screen_runtime,
                                                 png_bytes=png_bytes,
                                                 app_name=app_name,
-                                                provider_name=screen_runtime.provider.name,
                                                 analysis=analysis,
+                                                upload=upload_result,
                                             )
+                                            if archived is not None:
+                                                observation["capture_artifacts"] = archived
                                         if verbose:
                                             ts = time.strftime("%H:%M:%S")
                                             logger.info(
@@ -1343,14 +1452,16 @@ async def periodic_capture_loop(
                                 ),
                             }
                             observation.update(analysis)
-                            if screen_runtime.preserve_captures and "capture_artifacts" not in observation:
-                                observation["capture_artifacts"] = _archive_provider_capture(
-                                    archive_dir=screen_runtime.archive_dir,
+                            if "capture_artifacts" not in observation:
+                                archived = _archive_capture(
+                                    screen_runtime,
                                     png_bytes=png_bytes,
                                     app_name=app_name,
-                                    provider_name=screen_runtime.provider.name,
                                     analysis=analysis,
+                                    upload=upload_result,
                                 )
+                                if archived is not None:
+                                    observation["capture_artifacts"] = archived
                             if verbose:
                                 ts = time.strftime("%H:%M:%S")
                                 logger.info(

@@ -177,7 +177,10 @@ async def inventory(request):
                 controls=['revoke'],jobs=[{'job_id':c.active_job_id,'state':'reserved','kind':'publication'}] if c.active_job_id else []))
         # #1264: the first ambient-credential source. The local gh login holds
         # the account's full access; these rows say so and offer revoke.
-        for a in (await db.execute(select(GitHubActivitySource).where(GitHubActivitySource.owner_principal_id==principal).limit(LIMIT))).scalars().all():
+        # Owned by the operator identity (survives logins), not this login's principal.
+        identity_id=getattr(operator,'operator_identity_id',None)
+        activity_sources=(await db.execute(select(GitHubActivitySource).where(GitHubActivitySource.owner_identity_id==identity_id).limit(LIMIT))).scalars().all() if identity_id else []
+        for a in activity_sources:
             from src.integrations.github_activity import GRANT_SENTENCE
             limits={'credential':'local_gh_cli_login','credential_scope':'full_gh_scope','seraph_requests':'get_only_allowlist',
                 'login':a.identity_login,'gh_entry_path':a.gh_entry_path,'statement':GRANT_SENTENCE}

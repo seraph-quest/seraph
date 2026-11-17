@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from typing import AsyncGenerator, Callable, Iterable, Iterator
@@ -2119,6 +2120,42 @@ async def _ensure_forgejo_form_profiles(conn) -> None:
             await conn.exec_driver_sql(f"ALTER TABLE forgejo_connections ADD COLUMN {column} {sql_type}")
 
 
+_GITHUB_ACTIVITY_TABLES = ("github_activity_sources", "github_activity_runs", "github_activity_items")
+
+
+async def _set_aside_pre_identity_github_activity(conn) -> None:
+    """Set aside the unreleased principal-keyed #1264 slice-1 tables, keeping their rows.
+
+    Before review the GitHub activity tables were keyed to a per-login
+    principal; they are now keyed to the operator identity. A workspace that
+    ran the branch build has the old shape. Its tables are renamed to
+    ``<name>_pre_identity`` (rows kept for audit, their indexes dropped so the
+    model's index names are free) and ``create_all`` builds the new ones. An
+    old source is therefore off until the operator enables it again; nothing
+    is deleted and no old row grants anything.
+    """
+    result = await conn.exec_driver_sql("PRAGMA table_info(github_activity_sources)")
+    columns = {row[1] for row in result.fetchall()}
+    if not columns or "owner_identity_id" in columns:
+        return
+    for table in _GITHUB_ACTIVITY_TABLES:
+        exists = (await conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))).fetchone()
+        if exists is None:
+            continue
+        aside = f"{table}_pre_identity"
+        taken = (await conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (aside,))).fetchone()
+        if taken is not None:
+            aside = f"{aside}_{uuid.uuid4().hex[:8]}"
+        await conn.exec_driver_sql(f'ALTER TABLE "{table}" RENAME TO "{aside}"')
+        indexes = (await conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+            (aside,))).fetchall()
+        for (name,) in indexes:
+            await conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{name}"')
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -2157,6 +2194,7 @@ async def init_db() -> None:
         await _ensure_mail_columns(conn)
         await _ensure_connection_sync_columns(conn)
         await _ensure_forgejo_form_profiles(conn)
+        await _set_aside_pre_identity_github_activity(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)

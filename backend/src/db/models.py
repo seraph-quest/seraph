@@ -1103,17 +1103,21 @@ class GitHubActivitySource(SQLModel, table=True):
 
     There is no token column and no vault reference: ``gh`` keeps its own
     login. The row records the operator's acknowledgement, the pinned account
-    and the pinned ``gh`` entry path. ``revision`` changes on every state or
+    and the pinned ``gh`` entry path. It belongs to the operator identity
+    (``owner_identity_id``), which survives logins: any live login of that
+    identity sees and controls it. ``revision`` changes on every state or
     scope change. Nothing here expires by time: the source stops only on real
-    changes (toggle-off or revoke, a different gh account, an explicit logout
-    or revocation of ``owner_session_id``), never on that login's idle or
-    absolute expiry.
+    changes (toggle-off or revoke, a different gh account, the identity being
+    revoked, a workspace restore, or the enabling local no-login root being
+    retired), never on a login's idle or absolute expiry or a new login.
     """
 
     __tablename__ = "github_activity_sources"
 
     id: str = Field(default_factory=_uuid, primary_key=True)
-    owner_principal_id: str = Field(index=True, unique=True)
+    owner_identity_id: str = Field(index=True, unique=True)
+    # Provenance of the enable: the principal and root that turned it on.
+    enabled_principal_id: str
     owner_session_id: str
     credential_kind: str = Field(default="local_gh_cli_login")
     gh_entry_path: str
@@ -1138,7 +1142,7 @@ class GitHubActivityRun(SQLModel, table=True):
     __tablename__ = "github_activity_runs"
 
     id: str = Field(default_factory=_uuid, primary_key=True)
-    owner_principal_id: str = Field(index=True)
+    owner_identity_id: str = Field(index=True)
     source_id: str = Field(index=True)
     source_revision: int
     trigger: str
@@ -1173,12 +1177,12 @@ class GitHubActivityItem(SQLModel, table=True):
 
     __tablename__ = "github_activity_items"
     __table_args__ = (
-        Index("ux_github_activity_items_dedupe", "owner_principal_id", "dedupe_key", unique=True),
-        Index("ix_github_activity_items_owner_occurred", "owner_principal_id", "occurred_at"),
+        Index("ux_github_activity_items_owner_dedupe", "owner_identity_id", "dedupe_key", unique=True),
+        Index("ix_github_activity_items_owner_time", "owner_identity_id", "occurred_at"),
     )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
-    owner_principal_id: str
+    owner_identity_id: str
     source_id: str = Field(index=True)
     dedupe_key: str
     repository: str

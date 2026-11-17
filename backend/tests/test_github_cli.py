@@ -517,3 +517,19 @@ async def test_launch_and_capture_failures_report_their_cleanup(tmp_path, cleanu
     assert raised.value.code == code
     remaining = list((tmp_path / "gh-runs").iterdir())
     assert (len(remaining) == 1) is kept
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_runner_error_is_not_mapped_to_a_gh_code(tmp_path):
+    runner = FakeGhRunner(FakeGitHubWorld())
+    runner.inject("/user", RuntimeError("unexpected runner bug"))
+    reader = make_reader(tmp_path, runner)
+    with pytest.raises(RuntimeError, match="unexpected runner bug"):
+        await reader.read(reader.locate(), op="identity", authority_check=allow)
+    assert list((tmp_path / "gh-runs").iterdir()) == []
+
+
+def test_lone_surrogate_branch_is_refused_before_encoding():
+    assert not github_cli.valid_branch("a\ud800b")
+    with pytest.raises(github_cli.GhValueInvalid):
+        build_endpoint("commits", **{**op_values("commits"), "branch": "a\ud800b"})

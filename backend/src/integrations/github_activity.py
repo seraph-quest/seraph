@@ -2,20 +2,23 @@
 
 Consent: the source is off until the operator checks the ``gh`` login,
 acknowledges that ``gh`` holds their full GitHub access, and enables it in
-Settings. It stops only on real changes: the operator's toggle or revoke, a
-different ``gh`` account, or an explicit logout/revocation of the Seraph
-login that enabled it. Nothing here expires by time: an idle or absolute
-expiry of that login does not stop the source.
+Settings. It belongs to the operator identity, which survives logins: any
+live login of that identity sees and controls it. It stops only on real
+changes: the operator's toggle or revoke, a different ``gh`` account, the
+identity being revoked, a workspace restore, or (for a source enabled in
+local no-login mode) that root being retired or the mode switched off.
+Nothing here expires by time: a new login, a logout or a login's idle or
+absolute expiry does not stop the source.
 
 Collection reads only the GET endpoints of ``github_cli.OPS``, one child at a
 time, at most ``MAX_CALLS_PER_RUN`` per run and ``MAX_REPOSITORIES``
 repositories, with no retry and no sleep. Before every ``gh`` start the
-source must still be active at the run's revision, the enabling root must
-not have been revoked, and a ``/repos/...`` read must be inside the saved
-scope; the first two are checked again before a result is kept. Items are
-stored only by a run that was not blocked, in the same transaction as a guard
-on the source row (still active at the run's revision). Items are
-provenance-carrying rows whose URLs Seraph builds itself.
+source must still be active at the run's revision, its owner must still hold
+authority, and a ``/repos/...`` read must be inside the saved scope; the
+first two are checked again before a result is kept. Items are stored only by
+a run that was not blocked, in the same transaction as a guard on the source
+row (still active at the run's revision). Items are provenance-carrying rows
+whose URLs Seraph builds itself.
 
 This slice collects commits, pull requests opened/merged/closed and issues
 opened/closed. Reviews and comments, and the end-of-day report integration,
@@ -174,6 +177,9 @@ def activity_status_message(status: str, reason_code: str | None = None, *, logi
             now_as = f"@{current_login}" if current_login else "another account"
             return (f"GitHub source stopped: gh is now logged in as {now_as}, not @{login}. "
                     "Enable it again in Settings → GitHub to use this login.")
+        if reason_code == "workspace_restored":
+            return ("GitHub source stopped: the workspace was restored. Review it and enable the source again "
+                    "in Settings → GitHub.")
         return "GitHub source stopped. Enable it again in Settings → GitHub."
     if status == "blocked":
         if reason_code == "gh_unavailable":
@@ -185,9 +191,12 @@ def activity_status_message(status: str, reason_code: str | None = None, *, logi
         if reason_code == "gh_not_logged_in":
             return ("GitHub source blocked: gh is not logged in to github.com for this user. "
                     "Run gh auth login in your terminal.")
-        if reason_code == "owner_session_invalid":
-            return ("GitHub source blocked: the login that enabled it is no longer current. "
-                    "Enable it again in Settings → GitHub.")
+        if reason_code == "owner_identity_revoked":
+            return ("GitHub source blocked: the ownership identity that enabled it was revoked. "
+                    "Enable it again in Settings → GitHub from a current login.")
+        if reason_code == "local_root_retired":
+            return ("GitHub source blocked: it was enabled in local no-login mode, which has since been switched "
+                    "off or reset. Enable it again in Settings → GitHub.")
         if reason_code == "gh_login_changed":
             now_as = f"@{current_login}" if current_login else "another account"
             return (f"GitHub source stopped: gh is now logged in as {now_as}, not @{login}. "
@@ -383,50 +392,32 @@ class _RepositoryFailed(Exception):
         self.code = code
 
 
-SessionCheck = Callable[[str, str], Awaitable[None]]
+SessionCheck = Callable[[GitHubActivitySource], Awaitable[None]]
 
 
-def _aware_or_none(value: datetime | None) -> datetime | None:
-    return _aware(value)
+async def live_owner_identity(source: GitHubActivitySource) -> None:
+    """The source's owner must still hold authority, judged only by real changes.
 
-
-async def live_owner_session(owner_session_id: str, owner_principal_id: str) -> None:
-    """The enabling root must not have been revoked by a real change.
-
-    Keyed to real changes only (the operator's standing rule): an explicit
-    logout or revocation of that root, a bearer replacement or tombstone, the
-    local no-login root being retired or its mode switched off, or a different
-    principal. Its idle or absolute expiry does NOT stop the source, so this
-    reads the session row instead of ``authenticate_session`` (which enforces
-    those expiries). No clock is read here.
-
-    The auth owner marks an expired row by setting ``revoked_at`` when it next
-    sees it, at or after the stored expiry. A revocation stamped before both
-    stored expiries can only be an explicit one, which is what stops the
-    source; comparing the two stored instants classifies the cause and is not
-    a validity window.
+    The owner is the operator identity, which survives logins: a new login,
+    a logout, or a login's idle or absolute expiry never stops the source.
+    What stops it here is an explicit record: the identity revoked
+    (``OperatorIdentity.revoked_at``, set by ownership revoke), or, for a
+    source enabled from the local no-login root, that root retired or the
+    mode switched off. A workspace restore stops the source row itself
+    (``workspace/production.py``). No clock is read.
     """
     from src.auth.service import LOCAL_ROOT_TOKEN_MARKER, _is_local_root, local_no_login_active
-    from src.db.models import OperatorSession
-    if not owner_session_id:
-        raise GitHubActivityError("owner_session_invalid", status_code=403)
+    from src.db.models import OperatorIdentity, OperatorSession
     async with db_engine.get_session() as db:
-        record = await db.get(OperatorSession, owner_session_id)
-        if record is not None:
-            db.expunge(record)
-    if (record is None or record.principal_id != owner_principal_id or record.is_bearer_tombstone is not False
-            or record.replaced_by_id is not None):
-        raise GitHubActivityError("owner_session_invalid", status_code=403)
-    if _is_local_root(record) and (not local_no_login_active()
-                                   or str(record.token_hash) != LOCAL_ROOT_TOKEN_MARKER):
-        raise GitHubActivityError("owner_session_invalid", status_code=403)
-    revoked = _aware_or_none(record.revoked_at)
-    if revoked is not None:
-        expiries = [value for value in (_aware_or_none(record.idle_expires_at),
-                                        _aware_or_none(record.absolute_expires_at)) if value is not None]
-        expired_then = bool(expiries) and revoked >= min(expiries)
-        if not expired_then:
-            raise GitHubActivityError("owner_session_invalid", status_code=403)
+        identity = await db.get(OperatorIdentity, source.owner_identity_id)
+        root = await db.get(OperatorSession, source.owner_session_id)
+        identity_revoked = identity is None or identity.revoked_at is not None
+        local_root = root is not None and _is_local_root(root)
+        root_retired = local_root and (not local_no_login_active() or str(root.token_hash) != LOCAL_ROOT_TOKEN_MARKER)
+    if identity_revoked:
+        raise GitHubActivityError("owner_identity_revoked", status_code=403)
+    if root_retired:
+        raise GitHubActivityError("local_root_retired", status_code=403)
 
 
 def _scope(row: GitHubActivitySource) -> GitHubActivityScope:
@@ -509,13 +500,13 @@ class _Collection:
             self.limitations.append(entry)
 
     async def authority(self, op: str, repository: str | None, *, discovered: bool = True) -> None:
-        current = await self.service._source_row(self.source.owner_principal_id)
+        current = await self.service._source_row(self.source.owner_identity_id)
         if current is None or current.state != "active" or current.id != self.source.id:
             raise _RunEnded("blocked", "source_revoked")
         if int(current.revision) != int(self.source.revision):
             raise _RunEnded("blocked", "source_changed")
         try:
-            await self.service._session_check(current.owner_session_id, current.owner_principal_id)
+            await self.service._session_check(current)
         except GitHubActivityError as exc:
             raise _RunEnded("blocked", exc.code) from exc
         if repository is not None and not self.scope.allows(repository, discovered=discovered):
@@ -746,22 +737,22 @@ def _parse_event_time(value: Any) -> datetime:
 class GitHubActivityService:
     def __init__(self, *, reader: GhCliReader | None = None, session_check: SessionCheck | None = None) -> None:
         self._reader = reader or GhCliReader()
-        self._session_check = session_check or live_owner_session
+        self._session_check = session_check or live_owner_identity
 
     # -- storage ------------------------------------------------------------
 
-    async def _source_row(self, owner_principal_id: str) -> GitHubActivitySource | None:
+    async def _source_row(self, owner_identity_id: str) -> GitHubActivitySource | None:
         async with db_engine.get_session() as db:
             row = (await db.execute(select(GitHubActivitySource).where(
-                GitHubActivitySource.owner_principal_id == owner_principal_id))).scalars().first()
+                GitHubActivitySource.owner_identity_id == owner_identity_id))).scalars().first()
             if row is not None:
                 db.expunge(row)
             return row
 
-    async def _latest_run(self, *, owner_principal_id: str, report_date: str | None = None,
+    async def _latest_run(self, *, owner_identity_id: str, report_date: str | None = None,
                           source_id: str | None = None) -> GitHubActivityRun | None:
         async with db_engine.get_session() as db:
-            query = select(GitHubActivityRun).where(GitHubActivityRun.owner_principal_id == owner_principal_id)
+            query = select(GitHubActivityRun).where(GitHubActivityRun.owner_identity_id == owner_identity_id)
             if report_date is not None:
                 query = query.where(GitHubActivityRun.report_date == report_date)
             if source_id is not None:
@@ -793,9 +784,9 @@ class GitHubActivityService:
         return {"available": True, "reason_code": None, "entry_path": binary.entry_path,
                 "real_path": binary.real_path}
 
-    async def status(self, *, owner_principal_id: str, tz: ZoneInfo | None = None) -> dict[str, Any]:
-        row = await self._source_row(owner_principal_id)
-        last = await self._latest_run(owner_principal_id=owner_principal_id,
+    async def status(self, *, owner_identity_id: str, tz: ZoneInfo | None = None) -> dict[str, Any]:
+        row = await self._source_row(owner_identity_id)
+        last = await self._latest_run(owner_identity_id=owner_identity_id,
                                       source_id=row.id if row else None) if row else None
         state = row.state if row else "not_connected"
         return {"source": source_payload(row), "gh": self._gh_presence(row), "credential": dict(CREDENTIAL),
@@ -830,7 +821,8 @@ class GitHubActivityService:
         except GhCliError as exc:
             raise GitHubActivityError(exc.code, status_code=409) from None
 
-    async def enable_source(self, *, owner_principal_id: str, owner_session_id: str, expected_revision: int,
+    async def enable_source(self, *, owner_identity_id: str, enabled_principal_id: str, owner_session_id: str,
+                            expected_revision: int,
                             scope: GitHubActivityScope, acknowledged: bool, expected_identity_id: int,
                             expected_gh_entry_path: str, allow_model_context: bool) -> dict[str, Any]:
         if acknowledged is not True:
@@ -851,7 +843,8 @@ class GitHubActivityService:
             raise GitHubActivityError("gh_identity_changed", status_code=409)
         scope_value = scope.model_dump(mode="json")
         now = get_clock().now(timezone.utc)
-        values = dict(owner_session_id=owner_session_id, credential_kind=CREDENTIAL_KIND,
+        values = dict(owner_session_id=owner_session_id, enabled_principal_id=enabled_principal_id,
+                      credential_kind=CREDENTIAL_KIND,
                       gh_entry_path=binary.entry_path, gh_install_prefix=binary.install_prefix, state="active",
                       stopped_reason=None, scope_json=json.dumps(scope_value, sort_keys=True),
                       scope_digest=_digest(scope_value), acknowledged_gh_ambient_login=True,
@@ -859,11 +852,11 @@ class GitHubActivityService:
                       identity_login=identity[1], updated_at=now, revoked_at=None)
         async with db_engine.get_session() as db:
             row = (await db.execute(select(GitHubActivitySource).where(
-                GitHubActivitySource.owner_principal_id == owner_principal_id))).scalars().first()
+                GitHubActivitySource.owner_identity_id == owner_identity_id))).scalars().first()
             if row is None:
                 if expected_revision != 0:
                     raise GitHubActivityError("github_activity_revision_conflict", status_code=409)
-                db.add(GitHubActivitySource(owner_principal_id=owner_principal_id, revision=1, created_at=now,
+                db.add(GitHubActivitySource(owner_identity_id=owner_identity_id, revision=1, created_at=now,
                                             **values))
                 try:
                     await db.flush()
@@ -877,13 +870,13 @@ class GitHubActivityService:
                     revision=GitHubActivitySource.revision + 1, **values))
                 if changed.rowcount != 1:
                     raise GitHubActivityError("github_activity_revision_conflict", status_code=409)
-        return await self.status(owner_principal_id=owner_principal_id)
+        return await self.status(owner_identity_id=owner_identity_id)
 
-    async def revoke_source(self, *, owner_principal_id: str, expected_revision: int) -> dict[str, Any]:
+    async def revoke_source(self, *, owner_identity_id: str, expected_revision: int) -> dict[str, Any]:
         now = get_clock().now(timezone.utc)
         async with db_engine.get_session() as db:
             row = (await db.execute(select(GitHubActivitySource).where(
-                GitHubActivitySource.owner_principal_id == owner_principal_id))).scalars().first()
+                GitHubActivitySource.owner_identity_id == owner_identity_id))).scalars().first()
             if row is None:
                 raise GitHubActivityError("github_activity_source_not_found", status_code=404)
             changed = await db.execute(update(GitHubActivitySource).where(
@@ -891,13 +884,13 @@ class GitHubActivityService:
                 state="revoked", revision=GitHubActivitySource.revision + 1, updated_at=now, revoked_at=now))
             if changed.rowcount != 1:
                 raise GitHubActivityError("github_activity_revision_conflict", status_code=409)
-        return await self.status(owner_principal_id=owner_principal_id)
+        return await self.status(owner_identity_id=owner_identity_id)
 
     # -- collection -----------------------------------------------------------
 
-    async def collect_day(self, *, owner_principal_id: str, report_day: date, tz: ZoneInfo,
+    async def collect_day(self, *, owner_identity_id: str, report_day: date, tz: ZoneInfo,
                           trigger: Literal["scheduled", "manual_report", "operator"]) -> dict[str, Any]:
-        source = await self._source_row(owner_principal_id)
+        source = await self._source_row(owner_identity_id)
         if source is None:
             return {"status": "not_connected", "reason_code": None, "run": None,
                     "message": activity_status_message("not_connected")}
@@ -913,8 +906,8 @@ class GitHubActivityService:
         until = min(end, now)
         if until <= start:
             raise GitHubActivityError("report_day_in_future", status_code=422)
-        previous = await self._latest_run(owner_principal_id=owner_principal_id, source_id=source.id)
-        run = GitHubActivityRun(owner_principal_id=owner_principal_id, source_id=source.id,
+        previous = await self._latest_run(owner_identity_id=owner_identity_id, source_id=source.id)
+        run = GitHubActivityRun(owner_identity_id=owner_identity_id, source_id=source.id,
                                 source_revision=int(source.revision), trigger=trigger,
                                 report_date=report_day.isoformat(), timezone=str(tz.key), window_start_utc=start,
                                 window_end_utc=end, collected_until_utc=until, status="running",
@@ -935,7 +928,7 @@ class GitHubActivityService:
                 status, code = "blocked", exc.code
             if binary is not None:
                 try:
-                    await self._session_check(source.owner_session_id, owner_principal_id)
+                    await self._session_check(source)
                 except GitHubActivityError as exc:
                     status, code = "blocked", exc.code
             if code is None and binary is not None:
@@ -965,13 +958,18 @@ class GitHubActivityService:
                         status = "partial" if collection.items else "failed"
             if binary is not None:
                 await self._record_binary(run_id, binary)
+        except GhValueInvalid:
+            # A value GitHub returned could not be sent back; nothing more is read.
+            status, code = "failed", "github_activity_value_invalid"
+            if collection is not None:
+                collection.items.clear()
         except Exception as exc:
             # Never leave a run "running": an unexpected error ends it failed.
             logger.warning("GitHub activity collection failed (%s)", type(exc).__name__)
             status, code = "failed", "github_activity_internal_error"
             if collection is not None:
                 collection.items.clear()
-        return await self._finish(run_id, owner_principal_id, source, tz, status=status, reason_code=code,
+        return await self._finish(run_id, owner_identity_id, source, tz, status=status, reason_code=code,
                                   calls=collection.calls if collection else 0, collection=collection,
                                   detail=detail)
 
@@ -980,7 +978,7 @@ class GitHubActivityService:
             await db.execute(update(GitHubActivityRun).where(GitHubActivityRun.id == run_id).values(
                 gh_real_path=binary.real_path, gh_sha256=binary.sha256))
 
-    async def _finish(self, run_id: str, owner_principal_id: str, source: GitHubActivitySource, tz: ZoneInfo, *,
+    async def _finish(self, run_id: str, owner_identity_id: str, source: GitHubActivitySource, tz: ZoneInfo, *,
                       status: str, reason_code: str | None, calls: int, collection: _Collection | None,
                       detail: dict[str, Any] | None = None) -> dict[str, Any]:
         now = get_clock().now(timezone.utc)
@@ -1007,12 +1005,12 @@ class GitHubActivityService:
                 for record in records:
                     counts[record["kind"]] = counts.get(record["kind"], 0) + 1
                     values = {key: value for key, value in record.items() if key != "detail"}
-                    values.update(id=_new_id(), owner_principal_id=owner_principal_id, source_id=source.id,
+                    values.update(id=_new_id(), owner_identity_id=owner_identity_id, source_id=source.id,
                                   detail_json=json.dumps(record["detail"], sort_keys=True),
                                   first_run_id=run_id, last_run_id=run_id, first_seen_at=now, last_seen_at=now)
                     statement = sqlite_insert(GitHubActivityItem).values(**values)
                     await db.execute(statement.on_conflict_do_update(
-                        index_elements=["owner_principal_id", "dedupe_key"],
+                        index_elements=["owner_identity_id", "dedupe_key"],
                         set_={"title": statement.excluded.title, "detail_json": statement.excluded.detail_json,
                               "content_digest": statement.excluded.content_digest,
                               "html_url": statement.excluded.html_url,
@@ -1037,10 +1035,10 @@ class GitHubActivityService:
                         status=status, reason_code=reason_code, call_count=calls, finished_at=now))
             except Exception as again:
                 logger.warning("GitHub activity run finalisation failed (%s)", type(again).__name__)
-            await self._audit(owner_principal_id, status, reason_code, calls, {})
+            await self._audit(owner_identity_id, status, reason_code, calls, {})
             return {"status": status, "reason_code": reason_code, "run": None,
                     "message": activity_status_message(status, reason_code)}
-        await self._audit(owner_principal_id, status, reason_code, calls, counts)
+        await self._audit(owner_identity_id, status, reason_code, calls, counts)
         run = await self._latest_run_by_id(run_id)
         payload = run_payload(run, tz=tz, source=source)
         return {"status": status, "reason_code": reason_code, "run": payload,
@@ -1053,30 +1051,31 @@ class GitHubActivityService:
                 db.expunge(row)
             return row
 
-    async def _audit(self, owner_principal_id: str, status: str, reason_code: str | None, calls: int,
+    async def _audit(self, owner_identity_id: str, status: str, reason_code: str | None, calls: int,
                      counts: dict[str, int]) -> None:
         try:
             from src.audit.runtime import log_integration_event
             await log_integration_event(integration_type="github_activity", name="gh_cli", outcome=status,
-                                        details={"reason_code": reason_code, "call_count": calls,
+                                        details={"owner_identity_id": owner_identity_id,
+                                                 "reason_code": reason_code, "call_count": calls,
                                                  "counts": counts, "credential": CREDENTIAL_KIND},
-                                        principal_id=owner_principal_id)
+                                        principal_id=None)
         except Exception as exc:
             logger.warning("GitHub activity audit failed (%s)", type(exc).__name__)
 
-    async def activity_for_day(self, *, owner_principal_id: str, report_day: date, tz: ZoneInfo) -> dict[str, Any]:
+    async def activity_for_day(self, *, owner_identity_id: str, report_day: date, tz: ZoneInfo) -> dict[str, Any]:
         try:
             start, end = local_day_window(report_day, tz)
         except (OverflowError, ValueError):
             raise GitHubActivityError("report_date_invalid", status_code=422) from None
-        source = await self._source_row(owner_principal_id)
+        source = await self._source_row(owner_identity_id)
         async with db_engine.get_session() as db:
             rows = (await db.execute(select(GitHubActivityItem).where(
-                GitHubActivityItem.owner_principal_id == owner_principal_id,
+                GitHubActivityItem.owner_identity_id == owner_identity_id,
                 GitHubActivityItem.occurred_at >= start, GitHubActivityItem.occurred_at < end).order_by(
                 GitHubActivityItem.occurred_at, GitHubActivityItem.dedupe_key).limit(MAX_ITEMS_RETURNED + 1)
             )).scalars().all()
-        run = await self._latest_run(owner_principal_id=owner_principal_id, report_date=report_day.isoformat())
+        run = await self._latest_run(owner_identity_id=owner_identity_id, report_date=report_day.isoformat())
         payload = run_payload(run, tz=tz, source=source)
         if source is None:
             status, message = "not_connected", activity_status_message("not_connected")
@@ -1119,13 +1118,32 @@ def _service() -> GitHubActivityService:
     return GitHubActivityService()
 
 
-def _owner(request: Request) -> tuple[str, str]:
+@dataclass(frozen=True)
+class _Owner:
+    identity_id: str | None
+    principal_id: str
+    session_id: str
+
+    def require_identity(self) -> str:
+        if not self.identity_id:
+            raise HTTPException(status_code=409, detail={"code": "operator_identity_required"})
+        return self.identity_id
+
+
+def _owner(request: Request) -> _Owner:
+    """The source belongs to the operator identity, which survives logins.
+
+    A password login that has not enrolled ownership has no identity yet and
+    cannot own a source. The local no-login root always has one.
+    """
     from src.extensions.github_followthrough import GitHubFollowthroughError, _operator, _principal_id, _session_id
     try:
         operator = _operator(request)
-        return _principal_id(operator), _session_id(operator)
+        principal, session = _principal_id(operator), _session_id(operator)
     except GitHubFollowthroughError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    identity = str(getattr(operator, "operator_identity_id", "") or "") or None
+    return _Owner(identity_id=identity, principal_id=principal, session_id=session)
 
 
 def _http(exc: GitHubActivityError) -> HTTPException:
@@ -1169,8 +1187,13 @@ def _day(value: str | None, tz: ZoneInfo) -> date:
 
 @github_activity_router.get("")
 async def get_github_activity(request: Request):
-    principal, _ = _owner(request)
-    return await _service().status(owner_principal_id=principal, tz=user_timezone())
+    owner = _owner(request)
+    if owner.identity_id is None:
+        return {**(await _service().status(owner_identity_id="", tz=user_timezone())),
+                "ownership_required": True,
+                "message": "Enroll ownership for this login before enabling the GitHub activity source."}
+    return {**(await _service().status(owner_identity_id=owner.identity_id, tz=user_timezone())),
+            "ownership_required": False}
 
 
 @github_activity_router.post("/gh/check")
@@ -1184,10 +1207,12 @@ async def check_github_activity_gh(body: GhLoginCheckRequest, request: Request):
 
 @github_activity_router.put("/source")
 async def enable_github_activity(body: GitHubActivityEnableRequest, request: Request):
-    principal, session = _owner(request)
+    owner = _owner(request)
+    identity = owner.require_identity()
     try:
         return await _service().enable_source(
-            owner_principal_id=principal, owner_session_id=session, expected_revision=body.expected_revision,
+            owner_identity_id=identity, enabled_principal_id=owner.principal_id, owner_session_id=owner.session_id,
+            expected_revision=body.expected_revision,
             scope=body.scope, acknowledged=body.acknowledge_gh_ambient_login,
             expected_identity_id=body.expected_identity_id, expected_gh_entry_path=body.expected_gh_entry_path,
             allow_model_context=body.allow_model_context)
@@ -1197,19 +1222,19 @@ async def enable_github_activity(body: GitHubActivityEnableRequest, request: Req
 
 @github_activity_router.post("/revoke")
 async def revoke_github_activity(body: GitHubActivityRevokeRequest, request: Request):
-    principal, _ = _owner(request)
+    identity = _owner(request).require_identity()
     try:
-        return await _service().revoke_source(owner_principal_id=principal, expected_revision=body.expected_revision)
+        return await _service().revoke_source(owner_identity_id=identity, expected_revision=body.expected_revision)
     except GitHubActivityError as exc:
         raise _http(exc) from exc
 
 
 @github_activity_router.post("/collect")
 async def collect_github_activity(body: GitHubActivityCollectRequest, request: Request):
-    principal, _ = _owner(request)
+    identity = _owner(request).require_identity()
     tz = user_timezone()
     try:
-        return await _service().collect_day(owner_principal_id=principal, report_day=_day(body.report_date, tz),
+        return await _service().collect_day(owner_identity_id=identity, report_day=_day(body.report_date, tz),
                                             tz=tz, trigger="operator")
     except GitHubActivityError as exc:
         raise _http(exc) from exc
@@ -1218,10 +1243,10 @@ async def collect_github_activity(body: GitHubActivityCollectRequest, request: R
 @github_activity_router.get("/items")
 async def get_github_activity_items(request: Request,
                                     report_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")):
-    principal, _ = _owner(request)
+    identity = _owner(request).require_identity()
     tz = user_timezone()
     try:
-        return await _service().activity_for_day(owner_principal_id=principal, report_day=_day(report_date, tz),
+        return await _service().activity_for_day(owner_identity_id=identity, report_day=_day(report_date, tz),
                                                  tz=tz)
     except GitHubActivityError as exc:
         raise _http(exc) from exc

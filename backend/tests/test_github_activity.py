@@ -34,7 +34,7 @@ DAY = date(2026, 11, 17)
 START = datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc)
 END = datetime(2026, 11, 17, 23, 0, tzinfo=timezone.utc)
 NOW = datetime(2026, 11, 17, 20, 0, tzinfo=timezone.utc)  # 21:00 in Warsaw
-OWNER = "principal-a"
+OWNER = "identity-a"
 ROOT = "root-a"
 REPO = "seraph-quest/seraph"
 SHA = [f"{index:040x}" for index in range(1, 40)]
@@ -69,14 +69,14 @@ def clock():
 
 
 class Sessions:
-    """The injected live-root check: a root is live until the test ends it."""
+    """The injected owner check: the owner holds authority until the test revokes it."""
 
     def __init__(self) -> None:
         self.dead: set[str] = set()
 
-    async def __call__(self, session_id: str, principal_id: str) -> None:
-        if session_id in self.dead:
-            raise GitHubActivityError("owner_session_invalid", status_code=403)
+    async def __call__(self, source) -> None:
+        if source.owner_identity_id in self.dead or source.owner_session_id in self.dead:
+            raise GitHubActivityError("owner_identity_revoked", status_code=403)
 
 
 @pytest.fixture
@@ -104,13 +104,13 @@ def service(tmp_path, runner, sessions):
 async def enable(service, *, scope=None, model_context=True, expected_revision=0):
     checked = await service.check_gh_login()
     return await service.enable_source(
-        owner_principal_id=OWNER, owner_session_id=ROOT, expected_revision=expected_revision,
+        owner_identity_id=OWNER, enabled_principal_id="principal-a", owner_session_id=ROOT, expected_revision=expected_revision,
         scope=scope or GitHubActivityScope(), acknowledged=True, expected_identity_id=checked["identity_id"],
         expected_gh_entry_path=checked["gh_entry_path"], allow_model_context=model_context)
 
 
 async def collect(service, day=DAY, tz=WARSAW):
-    return await service.collect_day(owner_principal_id=OWNER, report_day=day, tz=tz, trigger="operator")
+    return await service.collect_day(owner_identity_id=OWNER, report_day=day, tz=tz, trigger="operator")
 
 
 async def items():
@@ -157,7 +157,7 @@ async def test_items_at_the_day_boundaries_land_on_exactly_one_day(db, clock, se
         assert (await collect(service, day))["status"] == "complete"
     days = {}
     for day in (DAY - timedelta(days=1), DAY, DAY + timedelta(days=1)):
-        view = await service.activity_for_day(owner_principal_id=OWNER, report_day=day, tz=WARSAW)
+        view = await service.activity_for_day(owner_identity_id=OWNER, report_day=day, tz=WARSAW)
         days[day] = [item["external_id"] for item in view["items"]]
     assert days == {DAY - timedelta(days=1): [SHA[0]], DAY: [SHA[1], SHA[2]], DAY + timedelta(days=1): [SHA[3]]}
 
@@ -348,7 +348,7 @@ async def test_run_row_records_the_binary_and_flags_a_changed_hash_without_block
 
 @pytest.mark.asyncio
 async def test_source_is_off_by_default_and_nothing_starts_gh(db, clock, service, runner):
-    status = await service.status(owner_principal_id=OWNER)
+    status = await service.status(owner_identity_id=OWNER)
     assert status["source"]["state"] == "not_connected" and status["gh"]["available"] is True
     assert status["credential"] == {"kind": "local_gh_cli_login", "scope": "full_gh_scope",
                                     "seraph_requests": "get_only_allowlist"}
@@ -369,7 +369,7 @@ async def test_check_stores_nothing(db, clock, service, runner):
 async def test_enable_requires_the_ambient_login_acknowledgement(db, clock, service, runner):
     checked = await service.check_gh_login()
     with pytest.raises(GitHubActivityError) as raised:
-        await service.enable_source(owner_principal_id=OWNER, owner_session_id=ROOT, expected_revision=0,
+        await service.enable_source(owner_identity_id=OWNER, enabled_principal_id="principal-a", owner_session_id=ROOT, expected_revision=0,
                                     scope=GitHubActivityScope(), acknowledged=False,
                                     expected_identity_id=checked["identity_id"],
                                     expected_gh_entry_path=checked["gh_entry_path"], allow_model_context=False)
@@ -382,7 +382,7 @@ async def test_enable_pins_the_identity_the_operator_was_shown(db, clock, servic
     checked = await service.check_gh_login()
     world.user = user(303, "intruder")
     with pytest.raises(GitHubActivityError) as raised:
-        await service.enable_source(owner_principal_id=OWNER, owner_session_id=ROOT, expected_revision=0,
+        await service.enable_source(owner_identity_id=OWNER, enabled_principal_id="principal-a", owner_session_id=ROOT, expected_revision=0,
                                     scope=GitHubActivityScope(), acknowledged=True,
                                     expected_identity_id=checked["identity_id"],
                                     expected_gh_entry_path=checked["gh_entry_path"], allow_model_context=False)
@@ -393,7 +393,7 @@ async def test_enable_pins_the_identity_the_operator_was_shown(db, clock, servic
 @pytest.mark.asyncio
 async def test_toggle_off_stops_all_gh_starts(db, clock, service, runner):
     status = await enable(service)
-    await service.revoke_source(owner_principal_id=OWNER, expected_revision=status["source"]["revision"])
+    await service.revoke_source(owner_identity_id=OWNER, expected_revision=status["source"]["revision"])
     runner.calls.clear()
     result = await collect(service)
     assert result["status"] == "revoked" and runner.calls == []
@@ -415,7 +415,7 @@ async def test_toggle_off_during_a_call_discards_that_result(db, clock, service,
     runner.on_call = park
     task = asyncio.create_task(collect(service))
     await gate.wait_reached(task=task)
-    await service.revoke_source(owner_principal_id=OWNER, expected_revision=status["source"]["revision"])
+    await service.revoke_source(owner_identity_id=OWNER, expected_revision=status["source"]["revision"])
     gate.release()
     result = await task
     assert result["status"] == "blocked" and result["reason_code"] == "source_revoked"
@@ -459,7 +459,7 @@ async def test_dead_owner_session_blocks(db, clock, service, runner, sessions):
     sessions.dead.add(ROOT)
     runner.calls.clear()
     result = await collect(service)
-    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_identity_revoked"
     assert runner.calls == []
 
 
@@ -505,7 +505,7 @@ def test_scope_needs_something_to_read():
 async def test_no_trusted_gh_is_gh_unavailable(db, clock, tmp_path, runner, sessions):
     missing = GitHubActivityService(reader=GhCliReader(runner=runner, candidates=(str(tmp_path / "none" / "gh"),)),
                                     session_check=sessions)
-    status = await missing.status(owner_principal_id=OWNER)
+    status = await missing.status(owner_identity_id=OWNER)
     assert status["gh"] == {"available": False, "reason_code": "gh_unavailable", "entry_path": None}
     with pytest.raises(GitHubActivityError) as raised:
         await missing.check_gh_login()
@@ -519,7 +519,7 @@ async def test_default_reader_with_no_gh_starts_nothing(db, clock, tmp_path, mon
     started = []
     monkeypatch.setattr(github_cli.process_tools, "run_owned_argv", lambda *a, **k: started.append(a))
     service = GitHubActivityService(reader=GhCliReader(candidates=github_cli.GH_CANDIDATE_PATHS))
-    assert (await service.status(owner_principal_id=OWNER))["gh"]["reason_code"] == "gh_unavailable"
+    assert (await service.status(owner_identity_id=OWNER))["gh"]["reason_code"] == "gh_unavailable"
     with pytest.raises(GitHubActivityError):
         await service.check_gh_login()
     assert started == []
@@ -647,11 +647,11 @@ async def test_interrupted_run_stays_running_and_is_reported_literally(db, clock
     await enable(service)
     source = await source_row()
     async with db_engine.get_session() as session:
-        session.add(GitHubActivityRun(owner_principal_id=OWNER, source_id=source.id, source_revision=1,
+        session.add(GitHubActivityRun(owner_identity_id=OWNER, source_id=source.id, source_revision=1,
                                       trigger="scheduled", report_date=DAY.isoformat(), timezone="Europe/Warsaw",
                                       window_start_utc=START, window_end_utc=END, collected_until_utc=NOW,
                                       started_at=NOW - timedelta(hours=1)))
-    view = await service.activity_for_day(owner_principal_id=OWNER, report_day=DAY, tz=WARSAW)
+    view = await service.activity_for_day(owner_identity_id=OWNER, report_day=DAY, tz=WARSAW)
     assert view["status"] == "running"
     assert view["message"] == "A GitHub collection started at 20:00 and did not record completion."
 
@@ -659,7 +659,7 @@ async def test_interrupted_run_stays_running_and_is_reported_literally(db, clock
 @pytest.mark.asyncio
 async def test_not_collected_and_complete_zero_are_distinct(db, clock, service):
     await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
-    view = await service.activity_for_day(owner_principal_id=OWNER, report_day=DAY, tz=WARSAW)
+    view = await service.activity_for_day(owner_identity_id=OWNER, report_day=DAY, tz=WARSAW)
     assert view["status"] == "not_collected"
     result = await collect(service)
     assert result["status"] == "complete" and "no activity found" in result["message"]
@@ -740,7 +740,7 @@ async def test_revoke_after_the_last_call_drops_items_at_the_storage_guard(db, c
 
     async def revoke_then_record(run_id, binary):
         # Every gh call has finished and passed its checks; the source changes now.
-        await service.revoke_source(owner_principal_id=OWNER, expected_revision=status["source"]["revision"])
+        await service.revoke_source(owner_identity_id=OWNER, expected_revision=status["source"]["revision"])
         await real_record(run_id, binary)
 
     monkeypatch.setattr(service, "_record_binary", revoke_then_record)
@@ -762,7 +762,7 @@ async def test_root_death_between_two_calls_stops_the_run_before_the_next_start(
     runner.on_call = kill_root
     runner.calls.clear()
     result = await collect(service)
-    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_identity_revoked"
     assert calls_after(runner, f"/repos/{REPO}") == []
     assert await items() == []
 
@@ -778,7 +778,7 @@ async def test_pre_run_session_check_alone_blocks_before_any_start(db, clock, se
     sessions.dead.add(ROOT)
     runner.calls.clear()
     result = await collect(service)
-    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_identity_revoked"
     assert runner.calls == []
 
 
@@ -870,7 +870,7 @@ async def test_out_of_range_report_date_is_refused(db, clock, service):
         assert raised.value.code in {"report_date_invalid", "report_day_in_future"}
         assert raised.value.status_code == 422
     with pytest.raises(GitHubActivityError) as raised:
-        await service.activity_for_day(owner_principal_id=OWNER, report_day=date.max, tz=WARSAW)
+        await service.activity_for_day(owner_identity_id=OWNER, report_day=date.max, tz=WARSAW)
     assert raised.value.code == "report_date_invalid"
 
 
@@ -900,3 +900,82 @@ async def test_a_refused_value_is_not_a_run_ending_failure(db, clock, service, r
         await collection.call("commits", repository=REPO, discovered=False, branch="bad..name", login="octo",
                               since=START, until=NOW)
     assert runner.calls == [] and collection.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_owner_revoked_during_the_last_call_discards_its_result(db, clock, service, world, runner, sessions):
+    """Pins the post-call check: nothing later would catch a revoke during the final call."""
+    world.commit(REPO, SHA[0], at(1))
+    await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+
+    def revoke_on_last(call):
+        if call["endpoint"] and call["endpoint"].startswith(f"/repos/{REPO}/commits?"):
+            sessions.dead.add(OWNER)
+
+    runner.on_call = revoke_on_last
+    result = await collect(service)
+    assert runner.endpoints[-1].startswith(f"/repos/{REPO}/commits?")
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_identity_revoked"
+    assert await items() == []
+
+
+@pytest.mark.asyncio
+async def test_an_unsendable_login_from_github_fails_as_value_invalid(db, clock, service, world, runner):
+    await enable(service)
+    world.user = user(101, "not a login")
+    runner.calls.clear()
+    result = await collect(service)
+    assert result["status"] == "failed" and result["reason_code"] == "github_activity_value_invalid"
+    assert runner.endpoints == ["/user"]
+
+
+@pytest.mark.asyncio
+async def test_a_lone_surrogate_branch_is_skipped(db, clock, service, world):
+    world.event(REPO, at(1), ref="refs/heads/a\ud800b")
+    world.commit(REPO, SHA[0], at(1))
+    await enable(service)
+    result = await collect(service)
+    assert result["status"] == "partial" and result["reason_code"] is None
+    assert {"code": "branch_name_skipped", "repository": REPO} in result["run"]["limitations"]
+    assert [row.external_id for row in await items()] == [SHA[0]]
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_runner_error_is_an_internal_failure(db, clock, service, runner):
+    await enable(service)
+    runner.inject("/user", RuntimeError("unexpected runner bug"))
+    result = await collect(service)
+    assert result["status"] == "failed" and result["reason_code"] == "github_activity_internal_error"
+
+
+@pytest.mark.asyncio
+async def test_pre_identity_branch_tables_are_set_aside_with_their_rows(tmp_path):
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlmodel import SQLModel
+    from src.db.engine import _set_aside_pre_identity_github_activity
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'old.sqlite3'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                "CREATE TABLE github_activity_sources (id VARCHAR PRIMARY KEY, owner_principal_id VARCHAR, state VARCHAR)")
+            await conn.exec_driver_sql("CREATE UNIQUE INDEX ix_github_activity_sources_owner_principal_id "
+                                       "ON github_activity_sources (owner_principal_id)")
+            await conn.exec_driver_sql("CREATE TABLE github_activity_items (id VARCHAR PRIMARY KEY, "
+                                       "owner_principal_id VARCHAR, dedupe_key VARCHAR)")
+            await conn.exec_driver_sql("CREATE UNIQUE INDEX ux_github_activity_items_dedupe "
+                                       "ON github_activity_items (owner_principal_id, dedupe_key)")
+            await conn.exec_driver_sql("INSERT INTO github_activity_sources VALUES ('s1', 'p1', 'active')")
+        async with engine.begin() as conn:
+            await _set_aside_pre_identity_github_activity(conn)
+            await conn.run_sync(lambda sync: SQLModel.metadata.create_all(sync, tables=[
+                GitHubActivitySource.__table__, GitHubActivityRun.__table__, GitHubActivityItem.__table__]))
+            # Idempotent once the new shape exists.
+            await _set_aside_pre_identity_github_activity(conn)
+        async with engine.begin() as conn:
+            kept = (await conn.exec_driver_sql("SELECT id, state FROM github_activity_sources_pre_identity")).fetchall()
+            columns = {row[1] for row in (await conn.exec_driver_sql(
+                "PRAGMA table_info(github_activity_sources)")).fetchall()}
+            fresh = (await conn.exec_driver_sql("SELECT COUNT(*) FROM github_activity_sources")).fetchone()[0]
+        assert kept == [("s1", "active")] and "owner_identity_id" in columns and fresh == 0
+    finally:
+        await engine.dispose()

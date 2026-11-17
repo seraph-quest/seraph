@@ -121,7 +121,14 @@ def valid_login(value: object) -> bool:
 
 
 def valid_branch(value: object) -> bool:
-    return (isinstance(value, str) and bool(_BRANCH.fullmatch(value)) and ".." not in value
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate cannot be sent; the branch is skipped.
+        return False
+    return (bool(_BRANCH.fullmatch(value)) and ".." not in value
             and not value.startswith(("-", "/")) and not value.endswith(("/", ".lock")) and "@{" not in value)
 
 
@@ -432,12 +439,13 @@ class GhCliReader:
             if cleanup.status not in _CLEAN:
                 raise GhCliError("gh_cleanup_unproven") from None
             process_tools._delete_runtime_dir(run_dir)
+            if not isinstance(exc, OSError):
+                # Not an expected launch or pipe failure: surface it as is.
+                raise
             if cleanup.status == "stopped":
-                # The child started and was stopped before it could answer.
+                # The child started, a pipe could not be set up, and it was stopped.
                 raise GhCliError("gh_request_failed") from None
-            if isinstance(exc, OSError):
-                raise GhCliError("gh_unavailable") from None
-            raise GhCliError("gh_request_failed") from None
+            raise GhCliError("gh_unavailable") from None
         if result.cleanup_status in _CLEAN:
             process_tools._delete_runtime_dir(run_dir)
         else:

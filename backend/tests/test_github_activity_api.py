@@ -13,7 +13,7 @@ from src.utils import clock as clock_module
 from src.utils.clock import FakeClock
 from tests.github_activity_fixture import FakeGhRunner, FakeGitHubWorld, make_reader, user
 from tests.support.clock import install_clock
-from tests.test_operator_identity import HEADERS, auth, login  # noqa: F401
+from tests.test_operator_identity import HEADERS, auth, enroll, login  # noqa: F401
 
 NOW = datetime(2026, 11, 17, 20, 0, tzinfo=timezone.utc)
 REPO = "seraph-quest/seraph"
@@ -66,6 +66,19 @@ def gh_service(tmp_path, runner, monkeypatch):
 SCOPE = {"discover_from_activity": False, "repositories": [REPO]}
 
 
+async def owner_login(client):
+    """A password login with enrolled ownership: the identity that owns the source."""
+    session = await login(client)
+    enrolled = await enroll(client)
+    return {**session, "identity_id": enrolled["operator_identity_id"]}
+
+
+async def collect_as(identity_id):
+    return await github_activity._service().collect_day(
+        owner_identity_id=identity_id, report_day=NOW.date(), tz=github_activity.user_timezone(),
+        trigger="scheduled")
+
+
 async def check_and_enable(client, *, allow_model_context=False):
     checked = await client.post("/api/capabilities/github/activity/gh/check", headers=HEADERS,
                                 json={"acknowledge_gh_login_check": True})
@@ -115,7 +128,7 @@ async def test_enable_requires_ambient_login_acknowledgement(client, async_db, c
 
 @pytest.mark.asyncio
 async def test_enable_collect_items_and_stale_revision(client, async_db, clock, gh_service, runner):
-    await login(client)
+    await owner_login(client)
     checked, enabled = await check_and_enable(client)
     assert checked["identity_login"] == "octo"
     assert enabled["source"]["state"] == "active" and enabled["source"]["revision"] == 1
@@ -142,7 +155,7 @@ async def test_enable_collect_items_and_stale_revision(client, async_db, clock, 
 
 @pytest.mark.asyncio
 async def test_enable_refuses_a_different_identity(client, async_db, clock, gh_service, runner, world):
-    await login(client)
+    await owner_login(client)
     checked = (await client.post("/api/capabilities/github/activity/gh/check", headers=HEADERS,
                                  json={"acknowledge_gh_login_check": True})).json()
     world.user = user(303, "intruder")
@@ -153,28 +166,9 @@ async def test_enable_refuses_a_different_identity(client, async_db, clock, gh_s
 
 
 @pytest.mark.asyncio
-async def test_a_new_login_does_not_inherit_the_source_and_the_old_root_blocks(client, async_db, clock,
-                                                                              gh_service, runner):
-    first = await login(client)
-    await check_and_enable(client)
-    await client.post("/api/auth/logout", headers=HEADERS)
-    await login(client)
-    runner.calls.clear()
-    result = (await client.post("/api/capabilities/github/activity/collect", headers=HEADERS, json={})).json()
-    # A new password login is a new principal: it has no source of its own.
-    assert result["status"] == "not_connected" and runner.calls == []
-    # The enabling root is no longer live, so the old principal's source blocks before gh starts.
-    old = await github_activity._service().collect_day(
-        owner_principal_id=first["principal_id"], report_day=NOW.date(),
-        tz=github_activity.user_timezone(), trigger="scheduled")
-    assert old["status"] == "blocked" and old["reason_code"] == "owner_session_invalid"
-    assert runner.calls == []
-
-
-@pytest.mark.asyncio
 async def test_effective_grants_show_both_rows_and_revoke_switches_the_source_off(client, async_db, clock,
                                                                                   gh_service, runner):
-    await login(client)
+    await owner_login(client)
     await check_and_enable(client, allow_model_context=False)
     view = (await client.get("/api/extensions/effective-grants")).json()
     rows = {row["kind"]: row for row in view["grants"] if row["kind"].startswith("github_activity")}
@@ -217,63 +211,144 @@ async def _expire_session_row(session_id):
     with pytest.raises(AuthFailure) as raised:
         await authenticate_session(session_id, touch=False)
     assert raised.value.code == "session_expired"
-    async with db_engine.get_session() as db:
-        row = await db.get(OperatorSession, session_id)
-        assert row.revoked_at is not None
 
 
 @pytest.mark.asyncio
-async def test_an_idle_or_absolute_expired_login_does_not_stop_the_source(client, async_db, clock, gh_service, runner):
-    """No time-based gate: only real changes stop the source (operator's standing rule)."""
-    owner = await login(client)
+async def test_unenrolled_login_cannot_own_a_source(client, async_db, clock, gh_service, runner):
+    await login(client)
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert status["ownership_required"] is True and status["source"]["state"] == "not_connected"
+    response = await client.put("/api/capabilities/github/activity/source", headers=HEADERS, json={
+        "expected_revision": 0, "scope": SCOPE, "acknowledge_gh_ambient_login": True,
+        "expected_identity_id": 101, "expected_gh_entry_path": "/opt/homebrew/bin/gh"})
+    assert response.status_code == 409 and response.json()["detail"]["code"] == "operator_identity_required"
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_expired_login_does_not_stop_the_source(client, async_db, clock, gh_service, runner):
+    """No time-based gate: session expiry never stops the source (operator's standing rule)."""
+    owner = await owner_login(client)
     await check_and_enable(client)
     await _expire_session_row(owner["session_id"])
     runner.calls.clear()
-    result = await github_activity._service().collect_day(
-        owner_principal_id=owner["principal_id"], report_day=NOW.date(), tz=github_activity.user_timezone(),
-        trigger="scheduled")
+    result = await collect_as(owner["identity_id"])
     assert result["status"] == "complete", result
     assert runner.endpoints[0] == "/user"
 
 
 @pytest.mark.asyncio
-async def test_an_explicit_logout_stops_the_source(client, async_db, clock, gh_service, runner):
-    owner = await login(client)
+async def test_after_expiry_a_new_login_sees_controls_and_revokes_the_source(client, async_db, clock, gh_service,
+                                                                              runner):
+    owner = await owner_login(client)
     await check_and_enable(client)
-    assert (await client.post("/api/auth/logout", headers=HEADERS)).status_code in {200, 204}
+    await client.post("/api/capabilities/github/activity/collect", headers=HEADERS, json={})
+    await _expire_session_row(owner["session_id"])
+    # A new password login with the continuity cookie is the same identity.
+    second = await login(client)
+    assert second["session_id"] != owner["session_id"]
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert status["source"]["state"] == "active" and status["ownership_required"] is False
+    items = (await client.get(f"/api/capabilities/github/activity/items?report_date={NOW.date()}")).json()
+    assert len(items["items"]) == 1
+    grants = (await client.get("/api/extensions/effective-grants")).json()["grants"]
+    row = next(grant for grant in grants if grant["kind"] == "github_activity")
+    revoked = await client.post("/api/extensions/effective-grants/revoke", headers=HEADERS, json={
+        "grant_id": row["grant_id"], "expected_revision": row["revision"], "idempotency_key": "after-expiry"})
+    assert revoked.status_code == 200, revoked.text
+    assert (await client.get("/api/capabilities/github/activity")).json()["source"]["state"] == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_identity_revoke_after_a_newer_login_blocks_the_source(client, async_db, clock, gh_service, runner):
+    """The review's reproduction: a newer login, the enabling row left expired, then ownership revoke."""
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    await _expire_session_row(owner["session_id"])
+    await login(client)
+    assert (await client.post("/api/auth/ownership/revoke", headers=HEADERS)).status_code == 204
     runner.calls.clear()
-    result = await github_activity._service().collect_day(
-        owner_principal_id=owner["principal_id"], report_day=NOW.date(), tz=github_activity.user_timezone(),
-        trigger="scheduled")
-    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    result = await collect_as(owner["identity_id"])
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_identity_revoked"
     assert runner.calls == []
 
 
 @pytest.mark.asyncio
-async def test_live_owner_session_is_keyed_to_real_changes(client, async_db, clock):
-    from datetime import timedelta
+async def test_an_explicit_logout_alone_does_not_stop_the_source(client, async_db, clock, gh_service, runner):
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    assert (await client.post("/api/auth/logout", headers=HEADERS)).status_code in {200, 204}
+    runner.calls.clear()
+    result = await collect_as(owner["identity_id"])
+    assert result["status"] == "complete" and runner.endpoints[0] == "/user"
+
+
+@pytest.mark.asyncio
+async def test_workspace_restore_stops_the_source(client, async_db, clock, gh_service, runner):
+    import sqlite3
+    from contextlib import closing
+    from src.workspace.production import _stop_github_activity_sources
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    with closing(sqlite3.connect(async_db.path)) as connection:
+        assert _stop_github_activity_sources(connection) == 1
+        connection.commit()
+    runner.calls.clear()
+    result = await collect_as(owner["identity_id"])
+    assert result["status"] == "stopped" and result["reason_code"] == "workspace_restored"
+    assert "workspace was restored" in result["message"] and runner.calls == []
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert status["source"]["state"] == "stopped" and status["source"]["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_live_owner_identity_checks_identity_and_local_root(client, async_db, clock, monkeypatch):
+    from types import SimpleNamespace
     from sqlalchemy import update
+    from src.auth import service as auth_service
     from src.db import engine as db_engine
-    from src.db.models import OperatorSession
-    from src.integrations.github_activity import GitHubActivityError, live_owner_session
-    owner = await login(client)
-    await live_owner_session(owner["session_id"], owner["principal_id"])
-    for bad_principal in ("operator:root:someone-else", ""):
-        with pytest.raises(GitHubActivityError):
-            await live_owner_session(owner["session_id"], bad_principal)
-    with pytest.raises(GitHubActivityError):
-        await live_owner_session("no-such-session", owner["principal_id"])
-    future = datetime.now(timezone.utc) + timedelta(days=1)
+    from src.db.models import OperatorIdentity, OperatorSession
+    from src.integrations.github_activity import GitHubActivityError, live_owner_identity
+    owner = await owner_login(client)
+    source = SimpleNamespace(owner_identity_id=owner["identity_id"], owner_session_id=owner["session_id"])
+    await live_owner_identity(source)
+    with pytest.raises(GitHubActivityError) as raised:
+        await live_owner_identity(SimpleNamespace(owner_identity_id="no-such-identity",
+                                                  owner_session_id=owner["session_id"]))
+    assert raised.value.code == "owner_identity_revoked"
+    # A local no-login root: live while the mode is on and the root unretired.
+    root = OperatorSession(token_hash=auth_service.LOCAL_ROOT_TOKEN_MARKER, idle_expires_at=auth_service.LOCAL_ROOT_EXPIRY,
+                           absolute_expires_at=auth_service.LOCAL_ROOT_EXPIRY,
+                           operator_identity_id=owner["identity_id"])
     async with db_engine.get_session() as db:
-        await db.execute(update(OperatorSession).where(OperatorSession.id == owner["session_id"]).values(
-            is_bearer_tombstone=True, idle_expires_at=future, absolute_expires_at=future))
-    with pytest.raises(GitHubActivityError):
-        await live_owner_session(owner["session_id"], owner["principal_id"])
+        db.add(root)
+        await db.flush()
+        root_id = root.id
+    local = SimpleNamespace(owner_identity_id=owner["identity_id"], owner_session_id=root_id)
+    monkeypatch.setattr(auth_service, "local_no_login_active", lambda: True)
+    await live_owner_identity(local)
+    monkeypatch.setattr(auth_service, "local_no_login_active", lambda: False)
+    with pytest.raises(GitHubActivityError) as raised:
+        await live_owner_identity(local)
+    assert raised.value.code == "local_root_retired"
+    monkeypatch.setattr(auth_service, "local_no_login_active", lambda: True)
+    async with db_engine.get_session() as db:
+        await db.execute(update(OperatorSession).where(OperatorSession.id == root_id).values(
+            token_hash=f"{auth_service.LOCAL_ROOT_TOKEN_MARKER}:retired:{root_id}"))
+    with pytest.raises(GitHubActivityError) as raised:
+        await live_owner_identity(local)
+    assert raised.value.code == "local_root_retired"
+    async with db_engine.get_session() as db:
+        await db.execute(update(OperatorIdentity).where(OperatorIdentity.id == owner["identity_id"]).values(
+            revoked_at=datetime.now(timezone.utc)))
+    with pytest.raises(GitHubActivityError) as raised:
+        await live_owner_identity(source)
+    assert raised.value.code == "owner_identity_revoked"
 
 
 @pytest.mark.asyncio
 async def test_items_route_refuses_out_of_range_dates(client, async_db, clock, gh_service, runner):
-    await login(client)
+    await owner_login(client)
     await check_and_enable(client)
     assert (await client.get("/api/capabilities/github/activity/items?report_date=9999-12-31")).status_code == 422
     assert (await client.get("/api/capabilities/github/activity/items?report_date=2026-02-30")).status_code == 422

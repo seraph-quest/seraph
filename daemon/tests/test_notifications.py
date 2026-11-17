@@ -95,6 +95,34 @@ class TestNotificationPolling:
         )
 
     @pytest.mark.asyncio
+    async def test_notification_receipts_send_paired_edge_headers(self):
+        """#1258: when paired, each receipt carries the paired credential
+        headers alongside the daemon identity, never an Origin or cookie."""
+        from seraph_daemon import mark_display_attempted
+
+        edge = {"Authorization": "Bearer synthetic-edge-credential", "X-Seraph-Node-Device": "mac-local-1"}
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"acked": True, "failed": True, "display_attempted": True}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=response)
+
+        assert await mark_display_attempted(
+            mock_client, "http://localhost:8004", "notif-1", 7, "test-daemon", edge_headers=edge,
+        ) is True
+        assert await ack_notification(
+            mock_client, "http://localhost:8004", "notif-1", 7, "test-daemon", edge_headers=edge,
+        ) is True
+        assert await fail_notification(
+            mock_client, "http://localhost:8004", "notif-1", fencing_token=7, worker_id="test-daemon",
+            edge_headers=edge,
+        ) is True
+        expected = {**edge, "X-Seraph-Daemon-Id": "test-daemon"}
+        for call in mock_client.post.await_args_list:
+            assert call.kwargs["headers"] == expected
+        assert edge == {"Authorization": "Bearer synthetic-edge-credential", "X-Seraph-Node-Device": "mac-local-1"}
+
+    @pytest.mark.asyncio
     async def test_poll_loop_displays_and_acks_notification(self):
         notification_payload = {
             "id": "notif-1",

@@ -173,8 +173,15 @@ class LocalCaptureUploader:
         )
 
     def _headers(self) -> dict[str, str]:
-        # No Origin and no cookie: the backend accepts this native ingress on
-        # the bearer credential alone (a browser always sends Origin).
+        return self.edge_headers()
+
+    def edge_headers(self) -> dict[str, str]:
+        """The scoped paired-edge credential headers for native ingress.
+
+        No Origin and no cookie: the backend accepts this native ingress on
+        the bearer credential (a browser always sends Origin). Callers send
+        them only to ``self.origin``, the validated loopback backend.
+        """
         return {
             "Authorization": f"Bearer {self._credential}",
             "X-Seraph-Node-Device": self.device_id,

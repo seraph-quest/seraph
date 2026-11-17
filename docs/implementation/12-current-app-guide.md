@@ -4310,6 +4310,23 @@ capturing locally (if screen capture is enabled); a paired daemon logs a refused
 change, and `last_context_post_at` in daemon status records only accepted
 posts.
 
+**Daemon notification receipts ([#1258](https://github.com/seraph-quest/seraph/issues/1258), Partial):**
+the daemon's receipts `POST /api/observer/notifications/{id}/ack`, `/fail`
+and `/display-attempted` were refused with `mutation_origin_required`, because
+the daemon sends no Origin. A request to exactly one of those three paths
+(one id segment, no trailing slash) with neither an Origin nor a cookie now
+skips the Origin requirement (host allow-list and, in local no-login mode, the
+loopback-peer rule still apply). Unlike the context post it still resolves
+the operator session, because a receipt is fenced to the claim made under that
+session, and the handler additionally requires the paired-edge credential,
+owned by that operator, before reading the body (bounded to 4 KiB). A
+missing, invalid or revoked credential is refused, and the
+`X-Seraph-Daemon-Id` header must still match the receipt's `worker_id`. No
+other notification route (dismiss, dismiss-all, test, reconcile) gains a
+no-Origin pass. A paired daemon sends its paired-edge headers on these receipts
+only to its validated loopback backend; an unpaired daemon's receipts are
+still refused.
+
 The optional [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 implements ADR-022's ordinary top-frame Chromium text profile within
 [ADR-008](./decisions/008-portable-core-and-consented-context.md). A deliberate

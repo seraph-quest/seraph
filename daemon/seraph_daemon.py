@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -330,6 +331,17 @@ async def fetch_screen_analysis_settings(client: httpx.AsyncClient, url: str) ->
         return None
 
 
+def _receipt_headers(worker: str, edge_headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Daemon identity plus, when paired, the paired-edge credential (#1258).
+
+    The backend accepts a no-Origin notification receipt only with the paired
+    credential; the identity header binds it to the claiming worker.
+    """
+    headers = dict(edge_headers or {})
+    headers["X-Seraph-Daemon-Id"] = worker
+    return headers
+
+
 async def fetch_next_notification(
     client: httpx.AsyncClient,
     url: str,
@@ -356,6 +368,8 @@ async def ack_notification(
     notification_id: str,
     fencing_token: int | None = None,
     worker_id: str | None = None,
+    *,
+    edge_headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Acknowledge a displayed native notification under its lease fence."""
     if fencing_token is None:
@@ -365,7 +379,7 @@ async def ack_notification(
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/ack",
             json={"worker_id": worker, "fencing_token": fencing_token},
-            headers={"X-Seraph-Daemon-Id": worker},
+            headers=_receipt_headers(worker, edge_headers),
         )
         if r.status_code == 200:
             return bool(r.json().get("acked"))
@@ -382,6 +396,7 @@ async def fail_notification(
     reason: str = "display_failed",
     fencing_token: int | None = None,
     worker_id: str | None = None,
+    edge_headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Record an ambiguous display failure for operator reconciliation."""
     if fencing_token is None:
@@ -396,7 +411,7 @@ async def fail_notification(
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/fail",
             json=payload,
-            headers={"X-Seraph-Daemon-Id": worker},
+            headers=_receipt_headers(worker, edge_headers),
         )
         if r.status_code == 200:
             return bool(r.json().get("failed"))
@@ -411,6 +426,8 @@ async def mark_display_attempted(
     notification_id: str,
     fencing_token: int | None,
     worker_id: str | None = None,
+    *,
+    edge_headers: Mapping[str, str] | None = None,
 ) -> bool:
     """Fence the OS handoff before invoking ``osascript``."""
     if fencing_token is None:
@@ -420,7 +437,7 @@ async def mark_display_attempted(
         r = await client.post(
             f"{url}/api/observer/notifications/{notification_id}/display-attempted",
             json={"worker_id": worker, "fencing_token": fencing_token},
-            headers={"X-Seraph-Daemon-Id": worker},
+            headers=_receipt_headers(worker, edge_headers),
         )
         if r.status_code == 200:
             return bool(r.json().get("display_attempted"))
@@ -771,6 +788,10 @@ class ContextPoster:
     def paired(self) -> bool:
         return self._uploader is not None
 
+    @property
+    def uploader(self) -> LocalCaptureUploader | None:
+        return self._uploader
+
     async def post(self, client: httpx.AsyncClient, payload: dict) -> bool:
         """Post once; return ``False`` only when the backend did not accept it."""
         if self._uploader is None:
@@ -833,6 +854,11 @@ async def poll_loop(
     daemon_worker_id = worker_id or DAEMON_WORKER_ID
     if context_poster is None:
         context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
+    # Notification receipts are mutations: when paired they carry the paired
+    # credential, only to the uploader's validated loopback origin (#1258).
+    edge = context_poster.uploader
+    receipt_url = edge.origin if edge is not None else url
+    receipt_headers = edge.edge_headers() if edge is not None else None
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -848,10 +874,11 @@ async def poll_loop(
                     if notification_id in shown_notification_ids:
                         acked = await ack_notification(
                             client,
-                            url,
+                            receipt_url,
                             notification_id,
                             fencing_token,
                             daemon_worker_id,
+                            edge_headers=receipt_headers,
                         )
                         if acked:
                             shown_notification_ids.discard(notification_id)
@@ -860,10 +887,11 @@ async def poll_loop(
                         # backend durably records this exact fenced handoff.
                         display_started = await mark_display_attempted(
                             client,
-                            url,
+                            receipt_url,
                             notification_id,
                             fencing_token,
                             daemon_worker_id,
+                            edge_headers=receipt_headers,
                         ) if notification_id else False
                         if not display_started:
                             if verbose:
@@ -883,10 +911,11 @@ async def poll_loop(
                                 shown_notification_ids.add(notification_id)
                             acked = await ack_notification(
                                 client,
-                                url,
+                                receipt_url,
                                 notification["id"],
                                 fencing_token,
                                 daemon_worker_id,
+                                edge_headers=receipt_headers,
                             )
                             if acked and notification_id:
                                 shown_notification_ids.discard(notification_id)
@@ -896,10 +925,11 @@ async def poll_loop(
                         elif notification_id:
                             await fail_notification(
                                 client,
-                                url,
+                                receipt_url,
                                 notification_id,
                                 fencing_token=fencing_token,
                                 worker_id=daemon_worker_id,
+                                edge_headers=receipt_headers,
                             )
 
                 # Check idle state

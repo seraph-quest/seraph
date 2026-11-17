@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError
@@ -41,6 +43,19 @@ _NATIVE_NO_ORIGIN_PATHS = {"/api/observer/captures", "/api/observer/context"}
 # the no-Origin native path the middleware skips the operator session and
 # marks the request so the handler requires the paired-edge credential.
 _NATIVE_EDGE_AUTH_PATHS = {"/api/observer/context"}
+# The daemon's notification receipts (#1258): ack, fail and display-attempted
+# for one notification id. Matched as an exact template, so no other
+# notification route (dismiss, dismiss-all, test, reconcile, recovery) gains a
+# no-Origin pass. The operator session is still resolved here, because the
+# receipt is fenced to the claim made under it, and the handler additionally
+# requires the paired-edge credential before reading the body.
+_NATIVE_NOTIFICATION_RECEIPT_PATH = re.compile(
+    r"/api/observer/notifications/[0-9A-Za-z_-]{1,128}/(?:ack|fail|display-attempted)"
+)
+
+
+def _is_native_notification_receipt_path(path: str) -> bool:
+    return _NATIVE_NOTIFICATION_RECEIPT_PATH.fullmatch(path) is not None
 
 
 def _csv(value: str) -> set[str]:
@@ -331,7 +346,10 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         native_no_origin = (
             request.method == "POST"
-            and request.url.path in _NATIVE_NO_ORIGIN_PATHS
+            and (
+                request.url.path in _NATIVE_NO_ORIGIN_PATHS
+                or _is_native_notification_receipt_path(request.url.path)
+            )
             and "origin" not in request.headers
             and "cookie" not in request.headers
         )
@@ -349,6 +367,10 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             # verify the paired-edge credential before acting (#1248).
             request.state.native_edge_ingress = True
             return await call_next(request)
+        if native_no_origin and _is_native_notification_receipt_path(request.url.path):
+            # Falls through to the operator session below; the handler must
+            # also verify the paired-edge credential before acting (#1258).
+            request.state.native_edge_ingress = True
         # The paired edge authenticates with its scoped node credential at the
         # ingress handler.  Keep the host/origin boundary enforced here, but do
         # not require a browser operator cookie that a native daemon cannot

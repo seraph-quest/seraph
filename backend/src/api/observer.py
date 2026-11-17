@@ -8,7 +8,7 @@ import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -152,6 +152,11 @@ class NativeNotificationListResponse(BaseModel):
 class NativeNotificationRecoveryResponse(BaseModel):
     recoveries: list[dict[str, Any]]
     recovery_count: int
+
+
+_ReceiptT = TypeVar(
+    "_ReceiptT", NotificationAckRequest, NotificationFailureRequest, NotificationDisplayAttemptRequest
+)
 
 
 class NotificationRecoveryRequest(BaseModel):
@@ -3024,16 +3029,64 @@ async def get_next_native_notification(
     return {"notification": notification.to_dict()}
 
 
-@router.post("/observer/notifications/{notification_id}/ack", response_model=NotificationAckResponse)
+_MAX_NOTIFICATION_RECEIPT_BYTES = 4096
+
+
+def _receipt_body_schema(model: type[BaseModel]) -> dict[str, Any]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": model.model_json_schema()}},
+        }
+    }
+
+
+async def _authenticated_notification_receipt(request: Request, model: type[_ReceiptT]) -> tuple[_ReceiptT, str, str]:
+    """Authenticate a daemon notification receipt before reading its body (#1258).
+
+    The daemon posts ack/fail/display-attempted with no Origin and no cookie;
+    the middleware then marks the request as native edge ingress and resolves
+    the local operator session the claim was made under. That path requires
+    the paired-edge credential, owned by that operator, before any body byte
+    is read. Any other request must carry the operator session the middleware
+    established. The daemon identity header still binds the receipt to the
+    claiming worker.
+    """
+    if getattr(request.state, "native_edge_ingress", False):
+        uploader, _policy = await _authenticate_paired_daemon(request)
+        owner_principal_id, _session_id = _require_authenticated_operator_binding(request)
+        if uploader["owner_principal_id"] != owner_principal_id:
+            raise HTTPException(status_code=403, detail={"code": "pairing_owner_mismatch"})
+    elif getattr(request.state, "operator", None) is None:
+        raise HTTPException(status_code=401, detail="authenticated daemon request is required")
+    raw = await _read_bounded_body(
+        request,
+        limit=_MAX_NOTIFICATION_RECEIPT_BYTES,
+        too_large_code="notification_receipt_too_large",
+    )
+    try:
+        body = model.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_notification_receipt"}) from exc
+    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    return body, owner_principal_id, operator_session_id
+
+
+@router.post(
+    "/observer/notifications/{notification_id}/ack",
+    response_model=NotificationAckResponse,
+    openapi_extra=_receipt_body_schema(NotificationAckRequest),
+)
 async def ack_native_notification(
     notification_id: str,
-    body: NotificationAckRequest,
     request: Request,
 ):
     """Acknowledge a native notification after the daemon displays it."""
     from src.guardian.feedback import guardian_feedback_repository
 
-    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    body, owner_principal_id, operator_session_id = await _authenticated_notification_receipt(
+        request, NotificationAckRequest
+    )
     notification = await native_notification_queue.get(
         notification_id,
         owner_principal_id=owner_principal_id,
@@ -3077,14 +3130,16 @@ async def ack_native_notification(
 @router.post(
     "/observer/notifications/{notification_id}/fail",
     response_model=NotificationFailureResponse,
+    openapi_extra=_receipt_body_schema(NotificationFailureRequest),
 )
 async def fail_native_notification(
     notification_id: str,
-    body: NotificationFailureRequest,
     request: Request,
 ):
     """Record an ambiguous native-display failure for operator recovery."""
-    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    body, owner_principal_id, operator_session_id = await _authenticated_notification_receipt(
+        request, NotificationFailureRequest
+    )
     failed = await native_notification_queue.fail(
         notification_id,
         reason=body.reason,
@@ -3105,14 +3160,16 @@ async def fail_native_notification(
 @router.post(
     "/observer/notifications/{notification_id}/display-attempted",
     response_model=NotificationDisplayAttemptResponse,
+    openapi_extra=_receipt_body_schema(NotificationDisplayAttemptRequest),
 )
 async def mark_native_notification_display_attempted(
     notification_id: str,
-    body: NotificationDisplayAttemptRequest,
     request: Request,
 ):
     """Record the fenced handoff immediately before an OS display attempt."""
-    owner_principal_id, operator_session_id = _require_authenticated_daemon(request, body.worker_id)
+    body, owner_principal_id, operator_session_id = await _authenticated_notification_receipt(
+        request, NotificationDisplayAttemptRequest
+    )
     marked = await native_notification_queue.mark_display_attempted(
         notification_id,
         worker_id=body.worker_id,

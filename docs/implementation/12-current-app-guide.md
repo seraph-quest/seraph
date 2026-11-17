@@ -4373,10 +4373,15 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   different account, the next run stops the source (`gh_login_changed`) and it
   stays off until you enable it again. Being logged out, `gh` missing or no
   network only fail that run; the source resumes when the same account is back.
-  The source is bound to the Seraph login that enabled it: an explicit logout
-  or revocation of that login stops it (enable it again after logging in).
-  Nothing expires by time: the login's idle or absolute expiry does not stop
-  the source. Switching off cannot recall a request already in flight: one
+  The source belongs to your ownership identity, not to one login. Any live
+  login of that identity sees it, its items and its effective-grants row, and
+  can switch it off. A new login, a logout or a login's idle or absolute
+  expiry does not stop it and does not need re-enabling. It is stopped by
+  revoking the identity (**Revoke ownership**), by a workspace restore (state
+  `stopped`, reason `workspace_restored`), and, for a source enabled in local
+  no-login mode, by that root being reset or the mode switched off. A password
+  login needs enrolled ownership before it can enable the source. Nothing
+  expires by time. Switching off cannot recall a request already in flight: one
   read-only GET may still reach GitHub just after you switch off, and its
   result is discarded.
 - **Where it works.** Only where the backend runs directly on your computer as
@@ -4417,7 +4422,8 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
 - **The day.** `[local midnight, next local midnight)` in `USER_TIMEZONE`,
   converted to UTC; DST days are 23 or 25 hours. Items store only the UTC
   instant, and the day is derived when read. Collection for today stops at now.
-- **Storage.** `github_activity_sources` (the opt-in; no token column),
+- **Storage.** `github_activity_sources` (the opt-in, keyed to the operator
+  identity; no token column),
   `github_activity_runs` (one row per run with status, reason, limitations,
   counts, call count and the binary) and `github_activity_items` (repository,
   kind, number or sha, title, a URL Seraph builds itself, UTC time, and the

@@ -456,6 +456,8 @@ logged in grants nothing. The read source is off until the operator checks
 the login, acknowledges the full `gh` scope, chooses the scope and enables it
 in Settings. It is visible as an effective-grants row and revocable there or
 in the panel; a different `gh` account stops it until enabled again.
+It belongs to the operator identity rather than one login, so login expiry
+never stops it; identity revocation and a workspace restore do.
 
 The boundary is Seraph's own argv, not GitHub: one fixed
 `gh api --method GET --hostname github.com` shape over a closed endpoint table

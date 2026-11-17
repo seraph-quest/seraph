@@ -126,6 +126,66 @@ def test_sleep_rules(tmp_path: Path) -> None:
     assert found == {"backend/tests/test_a.py": {"sleep": 5}}
 
 
+def test_dynamic_imports_resolve_to_the_named_module(tmp_path: Path) -> None:
+    """#1257: ``__import__`` / ``importlib.import_module`` with a literal name are that module."""
+    found = counts(tmp_path, {"test_a.py": """
+        import importlib
+        import importlib as loader
+        from importlib import import_module
+
+        clock = __import__("time")
+
+        async def test_a(monkeypatch):
+            __import__("time").sleep(1)
+            await __import__("asyncio").sleep(0.1)
+            importlib.import_module("time").sleep(1)
+            await importlib.import_module("asyncio").sleep(0.1)
+            await loader.import_module("asyncio").sleep(1)
+            await import_module("asyncio").sleep(1)
+            clock.sleep(1)
+            await __import__("asyncio").sleep(0)
+            __import__("subprocess").Popen(["true"])
+            __import__("os").environ["X"] = "1"
+            started = importlib.import_module("time").monotonic()
+            assert __import__("time").monotonic() - started < 1
+            __import__("os.path").environ.pop("Y")
+    """})
+    # The literal-zero asyncio yield is still not a sleep; ``__import__("os.path")``
+    # yields ``os`` without a fromlist, so ``.environ`` is os.environ.
+    assert found == {"backend/tests/test_a.py": {
+        "sleep": 7, "clock-compare": 1, "environ-assign": 2, "popen": 1}}
+
+
+def test_dynamic_import_with_a_non_literal_name_is_unresolvable(tmp_path: Path) -> None:
+    tests, _ = make_tree(tmp_path, {"test_a.py": """
+        import importlib
+
+        def test_a(name):
+            importlib.import_module(name)
+            module = importlib.import_module(name)
+            __import__(name).sleep(1)
+            importlib.import_module(f"{name}").sleep(1)
+    """})
+    result = checker.scan(tests, tmp_path)
+    # Only the attribute reads are reported; a bare import of a variable name is not.
+    assert [error.split(":")[1] for error in result.errors] == ["7", "8"]
+    assert all("non-literal module name" in error for error in result.errors)
+
+    module = tmp_path / "src/adopted.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(textwrap.dedent("""\
+        import importlib
+
+        def work(name):
+            importlib.import_module("time").monotonic()
+            __import__("asyncio").wait_for
+            importlib.import_module(name).anything
+    """), encoding="utf-8")
+    errors = checker.scan_clock_seam(tmp_path / "src", tmp_path, modules=("adopted.py",))
+    assert [int(error.split(":")[1]) for error in errors] == [4, 5, 6]
+    assert "unresolvable" in errors[2]
+
+
 def test_clock_compare_follows_names_in_scope(tmp_path: Path) -> None:
     found = counts(tmp_path, {"test_a.py": """
         import asyncio

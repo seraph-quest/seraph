@@ -40,6 +40,12 @@ quarantine only through a fix that removes the marker after a 50-of-50 stress
 pass. There is no calendar expiry. ``--quarantined-files`` and
 ``--realtime-files`` list the files those lanes run.
 
+Names resolve through imports and aliases, and through dynamic imports
+(#1257): ``__import__("time").sleep`` and ``importlib.import_module("asyncio")``
+count as the named module for every rule, as does a name assigned from one. A
+dynamic import with a non-literal module name whose attribute is read is an
+error, since it could hide any hazard.
+
 The per-file, per-category counts must equal the baseline exactly. A count
 above the baseline fails, and so does a count below it until the baseline is
 lowered with ``--update``, so the numbers only go down. ``--update`` never
@@ -238,6 +244,8 @@ def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> li
                     report(node, "timer " + name)
                 elif name in CLOCK_SEAM_TIMER_VALUES:
                     report(node, "timer " + name + " used as a value")
+        for node in unresolvable_dynamic_imports(tree):
+            report(node, "dynamic import with a non-literal module name (unresolvable)")
         errors.extend(message for _, message in sorted(found))
     return errors
 
@@ -250,8 +258,47 @@ class Finding:
     snippet: str
 
 
+_UNRESOLVABLE = object()
+
+
+def dynamic_import(node: ast.AST) -> str | object | None:
+    """The module a ``__import__("m")`` / ``importlib.import_module("m")`` call yields (#1257).
+
+    ``None`` when ``node`` is not such a call, ``_UNRESOLVABLE`` when it is one
+    whose module name is not a string literal. ``__import__("a.b")`` yields the
+    top-level package ``a`` unless it is given a ``fromlist``, as at runtime.
+    The function is matched by name (``import_module`` under any module alias)
+    because ``dotted`` has no import table.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    function = dotted(node.func)
+    if function in {"__import__", "builtins.__import__"}:
+        builtin = True
+    elif function is not None and function.rpartition(".")[2] == "import_module":
+        builtin = False
+    else:
+        return None
+    names = node.args[:1] or [keyword.value for keyword in node.keywords if keyword.arg == "name"]
+    if (len(names) != 1 or not isinstance(names[0], ast.Constant) or not isinstance(names[0].value, str)
+            or not names[0].value or names[0].value.startswith(".")):
+        return _UNRESOLVABLE
+    module = names[0].value
+    if builtin:
+        fromlist = node.args[3] if len(node.args) > 3 else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "fromlist"), None)
+        if fromlist is None or (isinstance(fromlist, ast.Constant) and not fromlist.value) or (
+                isinstance(fromlist, (ast.List, ast.Tuple)) and not fromlist.elts):
+            module = module.partition(".")[0]
+    return module
+
+
 def dotted(node: ast.AST) -> str | None:
-    """Return ``a.b.c`` for a Name/Attribute chain, else ``None``."""
+    """Return ``a.b.c`` for a Name/Attribute chain, else ``None``.
+
+    A chain rooted at a literal dynamic import (``__import__("time").sleep``)
+    is named after the imported module (``time.sleep``).
+    """
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
@@ -259,7 +306,22 @@ def dotted(node: ast.AST) -> str | None:
     if isinstance(node, ast.Name):
         parts.append(node.id)
         return ".".join(reversed(parts))
+    module = dynamic_import(node)
+    if isinstance(module, str):
+        parts.append(module)
+        return ".".join(reversed(parts))
     return None
+
+
+def unresolvable_dynamic_imports(tree: ast.AST) -> list[ast.Attribute]:
+    """Attribute reads on a dynamic import whose module name is not a literal.
+
+    ``importlib.import_module(name).sleep(1)`` could hide any hazard, so it is
+    reported instead of ignored. A bare non-literal import (its result unused
+    or passed on) is not an attribute read and is left alone.
+    """
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and dynamic_import(node.value) is _UNRESOLVABLE]
 
 
 class Imports:
@@ -275,6 +337,13 @@ class Imports:
                 for alias in node.names:
                     if alias.asname:
                         self.aliases[alias.asname] = alias.name
+            elif (isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
+                  and isinstance(module := dynamic_import(node.value), str)):
+                # ``clock = __import__("time")`` binds the module like ``import time as clock``.
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        self.aliases[target.id] = module
 
     def resolve(self, name: str | None) -> str | None:
         if name is None:
@@ -641,6 +710,11 @@ def scan(tests_dir: Path, root: Path) -> ScanResult:
         scanner = Scanner(display_path, tree, source, support=relative[:1] == (SUPPORT_PACKAGE,))
         scanner.visit(tree)
         scanner.check_stray_quarantine(tree)
+        for node in unresolvable_dynamic_imports(tree):
+            errors.append(
+                f"{display_path}:{node.lineno}: dynamic import with a non-literal module name cannot be "
+                "checked for determinism hazards; import the module by name"
+            )
         findings.extend(scanner.findings)
         exempt.extend(scanner.exempt)
         errors.extend(scanner.errors)

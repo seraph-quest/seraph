@@ -616,7 +616,7 @@ async def test_direct_chat_reports_openrouter_retired_reason(client):
     assert detail["recovery_action"] == OPENROUTER_RETIRED_REASON
     assert detail["remote_outcome"] == "not_contacted"
     message, _action = openrouter_route_block_recovery(OPENROUTER_RETIRED_REASON)
-    assert "OpenRouter is retired (ADR-035)" in message and "No model call was made" in message
+    assert "OpenRouter is no longer used" in message and "ADR" not in message and "Nothing was sent" in message
 
 
 @pytest.mark.asyncio

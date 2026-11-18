@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { API_URL } from "../../config/constants";
-import { apiFetch } from "../../lib/api";
 import {
   NEAR_TEE_API_BASE, NEAR_TEE_DISCLOSURE, NEAR_TEE_SCREENSHOT_DISCLOSURE, NEAR_TEE_TEXT_MODELS, NEAR_TEE_VISION_MODELS,
-  catalogBasisText, normalizeModelFabricSettings,
+  catalogBasisText,
 } from "../../lib/modelFabric";
-import type { ModelFabricSettingsStatus, NearTeeSetupInput, NearTeeSetupStatus, NearTeeSlotName, NearTeeSlotStatus } from "../../lib/modelFabric";
+import type { ModelFabricSettingsStatus, NearTeeSetupStatus, NearTeeSlotName, NearTeeSlotStatus } from "../../lib/modelFabric";
+import { NearTeeRequestError, nearTeeSlotSavePayload, postNearTeeCapabilityCheck, postNearTeeCatalogCheck } from "../../lib/nearTeeActions";
 import { NearTeeEmbeddingSection } from "./NearTeeEmbeddingSection";
 
 interface Props {
@@ -59,9 +58,9 @@ function number(value: string, label: string, max: number, integer = true): numb
   return parsed;
 }
 function readable(value: string | null | undefined) { return (value ?? "").replace(/_/g, " "); }
-async function detail(response: Response) {
-  try { const body = await response.json(); const value = body?.detail; return typeof value === "string" ? value : JSON.stringify(value ?? response.status); }
-  catch { return String(response.status); }
+/** Prefix a refused request's detail; a request that got no answer keeps its own message. */
+function refused(prefix: string, reason: unknown): unknown {
+  return reason instanceof NearTeeRequestError && reason.status !== null ? new Error(prefix + reason.message) : reason;
 }
 
 export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = false, laneCeilingMicrousd, onSave, onRefreshed }: Props) {
@@ -82,12 +81,7 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
     setBusy("catalog"); setError(null); setMessage(null);
     try {
       if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) throw new Error("Refresh current settings before the catalog check.");
-      const response = await apiFetch(API_URL + "/api/settings/model-fabric/near-tee/catalog-check", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_policy_revision: revision }),
-      });
-      if (!response.ok) throw new Error("Catalog check refused: " + await detail(response));
-      const next = normalizeModelFabricSettings(await response.json());
+      const next = await postNearTeeCatalogCheck(revision as number).catch(reason => { throw refused("Catalog check refused: ", reason); });
       if (!mounted.current) return;
       if (next) { onRefreshed?.(next); setRevision(next.egress_revision); }
       const slots = next?.near_tee?.slots;
@@ -178,26 +172,19 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       if (reserve > laneCeilingMicrousd) throw new Error("Per-request reserve cannot exceed the shared lane ceiling.");
       if (!withdrawScreenshots && draft.enabled && !carryConsent && !acknowledged) throw new Error("Acknowledge that NEAR receives requests in plaintext before enabling or changing this slot.");
       if (vision && !withdrawScreenshots && draft.enabled && !carryConsent && !screenshotAcknowledged) throw new Error("Acknowledge that screenshots are sent to NEAR in plaintext before enabling or changing the vision slot.");
-      const slotInput = {
-        model_id: draft.model, enabled: draft.enabled,
-        max_input_tokens: number(draft.maxInput, "Maximum input tokens", 1_048_576),
-        max_output_tokens: number(draft.maxOutput, "Maximum output tokens", 65_536),
-        timeout_seconds: number(draft.timeout, vision ? "Request timeout (vision: background job budget)" : "Request timeout", maxTimeout, false),
-        request_cost_bound_microusd: reserve,
-        catalog_ttl_hours: number(draft.ttl, "Catalog refresh hours", 24),
-        plaintext_provider_egress_acknowledged: draft.enabled && acknowledged,
-        // Sent only to grant (true) or to withdraw (false); omitted, an
-        // unchanged slot keeps its current screenshot consent.
-        ...(vision && withdrawScreenshots ? { screenshot_plaintext_egress_acknowledged: false }
-          : vision && draft.enabled && screenshotAcknowledged ? { screenshot_plaintext_egress_acknowledged: true } : {}),
-      };
-      // Only this slot is sent; the backend keeps the other stored slot.
-      const value: NearTeeSetupInput = {
-        schema_version: "seraph.near.tee.setup.v1", api_base: NEAR_TEE_API_BASE,
-        slots: vision ? { vision: slotInput } : { text: slotInput },
-        ...(credential.trim() ? { api_key: credential } : {}),
-      };
-      const next = await onSave({ expected_policy_revision: revision, near_tee: value });
+      const payload = nearTeeSlotSavePayload({
+        slot: spec.name, revision: revision as number, credential, acknowledged,
+        screenshot: vision && withdrawScreenshots ? "withdraw" : vision && screenshotAcknowledged ? "grant" : null,
+        fields: {
+          model_id: draft.model, enabled: draft.enabled,
+          max_input_tokens: number(draft.maxInput, "Maximum input tokens", 1_048_576),
+          max_output_tokens: number(draft.maxOutput, "Maximum output tokens", 65_536),
+          timeout_seconds: number(draft.timeout, vision ? "Request timeout (vision: background job budget)" : "Request timeout", maxTimeout, false),
+          request_cost_bound_microusd: reserve,
+          catalog_ttl_hours: number(draft.ttl, "Catalog refresh hours", 24),
+        },
+      });
+      const next = await onSave(payload);
       if (!mounted.current) return;
       clearCredential();
       dirty.current = false; setRevision(next.egress_revision); setAcknowledged(false); setScreenshotAcknowledged(false);
@@ -212,12 +199,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     try {
       if (!slot) throw new Error(`Save the ${spec.name} slot first.`);
       for (const capability of spec.checks) {
-        const response = await apiFetch(API_URL + "/api/settings/model-fabric/canary", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profile_id: slot.profile_id, capability, timeout_seconds: slot.capability_check_timeout_seconds, proof_ttl_seconds: 86400 }),
-        });
-        if (!response.ok) throw new Error("Capability check refused (" + capability + "): " + await detail(response));
-        const body = await response.json();
+        const body = await postNearTeeCapabilityCheck(slot, capability).catch(reason => { throw refused("Capability check refused (" + capability + "): ", reason); });
         if (body?.outcome !== "passed") throw new Error("Capability check failed (" + capability + "): " + readable(body?.error_code ?? "unknown"));
       }
       if (mounted.current) setMessage(`Capability check passed (mechanics only; ${spec.checks.length} billed NEAR requests). Refresh to see readiness.`);
@@ -229,13 +211,8 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     setBusy("structured:" + spec.name); setError(null); setMessage(null);
     try {
       if (!slot) throw new Error(`Save the ${spec.name} slot first.`);
-      const response = await apiFetch(API_URL + "/api/settings/model-fabric/canary", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile_id: slot.profile_id, capability: "structured_output", timeout_seconds: slot.capability_check_timeout_seconds,
-          proof_ttl_seconds: 86400, ...(vision && mode ? { structured_mode: mode } : {}) }),
-      });
-      if (!response.ok) throw new Error("Capability check refused (structured_output): " + await detail(response));
-      const body = await response.json();
+      const body = await postNearTeeCapabilityCheck(slot, "structured_output", vision ? mode : undefined)
+        .catch(reason => { throw refused("Capability check refused (structured_output): ", reason); });
       if (body?.outcome !== "passed") throw new Error("Capability check failed (structured_output): " + readable(body?.error_code ?? "unknown")
         + (mode === "json_schema" ? ". JSON schema requests are withdrawn; the vision slot stays blocked until a prompt-JSON check passes (Run vision capability check)." : "."));
       if (mounted.current) setMessage(mode === "json_schema" ? "JSON-schema structured output check passed (one billed NEAR request). Refresh to see the request mode."

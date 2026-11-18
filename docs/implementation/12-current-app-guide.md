@@ -719,8 +719,14 @@ agent loop; a Cordis owner that is not ready, a host that is not admitting, or
 (`delegation_owner_not_ready`, #1020 part 2) blocks chat visibly with the exact
 fix and never falls back to legacy. Rollback is another higher epoch.
 `/api/runtime/status` reports `chat_runtime {loop, route, owner_epoch, reason,
-recovery}`, the Settings Cordis panel shows it, and the WS status line names the
-loop (`cordis.agent-loop.v1` or `legacy.smolagents`).
+recovery}` and the Settings Cordis panel shows it. The WS status line names the
+effective chat route, not the loop: "Chat is using DeepSeek V4.1 Flash via
+NEAR." (#1280). It is built from the same full readiness `/api/runtime/status`
+reports (consent, key, catalog receipt, accounting, status proofs) plus the
+`streaming` and `tool_use` checks and the month's remaining budget, and is not
+sent when any of them would block the turn. The loop id stays in
+`chat_runtime.loop` and on each turn's "Seraph received the message." frame as
+the structured `chat_loop` field.
 
 **Default cutover and operator control.** `runtime_plugins/cutover.py` holds an
 ordered manifest of domains whose default owner is Cordis
@@ -1501,7 +1507,8 @@ same Node: when the package is missing or stale it runs `cordis build`; like the
 frontend it never installs dependencies, so a fresh checkout first runs
 `npm ci --prefix runtime/cordis --ignore-scripts`. Otherwise it prints the
 blocked reason (`build_dependencies_missing`, `node_unsupported`, ...) and the
-exact fix while core startup continues. Runtime status (Settings → Cordis runtime host)
+exact fix while core startup continues. Runtime status (Settings → Model →
+Advanced and diagnostics → Cordis runtime host)
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
 and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
 `./manage.sh -e dev cordis build`, then restart. The backend container image
@@ -1775,10 +1782,67 @@ the lane. Independently of any save, startup publishes the same route-scoped
 revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
 is shown as `route_revoke: degraded` under Settings and never stops startup.
 
+### The Model card (#1280)
+
+Settings opens on the **Model** tab (formerly "Models & OpenRouter"). Its first
+element is the Model card: one status line saying whether chat works, the model
+in plain words ("DeepSeek V4.1 Flash, hosted by NEAR"), and at most one button.
+Everything the tab showed before (Cordis runtime host, screenshot folder, model
+routes, the shared lane, the retired OpenRouter setup, NEAR text, the detailed
+NEAR TEE panel below, accounting, canaries and background inference) is in one
+closed **Advanced and diagnostics** fold under the card, unchanged.
+
+The card reads `GET /api/settings/model-fabric` and
+`/api/runtime/status.effective_runtime` and shows the first state that applies:
+settings unreadable (**Open Diagnostics**, which opens the fold), a new
+accounting month ("A new month started (December 2026). Your $1,000 monthly
+budget starts again." with **Start the new month**, which posts the existing
+`/api/settings/model-fabric/accounting/period` review of the current UTC month;
+a clock that moved back gets "Confirm &lt;month&gt;" instead), a request cost too
+much (**Accept and continue**), missing key (one key field, **Save key**), no
+budget or a budget below one request's limit (**Save budget**), not set up
+(model picker and consent tick, **Turn on chat**), needs your OK (**Allow and
+turn on chat**), budget used up (**Raise budget**, or a plain note at the
+$1,000 maximum), NEAR not answering (**Try again**), one quick test left (**Run
+test**), route status unreadable (**Try again**), chat on (**Change model**), or
+blocked for another reason (**Open Diagnostics**). The two accounting states
+come first because every settings save is refused while one is open. "Chat is
+on" needs both `effective_runtime.inference_ready` and a ready text slot with no
+reason code. "NEAR not answering" is only this session's last failed required
+check. The card adds no time logic of its own: the new-month state only shows
+the accounting owner's existing monthly review, and nothing is cleared
+automatically.
+
+**Allow and turn on chat** is enabled only after the operator ticks "I
+understand NEAR sees my messages as plain text: no end-to-end encryption, and
+Seraph does not verify NEAR's secure hardware." The tick is never pre-ticked and
+resets after every save. The click saves the stored text slot unchanged with the
+acknowledgement and no `api_key` (the stored key is kept), runs the free catalog
+check at the new revision, then runs only the missing chat checks (`health`,
+`latency_ms`, `text`, `streaming`, `tool_use`, then the optional
+`structured_output`, whose failure never blocks chat). The cost line ("up to 6
+tiny paid requests, at most $0.12") is on screen before the click, and the card
+never runs more paid checks than it showed. Budget and overrun actions save only
+the shared lane (the overrun review sets the lane reserve review to the largest
+unreviewed charge) and follow with the free catalog check only. Every step uses
+the existing endpoints; consent, budget and check semantics are unchanged. Under
+the card's own closed **Details** are the slot limits, catalog receipt, check
+results, reason codes, **Run structured output check** and a **Turn off chat**
+link.
+
+A blocked chat message is plain and provider-neutral ("Chat is paused until you
+give your OK. Nothing was sent."; a new month reads "Chat is paused: a new
+month started. Your monthly budget starts again once you press Start the new
+month in Settings → Model.")
+and the WebSocket error frame carries `code`,
+`recovery_action` and `settings_section: "model"`; the chat shows an **Open
+Settings** button that opens the Model tab with the card in view.
+
 ### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b/PR3c)
 
 Status: **Partial** until live operator use; nothing is enabled by default.
-In **Settings → NEAR TEE · text slot**:
+The Model card above covers the usual path. The detailed controls are in
+**Settings → Model → Advanced and diagnostics → NEAR TEE · text slot**:
 
 1. Publish the shared inference lane ceiling first; NEAR TEE never funds its
    own budget.
@@ -1955,7 +2019,8 @@ activate it is disabled, and the settings API refuses OpenRouter saves and
 capability checks with `openrouter_retired`. The text below records the
 historical setup contract for retained configuration.
 
-Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
+Open **Settings → Model → Advanced and diagnostics** (formerly the Models &
+OpenRouter tab, before that Screenshot/VLM) and
 use its **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
 one qualified `provider/model` ID and explicit upstream allow-list for each
@@ -4587,7 +4652,7 @@ preview with redacted fixtures, not in a live managed cockpit.
   Its popover lists the live link, chat model, tools and approvals, context
   signals, desktop presence, interruption budget and version. Each item names
   its source endpoint. Every state that is not ready says why and links to the
-  fix, usually a Settings section such as Models, Native, Policies or General.
+  fix, usually a Settings section such as Model, Native, Policies or General.
   Expected configuration is labelled **No action needed** and never raises the
   summary. One example is the desktop daemon turned off by `DAEMON_ENABLED=false`.
 - **Observer context.** `/api/observer/state` reports `data_quality_reason`

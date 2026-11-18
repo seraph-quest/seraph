@@ -44,3 +44,22 @@ it("opens Settings on the exact section a shell status action names (#1172)", as
   act(() => openSettingsSection("artifacts"));
   expect(await screen.findByLabelText("Inference accounting")).toBeInTheDocument();
 });
+
+it("opens the Model tab with the Model card in view from the chat's \"model\" link (#1280)", async () => {
+  const { openSettingsSection, SETTINGS_MODEL_CARD_ID } = await import("../lib/settingsNavigation");
+  const scrollIntoView = vi.fn();
+  const target = document.createElement("div");
+  target.id = SETTINGS_MODEL_CARD_ID;
+  target.scrollIntoView = scrollIntoView;
+  document.body.appendChild(target);
+  try {
+    render(<SettingsPanel />);
+    act(() => openSettingsSection("model"));
+    expect(useChatStore.getState().settingsPanelOpen).toBe(true);
+    expect(screen.getByRole("button", { name: "Model" })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByLabelText("Inference accounting")).toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+  } finally {
+    target.remove();
+  }
+});

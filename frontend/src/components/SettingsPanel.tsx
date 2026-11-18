@@ -24,7 +24,7 @@ import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 import { isLocalNoLoginSession, LocalNoLoginBadge } from "./auth/localNoLogin";
-import { SETTINGS_OPEN_SECTION_EVENT, type SettingsSectionId } from "../lib/settingsNavigation";
+import { SETTINGS_MODEL_CARD_ID, SETTINGS_OPEN_SECTION_EVENT, type SettingsOpenSectionEvent } from "../lib/settingsNavigation";
 import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
@@ -151,7 +151,7 @@ interface McpServer {
 type SettingsSection = "artifacts" | "general" | "native" | "telegram" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
-  { id: "artifacts", label: "Models & OpenRouter" },
+  { id: "artifacts", label: "Model" },
   { id: "general", label: "General" },
   { id: "native", label: "Native" },
   { id: "telegram", label: "Telegram" },
@@ -476,13 +476,18 @@ export function SettingsPanel() {
   // A deep link (#1172: status items name the section that resolves them)
   // survives the open transition, which otherwise resets to the first section.
   const requestedSectionRef = useRef<SettingsSection | null>(null);
+  // A "model-card" focus hint (#1280) scrolls the Model card into view once
+  // the section renders; the counter re-runs it on every request.
+  const [modelCardFocus, setModelCardFocus] = useState(0);
   useEffect(() => {
-    const openSection = (event: { section: SettingsSectionId } | undefined) => {
-      const section = event?.section;
+    const openSection = (event: SettingsOpenSectionEvent | undefined) => {
+      // "model" is the Model card, which lives on the first tab until the tab migration.
+      const section = event?.section === "model" ? "artifacts" : event?.section;
       if (!section || !SETTINGS_SECTIONS.some((entry) => entry.id === section)) return;
       requestedSectionRef.current = section;
       setActiveSection(section);
       setSettingsPanelOpen(true);
+      if (event?.focus === "model-card") setModelCardFocus((value) => value + 1);
     };
     appEventBus.on(SETTINGS_OPEN_SECTION_EVENT, openSection);
     return () => appEventBus.off(SETTINGS_OPEN_SECTION_EVENT, openSection);
@@ -497,6 +502,10 @@ export function SettingsPanel() {
     requestedSectionRef.current = null;
     wasOpenRef.current = settingsPanelOpen;
   }, [settingsPanelOpen]);
+  useEffect(() => {
+    if (!modelCardFocus || !settingsPanelOpen || activeSection !== "artifacts") return;
+    document.getElementById(SETTINGS_MODEL_CARD_ID)?.scrollIntoView?.({ block: "start" });
+  }, [modelCardFocus, settingsPanelOpen, activeSection]);
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -770,12 +779,7 @@ export function SettingsPanel() {
 
           {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 
-          {activeSection === "artifacts" && (
-            <>
-              <ArtifactStoragePanel />
-              <BackgroundInferencePanel />
-            </>
-          )}
+          {activeSection === "artifacts" && <ArtifactStoragePanel advanced={<BackgroundInferencePanel />} />}
 
           {activeSection === "policies" && <ToolPolicyModeToggle />}
 

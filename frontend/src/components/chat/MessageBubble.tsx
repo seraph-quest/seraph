@@ -3,6 +3,7 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { useState } from "react";
 import { appEventBus } from "../../lib/appEventBus";
+import { OpenSettingsButton } from "./OpenSettingsButton";
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -95,6 +96,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       <div className="text-[11px] leading-relaxed break-words whitespace-pre-wrap">
         {message.content}
       </div>
+      <OpenSettingsButton
+        message={message}
+        className="mt-2 text-[10px] px-2 py-1 border border-retro-error text-red-200 rounded-sm hover:bg-retro-error/20"
+      />
       {isClarification && message.clarificationOptions && message.clarificationOptions.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-2">
           {message.clarificationOptions.map((option) => (

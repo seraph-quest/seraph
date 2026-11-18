@@ -1005,6 +1005,25 @@ plaintext; attestation not verified by Seraph; no end-to-end encryption".
 Evidence is intercepted-transport tests only: no live NEAR call, provider
 availability, price or model quality is established.
 
+The Model card ([#1280](https://github.com/seraph-quest/seraph/issues/1280)
+slice 1) is **Partial** on this branch: Settings opens on the **Model** tab,
+whose first element names chat's state in plain words with one button, and
+**Allow and turn on chat** saves the operator's own tick (never pre-ticked) on
+the unchanged stored slot without re-entering the key, runs the free catalog
+check, then only the missing chat checks whose cost was shown before the
+click. The previous tab content sits in one closed "Advanced and diagnostics"
+fold. Blocked chat messages are provider-neutral and the WebSocket error frame
+carries `code`, `recovery_action` and `settings_section`, rendered as an **Open
+Settings** button; the status line names the effective route ("Chat is using
+DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
+(route, accounting, proofs, chat checks, remaining budget) would block the
+turn. A new UTC month shows "Start the new month", which posts the existing
+review of the current month on the operator's click so the monthly budget
+starts again. No consent, budget or check
+semantics changed. Evidence is component and
+intercepted-transport tests only; the remaining tab migration is later #1280
+slices. See the [app guide](./12-current-app-guide.md#the-model-card-1280).
+
 ## NEAR TEE vision slot and screen pipeline (ADR-035, #1147 PR4)
 
 **Partial** until live operator use. The vision slot of the same `near_tee`
@@ -1181,7 +1200,8 @@ readback; actual provider availability, model quality, costs, and embedding
 usefulness remain externally unverified. See the [setup guide](./12-current-app-guide.md#configure-the-openrouter-route-epic-736775).
 
 Daily-use readiness ([#1068](https://github.com/seraph-quest/seraph/issues/1068))
-is **Partial** on this branch: Settings → Models & OpenRouter proposes chat-ready
+is **Partial** on this branch: Settings (then "Models & OpenRouter", now the
+Model tab's Advanced and diagnostics fold, #1280) proposes chat-ready
 text capabilities (`streaming`, `tool_use`), an explicit context window
 decoupled from the output cap, dollar-denominated ceiling/request bound, a
 selectable proof lifetime up to 24h, and one Prove route action whose canaries

@@ -17,8 +17,7 @@ from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import (
     direct_chat_turn_timeout,
-    openrouter_route_blocked_message,
-    route_block_overrun_minimum,
+    route_block_frame_fields,
     route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
@@ -70,7 +69,7 @@ from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_se
 from src.vlm_runtime import direct_local_chat_route_error
 from src.runtime_plugins.cutover import legacy_turns
 from src.runtime_plugins.agent_turns import (AGENT_LOOP_DOMAIN, CordisTurn, TurnBlocked, enter_chat_route,
-                                             chat_runtime_status_text, chat_runtime_unavailable_message,
+                                             chat_runtime_status_text, chat_runtime_unavailable_message, current_chat_route,
                                              turn_blocked_message, turn_failure_reason)
 from src.work_board.repository import BoardError
 from src.llm_runtime import (
@@ -983,6 +982,7 @@ async def websocket_chat(websocket: WebSocket):
                 WSResponse(
                     type="status",
                     content="Seraph received the message.",
+                    chat_loop=str(chat_status.get("loop") or "") or None,
                     session_id=session.id,
                     **_ws_lineage_kwargs(session.id, operator, ingress),
                     seq=_next_seq(),
@@ -1061,15 +1061,16 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 revocation_guard_token = set_revocation_guard(revocation_guard)
                 try:
-                    await websocket.send_text(
-                    WSResponse(
-                        type="status",
-                        content=chat_runtime_status_text(chat_loop),
-                        session_id=session.id,
-                        **_ws_lineage_kwargs(session.id, operator, ingress),
-                        seq=_next_seq(),
-                    ).model_dump_json()
-                    )
+                    if route_status_line := chat_runtime_status_text(await current_chat_route()):
+                        await websocket.send_text(
+                            WSResponse(
+                                type="status",
+                                content=route_status_line,
+                                session_id=session.id,
+                                **_ws_lineage_kwargs(session.id, operator, ingress),
+                                seq=_next_seq(),
+                            ).model_dump_json()
+                        )
                     streamed_parts: list[str] = []
                     emitted_safe_chars = 0
 
@@ -1156,9 +1157,7 @@ async def websocket_chat(websocket: WebSocket):
                 except NoCompliantModelRouteError as exc:
                     await _cordis_blocked(NoCompliantModelRouteError.code)
                     safe_error = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
-                    blocked_message = openrouter_route_blocked_message(
-                        exc, minimum_bound_microusd=await route_block_overrun_minimum(exc),
-                    )
+                    blocked_fields = await route_block_frame_fields(exc)
                     logger.info("Direct OpenRouter websocket chat blocked before provider contact", extra={"reason": safe_error})
                     await log_agent_run_event(
                         session_id=session.id,
@@ -1181,7 +1180,7 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_text(
                         WSResponse(
                             type="error",
-                            content=blocked_message,
+                            **blocked_fields,
                             reason=NoCompliantModelRouteError.code,
                             session_id=session.id,
                             seq=_next_seq(),
@@ -1353,15 +1352,16 @@ async def websocket_chat(websocket: WebSocket):
                     active_turn_completed = True
                     continue
                 active_cordis_turn.attach(agent)
-            await websocket.send_text(
-                WSResponse(
-                    type="status",
-                    content=chat_runtime_status_text(chat_loop),
-                    session_id=session.id,
-                    **_ws_lineage_kwargs(session.id, operator, ingress),
-                    seq=_next_seq(),
-                ).model_dump_json()
-            )
+            if route_status_line := chat_runtime_status_text(await current_chat_route()):
+                await websocket.send_text(
+                    WSResponse(
+                        type="status",
+                        content=route_status_line,
+                        session_id=session.id,
+                        **_ws_lineage_kwargs(session.id, operator, ingress),
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
 
             step_num = 0
             final_result = ""
@@ -1487,11 +1487,7 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text(
                     WSResponse(
                         type="error",
-                        content=openrouter_route_blocked_message(
-                            exc,
-                            provider_contacted=contacted,
-                            minimum_bound_microusd=await route_block_overrun_minimum(exc),
-                        ),
+                        **await route_block_frame_fields(exc, provider_contacted=contacted),
                         reason=NoCompliantModelRouteError.code,
                         session_id=session.id,
                         seq=_next_seq(),

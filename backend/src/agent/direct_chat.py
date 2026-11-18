@@ -19,19 +19,19 @@ from src.model_fabric.contracts import NoCompliantModelRouteError
 from src.workflows.inference_accounting import InferenceAccountingError
 
 
-OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE = (
-    "OpenRouter chat is blocked before any provider request. "
-    "Open Settings → Models & OpenRouter and save an allowed model, upstream, "
-    "cloud-egress consent, and a finite spend ceiling. No model call was made."
-)
+CHAT_ROUTE_BLOCKED_MESSAGE = "Chat is blocked. Nothing was sent."
+# Kept for callers and tests written before #1280; the copy is provider-neutral.
+OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE = CHAT_ROUTE_BLOCKED_MESSAGE
 
-_SETTINGS = "Settings → Models & OpenRouter"
-_NO_CALL = "No model call was made."
+_SETTINGS = "Settings → Model"
+_NO_CALL = "Nothing was sent."
 # An agent turn can be denied after earlier steps already called the model.
 _MID_TURN = (
     "Earlier steps of this turn had already called the model, so those calls may be billed "
     "and any tool actions they took stand; the reply is incomplete. Check the result before resending."
 )
+# Settings section a blocked chat message opens (#1280): the Model card.
+CHAT_BLOCK_SETTINGS_SECTION = "model"
 PROVIDER_OVERRUN_CODE = "provider_charge_exceeded_reservation"
 # REST and WebSocket cut a lightweight turn at this outer bound.
 DIRECT_CHAT_TURN_CAP_SECONDS = 60.0
@@ -100,79 +100,100 @@ async def route_block_overrun_minimum(error: BaseException) -> int | None:
     return value if type(value) is int and 0 < value <= 1_000_000_000_000 else None
 
 
+_CONSENT_CODES = frozenset({"provider_policy_revoked", "near_tee_purpose_consent_required"})
+_SETUP_CODES = frozenset({"near_tee_slot_unconfigured", "near_tee_slot_disabled"})
+_CATALOG_CODES = frozenset({"near_tee_catalog_receipt_stale", "near_tee_catalog_receipt_missing"})
+CHAT_NEEDS_TEST_MESSAGE = "Chat needs one quick test first."
+
+
 def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) -> tuple[str, str]:
+    """Plain operator copy and recovery action for one selector rejection (#1280).
+
+    The copy names no retired provider and points at the Model card; the
+    caller appends "Nothing was sent." or the mid-turn sentence.
+    """
     code, _, detail = reason.partition(":")
     capability = detail.replace("_", " ") if detail else ""
+    if code in _CONSENT_CODES:
+        return "Chat is paused until you give your OK.", "give_consent"
+    if code == "near_tee_credential_required":
+        return "Chat is off: no NEAR key saved.", "save_near_key"
+    if code in _SETUP_CODES:
+        return f"Chat is off: no chat model is turned on. Pick one in {_SETTINGS}.", "choose_model"
+    if code in _CATALOG_CODES:
+        return CHAT_NEEDS_TEST_MESSAGE, "run_chat_test"
+    if code == "inference_lane_required":
+        return f"Chat is off: set a monthly budget in {_SETTINGS} first.", "set_budget"
+    if code == "near_tee_request_reserve_exceeds_lane_ceiling":
+        return (
+            f"Chat is off: the monthly budget is smaller than one request's limit. Raise it in {_SETTINGS}.",
+            "set_budget",
+        )
+    if code == "accounting_period_review_required":
+        return (
+            "Chat is paused: a new month started. Your monthly budget starts again once you press "
+            f"Start the new month in {_SETTINGS}.",
+            "review_period",
+        )
+    if code == "accounting_clock_correction_required":
+        return (
+            f"Chat is paused: the computer's clock moved back. Confirm the month in {_SETTINGS}; "
+            "charges already counted for later months stay counted.",
+            "review_clock_correction",
+        )
+    if code == "deployment_cost_budget_exhausted":
+        return "Chat is paused: this month's budget is used up.", "raise_budget"
     if code == "openrouter_retired":
         return (
-            "Chat is blocked: OpenRouter is retired (ADR-035) and no NEAR TEE route is available yet, "
-            "so Seraph has no active inference provider. Existing OpenRouter costs can still be settled "
-            "under Inference accounting.",
+            "Chat is off: no chat model is set up. OpenRouter is no longer used; set up NEAR in "
+            f"{_SETTINGS}. Existing OpenRouter costs can still be settled.",
             "openrouter_retired",
         )
     if code == PROVIDER_OVERRUN_CODE:
         target = (
-            f"at least ${microusd_dollars(minimum_bound_microusd)} ({minimum_bound_microusd:,} µUSD, "
-            "the largest unreviewed charge)"
-            if minimum_bound_microusd else "at least the billed charge shown there"
+            f"${microusd_dollars(minimum_bound_microusd)} (the largest unreviewed charge)"
+            if minimum_bound_microusd else "the billed charge"
         )
         return (
-            "OpenRouter is paused: an earlier call was billed above its request cost bound, and Seraph "
-            "blocks every further paid call until that overrun is reviewed. Open "
-            f"{_SETTINGS}, check the overrun under Inference accounting, raise the request cost bound to "
-            f"{target} and save the setup to record the review. The new bound changes the route, so "
-            "press Prove route again afterwards (each canary is one real, billed provider call).",
+            "Chat is paused: one request cost more than its limit, so every further paid request waits "
+            f"for your review. Open {_SETTINGS} and press Accept and continue; it records a review "
+            f"of up to {target}.",
             "review_cost_overrun",
         )
-    if code == "proof_expired":
-        return (
-            f"OpenRouter chat is blocked: the {capability} capability proof for the text route expired. "
-            f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call), "
-            "or choose a longer proof lifetime.",
-            "prove_route",
-        )
-    if code == "proof_missing":
-        return (
-            f"OpenRouter chat is blocked: the text route has no {capability} capability proof yet. "
-            f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call).",
-            "prove_route",
-        )
+    if code in {"proof_missing", "proof_expired"}:
+        # NEAR proofs never age out (#1178); either code means the check is absent.
+        return CHAT_NEEDS_TEST_MESSAGE, "prove_route"
     if code == "capability_not_declared":
         return (
-            "OpenRouter chat is blocked: this turn needs a capability the text route does not declare "
-            f"(chat needs streaming; agent turns need tool use). Enable it in {_SETTINGS}, save, "
-            "then Prove route.",
+            "Chat is blocked: this turn needs a capability the chat model does not have "
+            "(chat needs streaming; agent turns need tool use).",
             "declare_capability",
         )
     if code == "profile_limit_unknown_or_insufficient" and detail == "context_tokens":
         return (
-            "OpenRouter chat is blocked: this conversation is larger than the text route's context window. "
-            f"Raise the context window in {_SETTINGS} (then Prove route) or start a new session.",
+            "Chat is blocked: this conversation is larger than the chat model's input limit. "
+            f"Start a new session, or raise the limit in {_SETTINGS}.",
             "raise_context_window",
         )
     if code == "profile_limit_unknown_or_insufficient":
         return (
-            f"OpenRouter chat is blocked: the text route's {capability} limit is too low for this turn. "
-            f"Adjust it in {_SETTINGS}, save, then Prove route.",
+            f"Chat is blocked: the chat model's {capability} limit is too low for this turn. "
+            f"Adjust it in {_SETTINGS}.",
             "adjust_route_limits",
         )
     if code == "requirement_noncompliant":
         return (
-            f"OpenRouter chat is blocked: the last {capability} proof did not meet this route's requirement. "
-            f"Prove route again in {_SETTINGS}, or raise the timeout.",
+            f"Chat is blocked: the last {capability} check did not meet the chat model's requirement. "
+            f"Run the test again in {_SETTINGS}.",
             "prove_route",
         )
     if code.startswith("profile_cost"):
         return (
-            "OpenRouter chat is blocked: the text route's spend metadata is missing, stale, or above the ceiling. "
-            f"Review the ceiling and request bound in {_SETTINGS} and save.",
+            "Chat is blocked: the chat model's cost limits are missing or above the monthly budget. "
+            f"Review them in {_SETTINGS}.",
             "review_spend_ceiling",
         )
-    return (
-        f"OpenRouter chat is blocked. Open {_SETTINGS} and save an allowed model, upstream, "
-        "cloud-egress consent, and a finite spend ceiling.",
-        "configure_openrouter",
-    )
+    return "Chat is blocked.", "open_model_settings"
 
 
 def openrouter_route_block_recovery(
@@ -192,8 +213,6 @@ def openrouter_route_block_recovery(
     body, action = _route_block_body(reason, minimum_bound_microusd)
     if provider_contacted:
         return f"{body} {_MID_TURN}", action
-    if action == "configure_openrouter":
-        return OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE, action
     return f"{body} {_NO_CALL}", action
 
 
@@ -208,6 +227,22 @@ def openrouter_route_blocked_message(
         provider_contacted=provider_contacted,
         minimum_bound_microusd=minimum_bound_microusd,
     )[0]
+
+
+async def route_block_frame_fields(error: BaseException, *, provider_contacted: bool = False) -> dict[str, str]:
+    """WebSocket error-frame fields for one route denial (#1280).
+
+    Built from the same reason/action tuple the REST path returns, plus the
+    Settings section the chat's "Open Settings" button opens.
+    """
+    reason = openrouter_route_block_reason(error)
+    message, action = openrouter_route_block_recovery(
+        reason,
+        provider_contacted=provider_contacted,
+        minimum_bound_microusd=await route_block_overrun_minimum(error),
+    )
+    return {"content": message, "code": reason, "recovery_action": action,
+            "settings_section": CHAT_BLOCK_SETTINGS_SECTION}
 
 
 def route_error_from(error: BaseException) -> NoCompliantModelRouteError | None:

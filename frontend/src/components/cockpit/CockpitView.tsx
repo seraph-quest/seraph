@@ -101,6 +101,7 @@ import { CockpitMoreMenu, type CockpitMenuItem } from "./CockpitMoreMenu";
 import { CockpitConversationDock } from "./CockpitConversationDock";
 import { useGoalsInlineHost } from "../quest/QuestPanel";
 import { openSettingsSection } from "../../lib/settingsNavigation";
+import { CockpitPaneMessage } from "./CockpitPaneMessage";
 import {
   chatFabricRouteDegraded,
   deriveChatRuntimeIdentity,
@@ -10673,10 +10674,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ?? (chatRuntimeIdentity.lastReceipt ? `Last chat receipt: ${chatRuntimeIdentity.lastReceipt}.` : null),
       source: "/api/runtime/status · effective_runtime",
       action: chatRuntimeIdentity.tone === "ok"
-        ? { kind: "settings", label: "Open Settings → Models", section: "artifacts" }
+        ? { kind: "settings", label: "Open Settings → Model", section: "model" }
         : chatRuntimeIdentity.tone === "unknown"
           ? { kind: "refresh", label: "Check again" }
-          : { kind: "settings", label: "Open Settings → Models", section: "artifacts" },
+          : { kind: "settings", label: "Open Settings → Model", section: "model" },
     };
     return [
       deriveConnectionItem(connectionStatus),
@@ -18420,13 +18421,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
-                    <div key={message.id} className={`cockpit-message cockpit-message--${message.role}`}>
-                      <div className="cockpit-row-header">
-                        <span className="cockpit-role">{labelForRole(message)}</span>
-                        <span className="cockpit-row-age">{formatAge(message.timestamp)}</span>
-                      </div>
-                      <div className="cockpit-message-body">{message.content}</div>
-                    </div>
+                    <CockpitPaneMessage key={message.id} message={message} label={labelForRole(message)} age={formatAge(message.timestamp)} />
                   ))}
                   {isAgentBusy && (
                     <div className="cockpit-message cockpit-message--pending" aria-live="polite">

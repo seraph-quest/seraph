@@ -863,7 +863,7 @@ function prepare_local_cordis() {
         node_args=(--node "$CORDIS_NODE_PATH")
     fi
     if status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
-        echo "Cordis research runtime: package available (live readiness: Settings > Cordis runtime host)"
+        echo "Cordis research runtime: package available (live readiness: Settings > Model > Advanced and diagnostics > Cordis runtime host)"
         return 0
     fi
     reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"

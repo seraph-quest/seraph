@@ -24,6 +24,11 @@ from src.model_fabric import NoCompliantModelRouteError
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.utils.background import drain_tracked_tasks
 
+READY_NEAR_ROUTE = {"mode": "remote_provider", "provider": "near_tee", "provider_label": "near_tee",
+                    "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "model_label": "DeepSeek-V4.1-Flash-1017",
+                    "inference_ready": True}
+READY_STATUS_LINE = "Chat is using DeepSeek V4.1 Flash via NEAR."
+
 
 def _make_sync_client_with_db():
     """Create a sync TestClient with an isolated DB patched in.
@@ -71,6 +76,8 @@ def _make_sync_client_with_db():
         )
     )
     patches.append(patch("src.api.ws.should_use_direct_local_chat", return_value=False))
+    # #1280: the status line names the effective chat route; tests pin a ready NEAR route.
+    patches.append(patch("src.api.ws.current_chat_route", return_value=READY_NEAR_ROUTE))
     for p in patches:
         p.start()
 
@@ -202,7 +209,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "governed OpenRouter chat runtime" in received[1]["content"]
+            assert received[1]["content"] == READY_STATUS_LINE
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Re"
             assert received[3]["type"] == "delta"
@@ -360,7 +367,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "governed OpenRouter chat runtime" in received[1]["content"]
+            assert received[1]["content"] == READY_STATUS_LINE
             assert received[2]["type"] == "delta"
             assert received[2]["content"] == "Hello."
             assert received[3]["type"] == "final"
@@ -393,7 +400,7 @@ class TestWebSocket:
             assert received[0]["type"] == "status"
             assert received[0]["content"] == "Seraph received the message."
             assert received[1]["type"] == "status"
-            assert "governed OpenRouter chat runtime" in received[1]["content"]
+            assert received[1]["content"] == READY_STATUS_LINE
             assert received[2]["type"] == "error"
             assert "outcome is uncertain" in received[2]["content"]
             assert "did not retry automatically" in received[2]["content"]
@@ -425,9 +432,45 @@ class TestWebSocket:
             assert received[1]["type"] == "status"
             assert received[2]["type"] == "error"
             assert received[2]["reason"] == "no_compliant_route"
-            assert "blocked before any provider request" in received[2]["content"]
-            assert "No model call was made" in received[2]["content"]
+            assert received[2]["content"] == "Chat is blocked. Nothing was sent."
+            assert received[2]["code"] == "no_compliant_route"
+            assert received[2]["recovery_action"] == "open_model_settings"
+            assert received[2]["settings_section"] == "model"
             assert "outcome is uncertain" not in received[2]["content"]
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_blocked_route_prints_no_status_line_and_names_settings(self):
+        """#1280: a blocked route sends no "Chat is using" line; the error opens Settings → Model."""
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _blocked_stream(*args, **kwargs):
+            raise NoCompliantModelRouteError(("provider_policy_revoked",))
+            yield "unreachable"
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.current_chat_route", return_value={**READY_NEAR_ROUTE, "provider": "none",
+                                                                     "model": "", "mode": "blocked",
+                                                                     "inference_ready": False}),
+                patch("src.api.ws.stream_direct_local_chat", _blocked_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+                received = [json.loads(ws.receive_text()) for _ in range(2)]
+
+            assert received[0]["type"] == "status"
+            assert received[0]["content"] == "Seraph received the message."
+            assert received[1]["type"] == "error"
+            assert received[1]["content"] == "Chat is paused until you give your OK. Nothing was sent."
+            assert received[1]["code"] == "provider_policy_revoked"
+            assert received[1]["recovery_action"] == "give_consent"
+            assert received[1]["settings_section"] == "model"
         finally:
             stack.close()
             for p in patches:
@@ -453,9 +496,10 @@ class TestWebSocket:
 
             assert received[2]["type"] == "error"
             assert received[2]["reason"] == "no_compliant_route"
-            assert "health capability proof for the text route expired" in received[2]["content"]
-            assert "Prove route" in received[2]["content"]
-            assert "No model call was made" in received[2]["content"]
+            assert received[2]["content"] == "Chat needs one quick test first. Nothing was sent."
+            assert received[2]["code"] == "proof_expired:health"
+            assert received[2]["recovery_action"] == "prove_route"
+            assert received[2]["settings_section"] == "model"
         finally:
             stack.close()
             for p in patches:
@@ -533,8 +577,9 @@ class TestWebSocket:
 
             error = received[-1]
             assert error["reason"] == "no_compliant_route"
-            assert "health capability proof" in error["content"]
-            assert "No model call was made" not in error["content"]
+            assert error["content"].startswith("Chat needs one quick test first.")
+            assert "Nothing was sent" not in error["content"]
+            assert error["settings_section"] == "model"
             assert "Earlier steps of this turn had already called the model" in error["content"]
             blocked = [call.kwargs for call in log_event.await_args_list if call.kwargs.get("outcome") == "blocked"]
             assert blocked and blocked[-1]["details"]["failure_stage"] == "mid_turn_route"
@@ -567,8 +612,8 @@ class TestWebSocket:
             error = received[-1]
             assert error["type"] == "error"
             assert error["reason"] == "no_compliant_route"
-            assert "blocked before any provider request" in error["content"]
-            assert "No model call was made" in error["content"]
+            assert error["content"] == "Chat is blocked. Nothing was sent."
+            assert error["settings_section"] == "model"
         finally:
             stack.close()
             for p in patches:

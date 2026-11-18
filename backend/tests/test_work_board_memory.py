@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import delete
+from sqlalchemy import delete, event
 from sqlmodel import select
 
 from src.api import goals as goals_api
@@ -50,6 +50,7 @@ from src.goals.contracts import (
 from src.guardian.goal_conditioned_loop import propose_goal_candidate_set
 from src.memory import m5
 from src.memory import repository as memory_repository_module
+from src.vault.repository import vault_repository
 from src.memory.repository import (
     _memory_export_artifact_payload,
     _memory_export_integrity_payload,
@@ -479,6 +480,89 @@ async def test_fresh_conversation_uses_accepted_correction(async_db, monkeypatch
         assert receipt.decision_status.value == "blocked"
         assert receipt.reason == "memory_rolled_back"
         assert _m5_receipt_integrity_matches(receipt)
+
+
+@contextmanager
+def _writer_overlaps(engine):
+    """Record each write a connection starts while another holds the writer lock.
+
+    SQLite has one writer. A second connection that writes while the first has
+    an open write transaction waits out the whole busy timeout and then fails
+    (#1276), so any overlap on one test database is the contention itself.
+    """
+    sync_engine = engine.sync_engine
+    writing: set[int] = set()
+    overlaps: list[str] = []
+    write_prefixes = ("INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN IMMEDIATE")
+
+    def before_execute(conn, _cursor, statement, _parameters, _context, _executemany):
+        if not statement.lstrip().upper().startswith(write_prefixes):
+            return
+        if writing - {id(conn)}:
+            overlaps.append(" ".join(statement.split()[:3]))
+        writing.add(id(conn))
+
+    def end_transaction(conn):
+        writing.discard(id(conn))
+
+    listeners = (("before_cursor_execute", before_execute), ("commit", end_transaction),
+                 ("rollback", end_transaction))
+    for name, listener in listeners:
+        event.listen(sync_engine, name, listener)
+    try:
+        yield overlaps
+    finally:
+        for name, listener in listeners:
+            event.remove(sync_engine, name, listener)
+
+
+@pytest.mark.asyncio
+async def test_m5_write_paths_redact_through_their_own_session(async_db, monkeypatch):
+    """#1276: proposal and accept redact vault secrets inside their unit of work.
+
+    They used to call the audited vault lookup, which opens a second session
+    whose audit insert waited the full busy timeout behind the M5 writer and
+    was then dropped. Redaction must still apply.
+    """
+    vault_value = "m5-vault-value-7f3a91"
+    await vault_repository.store("m5_regression_value", vault_value)
+    async with async_db() as db:
+        goal, source, _later = await _goal_and_tasks(db)
+        attempt = await _verified_attempt(db, source)
+
+    with _writer_overlaps(async_db.engine) as overlaps:
+        proposal = await m5.create_memory_proposal(
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            task_id=source.task_id,
+            expected_task_revision=source.task_revision,
+            attempt_id=attempt.attempt_id,
+            candidate_text=f"The verified source names {vault_value} as its route.",
+            decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+        )
+        accepted = await m5.apply_memory_proposal_action(
+            owner_principal_id=OWNER.principal_id,
+            owner_session_id=OWNER.session_id,
+            proposal_id=proposal["proposal_id"],
+            action="edit_accept",
+            expected_revision=proposal["revision"],
+            expected_preview_text_digest=proposal["proposed_text_digest"],
+            expected_task_revision=source.task_revision,
+            expected_goal_revision=goal.revision,
+            edited_text=f"Edited operator correction: keep {vault_value} out of memory.",
+            decision_effect=MemoryProposalDecisionEffect.require_operator_confirmation,
+            preferred_capability_id=ALTERNATE_CAPABILITY,
+        )
+
+    assert overlaps == []
+    assert proposal["status"] == MemoryProposalStatus.proposed.value
+    assert accepted["status"] == MemoryProposalStatus.accepted.value
+    async with async_db() as db:
+        stored = await db.get(MemoryProposal, proposal["proposal_id"])
+        assert vault_value not in (stored.preview_text or "")
+        assert "[redacted secret]" in (stored.preview_text or "")
+        memory = await db.get(Memory, accepted["accepted_memory_id"])
+        assert memory.content == "Edited operator correction: keep [redacted secret] out of memory."
 
 
 @pytest.mark.asyncio

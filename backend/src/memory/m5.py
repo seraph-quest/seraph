@@ -197,6 +197,21 @@ async def sanitize_m5_memory_text_async(value: str) -> str:
     return sanitize_m5_memory_text(redacted)
 
 
+async def _sanitize_m5_memory_text_in_session(db: AsyncSession, value: str) -> str:
+    """Redact and sanitize memory text through the caller's open session.
+
+    The M5 proposal, accept and reverify paths run inside a unit of work that
+    has already written, so its connection holds SQLite's writer lock. The
+    audited lookup above opens a second session whose vault audit insert then
+    waits out the whole busy timeout behind that lock and is dropped (#1276).
+    Reading the secret rows through the same session needs no second writer.
+    """
+    redacted = await vault_redaction.redact_secrets_in_text_readonly(db, value, fail_closed=True)
+    if redacted == "[redaction unavailable]":
+        raise ValueError("memory proposal redaction is unavailable")
+    return sanitize_m5_memory_text(redacted)
+
+
 def _safe_identifier(value: Any, *, field: str) -> str:
     candidate = str(value or "").strip()
     if not candidate or not _SAFE_ID.fullmatch(candidate):
@@ -1526,7 +1541,7 @@ async def _reverify_blocked_proposal(
     if task is None:
         raise PermissionError("task_owner_session_forbidden")
     proof = await _verified_source(db, task, requested_attempt_id=proposal.source_attempt_id)
-    candidate_text = await sanitize_m5_memory_text_async(_structured_source_candidate(proof))
+    candidate_text = await _sanitize_m5_memory_text_in_session(db, _structured_source_candidate(proof))
     if not candidate_text:
         raise ValueError("verified_memory_candidate_unavailable")
 
@@ -2150,7 +2165,7 @@ async def create_memory_proposal(
         candidate_text = candidate_text if candidate_text is not None else _structured_source_candidate(proof)
         redaction_unavailable = False
         try:
-            candidate_text = await sanitize_m5_memory_text_async(candidate_text)
+            candidate_text = await _sanitize_m5_memory_text_in_session(db, candidate_text)
             memory_kind = MemoryKind(candidate_kind or MemoryKind.fact)
             if memory_kind not in {MemoryKind.fact, MemoryKind.pattern}:
                 raise ValueError("memory_kind must be fact or pattern")
@@ -2436,7 +2451,7 @@ async def _canonical_accept(
 ) -> None:
     if proposal.status is not MemoryProposalStatus.proposed:
         raise ValueError("proposal_not_accepting")
-    text = await sanitize_m5_memory_text_async(edited_text if edited_text is not None else proposal.preview_text or "")
+    text = await _sanitize_m5_memory_text_in_session(db, edited_text if edited_text is not None else proposal.preview_text or "")
     kind = proposal.memory_kind
     if kind not in {MemoryKind.fact, MemoryKind.pattern}:
         raise ValueError("memory_kind_invalid")
@@ -2626,7 +2641,8 @@ async def apply_memory_proposal_action(
                 raise ValueError("decision_effect_invalid") from exc
             if action == "accept" and edited_text is not None:
                 raise ValueError("edited_text_requires_edit_accept")
-            normalized_text = await sanitize_m5_memory_text_async(
+            normalized_text = await _sanitize_m5_memory_text_in_session(
+                db,
                 edited_text if edited_text is not None else proposal.preview_text or ""
             )
             target_id = (

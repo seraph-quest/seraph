@@ -1794,8 +1794,10 @@ closed **Advanced and diagnostics** fold under the card, unchanged.
 The card reads `GET /api/settings/model-fabric` and
 `/api/runtime/status.effective_runtime` and shows the first state that applies:
 settings unreadable (**Open Diagnostics**, which opens the fold), a new
-accounting month (**Confirm and continue**, which posts the existing
-`/api/settings/model-fabric/accounting/period` review), a request cost too
+accounting month ("A new month started (December 2026). Your $1,000 monthly
+budget starts again." with **Start the new month**, which posts the existing
+`/api/settings/model-fabric/accounting/period` review of the current UTC month;
+a clock that moved back gets "Confirm &lt;month&gt;" instead), a request cost too
 much (**Accept and continue**), missing key (one key field, **Save key**), no
 budget or a budget below one request's limit (**Save budget**), not set up
 (model picker and consent tick, **Turn on chat**), needs your OK (**Allow and
@@ -1806,7 +1808,9 @@ blocked for another reason (**Open Diagnostics**). The two accounting states
 come first because every settings save is refused while one is open. "Chat is
 on" needs both `effective_runtime.inference_ready` and a ready text slot with no
 reason code. "NEAR not answering" is only this session's last failed required
-check; no state depends on time passing, and none is cleared automatically.
+check. The card adds no time logic of its own: the new-month state only shows
+the accounting owner's existing monthly review, and nothing is cleared
+automatically.
 
 **Allow and turn on chat** is enabled only after the operator ticks "I
 understand NEAR sees my messages as plain text: no end-to-end encryption, and
@@ -1827,7 +1831,8 @@ link.
 
 A blocked chat message is plain and provider-neutral ("Chat is paused until you
 give your OK. Nothing was sent."; a new month reads "Chat is paused: a new
-month started. Confirm last month's spending in Settings → Model to continue.")
+month started. Your monthly budget starts again once you press Start the new
+month in Settings → Model.")
 and the WebSocket error frame carries `code`,
 `recovery_action` and `settings_section: "model"`; the chat shows an **Open
 Settings** button that opens the Model tab with the card in view.

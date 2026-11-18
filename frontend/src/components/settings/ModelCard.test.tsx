@@ -317,13 +317,23 @@ describe("Model card", () => {
       period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-12", expected_revision: 483 } },
       slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }));
     const { props } = renderCard(settings, BLOCKED("accounting_period_review_required"), { onSave });
-    expect(statusLine()).toHaveTextContent("Chat is paused. A new month started. Confirm last month's spending to continue.");
+    expect(statusLine()).toHaveTextContent("Chat is paused. A new month started (December 2026). Your $1,000 monthly budget starts again.");
+    expect(card()).toHaveTextContent("Start December 2026 to turn chat back on.");
     expect(calls).toHaveLength(0);
-    fireEvent.click(screen.getByRole("button", { name: "Confirm and continue" }));
-    expect(statusLine()).toHaveTextContent("Confirming the month…");
+    fireEvent.click(screen.getByRole("button", { name: "Start the new month" }));
+    expect(statusLine()).toHaveTextContent("Starting the month…");
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
     expect(calls).toEqual([{ url: expect.stringContaining("/api/settings/model-fabric/accounting/period"), body: { period_id: "2026-12", expected_revision: 483 } }]);
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("a clock correction names the month it confirms", () => {
+    const settings = settingsOf(raw({ accounting: { status: "blocked", reason_code: "accounting_clock_correction_required", revision: 9, period_id: "2026-11",
+      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-11", expected_revision: 9 } } }));
+    renderCard(settings, BLOCKED("accounting_clock_correction_required"));
+    expect(statusLine()).toHaveTextContent("Chat is paused. The computer's clock moved back to November 2026.");
+    expect(card()).toHaveTextContent("Charges already counted for later months stay counted.");
+    expect(screen.getByRole("button", { name: "Confirm November 2026" })).toBeEnabled();
   });
 
   it("a refused optional structured output check does not mark NEAR down", async () => {

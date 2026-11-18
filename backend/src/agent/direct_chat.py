@@ -103,8 +103,6 @@ async def route_block_overrun_minimum(error: BaseException) -> int | None:
 _CONSENT_CODES = frozenset({"provider_policy_revoked", "near_tee_purpose_consent_required"})
 _SETUP_CODES = frozenset({"near_tee_slot_unconfigured", "near_tee_slot_disabled"})
 _CATALOG_CODES = frozenset({"near_tee_catalog_receipt_stale", "near_tee_catalog_receipt_missing"})
-# The accounting owner denies every request in a new UTC month until the operator reviews it.
-_PERIOD_CODES = frozenset({"accounting_period_review_required", "accounting_clock_correction_required"})
 CHAT_NEEDS_TEST_MESSAGE = "Chat needs one quick test first."
 
 
@@ -131,10 +129,17 @@ def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) ->
             f"Chat is off: the monthly budget is smaller than one request's limit. Raise it in {_SETTINGS}.",
             "set_budget",
         )
-    if code in _PERIOD_CODES:
+    if code == "accounting_period_review_required":
         return (
-            f"Chat is paused: a new month started. Confirm last month's spending in {_SETTINGS} to continue.",
+            "Chat is paused: a new month started. Your monthly budget starts again once you press "
+            f"Start the new month in {_SETTINGS}.",
             "review_period",
+        )
+    if code == "accounting_clock_correction_required":
+        return (
+            f"Chat is paused: the computer's clock moved back. Confirm the month in {_SETTINGS}; "
+            "charges already counted for later months stay counted.",
+            "review_clock_correction",
         )
     if code == "deployment_cost_budget_exhausted":
         return "Chat is paused: this month's budget is used up.", "raise_budget"

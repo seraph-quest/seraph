@@ -110,6 +110,14 @@ export function modelCardState(settings: ModelFabricSettingsStatus | null, route
   return "blocked";
 }
 
+/** "2026-12" -> "December 2026" (UTC month ids from the accounting owner). */
+export function monthName(periodId: string | null | undefined): string {
+  const match = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(periodId ?? "");
+  if (!match) return "this month";
+  const names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  return `${names[Number(match[2]) - 1]} ${match[1]}`;
+}
+
 /** The month review the accounting owner asks for, when one is open. */
 export function periodReviewOf(settings: ModelFabricSettingsStatus | null) {
   return settings?.inference_accounting?.period_review ?? null;
@@ -327,10 +335,10 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   function confirmMonth() {
     const review = periodReviewOf(settings);
     if (!review) return;
-    void run("Confirming the month…", ["Confirming the month"], async () => {
+    void run("Starting the month…", ["Starting the month"], async () => {
       await postAccountingPeriodReview(review);
       setSavedInLastRun(true);
-      markStep("Confirming the month");
+      markStep("Starting the month");
     });
   }
 
@@ -427,13 +435,19 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
         onClick={() => allowAndTurnOn(nearTeeSlotFields(slot), paidBudget(true))}>Allow and turn on chat</button>;
       break;
     case "new_month": {
+      // The review records the current UTC month; its effect is that the monthly budget starts again.
       const clock = settings?.inference_accounting?.reason_code === "accounting_clock_correction_required";
-      status = clock ? "Chat is paused. The computer's clock moved back. Confirm this month's spending to continue."
-        : "Chat is paused. A new month started. Confirm last month's spending to continue.";
-      second = (accounting?.unknown_microusd ?? 0) > 0
-        ? `Up to ${dollars(accounting?.unknown_microusd ?? 0)} from earlier requests is not yet confirmed by NEAR and stays counted. Nothing else changes.`
-        : "Nothing else changes.";
-      action = <button type="button" className={buttonClass} disabled={disabled || !periodReviewOf(settings)} onClick={confirmMonth}>Confirm and continue</button>;
+      const month = monthName(periodReviewOf(settings)?.period_id);
+      status = clock
+        ? `Chat is paused. The computer's clock moved back to ${month}.`
+        : `Chat is paused. A new month started (${month}). Your ${dollars(ceiling)} monthly budget starts again.`;
+      const unconfirmed = (accounting?.unknown_microusd ?? 0) > 0
+        ? ` Up to ${dollars(accounting?.unknown_microusd ?? 0)} from earlier requests is not yet confirmed by NEAR and stays counted.` : "";
+      second = clock
+        ? `Confirm ${month} to continue. Charges already counted for later months stay counted.${unconfirmed}`
+        : `Start ${month} to turn chat back on.${unconfirmed}`;
+      action = <button type="button" className={buttonClass} disabled={disabled || !periodReviewOf(settings)} onClick={confirmMonth}>
+        {clock ? `Confirm ${month}` : "Start the new month"}</button>;
       break;
     }
     case "route_unknown":

@@ -227,11 +227,13 @@ def test_expired_proof_yields_specific_rejection_and_recovery_message():
      "Chat is off: the monthly budget is smaller than one request's limit. Raise it in Settings → Model. Nothing was sent.",
      "set_budget"),
     ("accounting_period_review_required",
-     "Chat is paused: a new month started. Confirm last month's spending in Settings → Model to continue. Nothing was sent.",
+     "Chat is paused: a new month started. Your monthly budget starts again once you press Start the new month in "
+     "Settings → Model. Nothing was sent.",
      "review_period"),
     ("accounting_clock_correction_required",
-     "Chat is paused: a new month started. Confirm last month's spending in Settings → Model to continue. Nothing was sent.",
-     "review_period"),
+     "Chat is paused: the computer's clock moved back. Confirm the month in Settings → Model; charges already counted "
+     "for later months stay counted. Nothing was sent.",
+     "review_clock_correction"),
     ("deployment_cost_budget_exhausted", "Chat is paused: this month's budget is used up. Nothing was sent.", "raise_budget"),
     ("proof_missing:streaming", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
     ("proof_expired:tool_use", "Chat needs one quick test first. Nothing was sent.", "prove_route"),

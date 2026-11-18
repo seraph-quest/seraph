@@ -398,6 +398,32 @@ def near_tee_profiles(configuration: "ModelFabricConfiguration") -> tuple[Provid
         if slot is not None and name in NEAR_TEE_IMPLEMENTED_SLOTS)
 
 
+def carry_near_tee_consents(setup: NearTeeSetup | None, persisted: "ModelFabricConfiguration",
+        revision: int) -> NearTeeSetup | None:
+    """Carry a current, unchanged slot consent to the final revision; never resurrect.
+
+    A slot keeps its purpose consent (moved to ``revision``) only when it is
+    enabled, identical to the persisted slot apart from the consent revision,
+    and the persisted slot was enabled and consented at the persisted revision
+    while egress was not globally revoked. Every other slot is left without a
+    consent, so this can only preserve consent, never create or widen it.
+    """
+    if setup is None:
+        return None
+    prior_setup = persisted.near_tee
+    slots = {}
+    for name, slot in (setup.slots or {}).items():
+        prior = (prior_setup.slots or {}).get(name) if prior_setup is not None else None
+        if slot is None:
+            slots[name] = None
+            continue
+        unchanged = prior is not None and replace(prior, purpose_consent_revision=None) == replace(slot, purpose_consent_revision=None)
+        current = (prior is not None and prior.enabled and not persisted.egress_revoked
+            and prior.purpose_consent_revision == persisted.egress_revision)
+        slots[name] = replace(slot, purpose_consent_revision=revision if slot.enabled and unchanged and current else None)
+    return replace(setup, slots=slots)
+
+
 def near_tee_slot_block_reason(configuration: "ModelFabricConfiguration", slot_name: str) -> str | None:
     """Local (no-contact) reason the slot cannot dispatch, or None."""
     if configuration.status != "ready":
@@ -950,9 +976,11 @@ def _boot_revoke_plan(configured: "ModelFabricConfiguration") -> tuple[str, "Mod
                 or _retired_openrouter_profiles(configured.profiles) != configured.profiles
                 or configured.inference_lane is None):
             return "degraded:openrouter_route_revoke_interrupted", None, 0
-        # The intermediate already holds the final values (NEAR consent was
-        # carried to r+2 under the existing rule); only the revoke flag and
-        # this publication's key are restored.
+        # The intermediate already holds the final values (NEAR text and
+        # NEAR TEE slot consents were carried to r+2 under the existing rule
+        # when it was planned); only the revoke flag and this publication's
+        # key are restored. Consent is never re-derived here, so an
+        # intermediate that lacks a carried consent stays fenced.
         final = replace(configured, egress_revision=configured.egress_revision + 1,
             egress_revoked=prior == "revoked", egress_revocation_key=None,
             updated_at=datetime.now(timezone.utc).isoformat())
@@ -968,7 +996,8 @@ def _boot_revoke_plan(configured: "ModelFabricConfiguration") -> tuple[str, "Mod
             and near.plaintext_egress_consent_revision == revision):
         near = replace(near, plaintext_egress_consent_revision=final_revision)
     final = replace(configured, openrouter_setup=retire_openrouter_setup(setup), profiles=profiles,
-        near_text=near, inference_lane=effective_inference_lane(configured),
+        near_text=near, near_tee=carry_near_tee_consents(configured.near_tee, configured, final_revision),
+        inference_lane=effective_inference_lane(configured),
         egress_revision=final_revision, egress_revocation_key=None,
         updated_at=datetime.now(timezone.utc).isoformat())
     return "publish", final, revision
@@ -988,8 +1017,12 @@ def publish_openrouter_route_revoke() -> dict[str, object]:
     ledger; when no lane is published yet, the migrated lane (identical
     ceiling and bounds) is published with it so the retained, unconsented
     OpenRouter object stays a valid readable configuration. Global egress
-    revocation is preserved, never set or cleared; a current NEAR text
-    consent is carried to the new revision, so NEAR is not fenced.
+    revocation is preserved, never set or cleared. A current NEAR text
+    consent and each current, unchanged NEAR TEE slot purpose consent
+    (``carry_near_tee_consents``, the settings-save rule) are carried to the
+    final revision, so consented NEAR routes are not fenced; consent is only
+    preserved, never created, and nothing is carried while egress is
+    globally revoked.
     """
     global _openrouter_route_revoke_status
     if not openrouter_retired():

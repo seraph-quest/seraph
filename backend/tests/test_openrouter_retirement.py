@@ -731,3 +731,88 @@ async def test_boot_revoke_rereads_under_lock_and_noops_when_another_worker_won(
     # re-reads under the lock and does not publish again.
     assert configuration.publish_openrouter_route_revoke()["status"] == "noop"
     assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == published
+
+
+def _boot_revoke_with_near_tee(*, egress_revoked=False, text_consent=7, vision_consent=7):
+    """Revision 7, an enabled stored OpenRouter profile and route, and NEAR TEE slots (#1281)."""
+    from src.model_fabric.configuration import NEAR_TEE_VISION_ALLOWLIST, NearTeeSetup, NearTeeSlot, OpenRouterRoute
+    route = OpenRouterRoute(model_id="openrouter/fixture/text", enabled=True, capabilities=("text",),
+        allowed_upstreams=("fixture",), temperature=0.4, max_output_tokens=2048, timeout_seconds=45,
+        zero_data_retention=False, request_cost_bound_microusd=100)
+    openrouter = OpenRouterSetup(schema_version="seraph.openrouter.setup.v2", routes={"text": route,
+        "vision": None, "embedding": None}, egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True, spend_ceiling_microusd=25_000, credential_fingerprint="0123456789ab")
+    text = NearTeeSlot(model_id="Qwen/Qwen3.8-27B", max_input_tokens=8192, max_output_tokens=1024,
+        request_cost_bound_microusd=20_000, enabled=True, purpose_consent_revision=text_consent)
+    vision = NearTeeSlot(model_id=sorted(NEAR_TEE_VISION_ALLOWLIST)[0], max_input_tokens=8192,
+        max_output_tokens=1024, request_cost_bound_microusd=20_000, enabled=True,
+        purpose_consent_revision=vision_consent)
+    return ModelFabricConfiguration(status="ready", profiles=(_profile(enabled=True),), openrouter_setup=openrouter,
+        near_tee=NearTeeSetup(credential_fingerprint="0123456789ab", slots={"text": text, "vision": vision}),
+        inference_lane=InferenceLaneConfig(spend_ceiling_microusd=40_000), egress_revision=7,
+        egress_revoked=egress_revoked, egress_revocation_key="operator-revoke" if egress_revoked else None)
+
+
+def _intermediate(final, base):
+    marker = "boot:openrouter_route_revoke:" + ("revoked" if final.egress_revoked else "active")
+    return replace(final, egress_revision=base + 1, egress_revoked=True, egress_revocation_key=marker)
+
+
+def test_boot_revoke_carries_current_near_tee_slot_consent():
+    """#1281: the boot revoke (r -> r+2) must not fence a consented NEAR TEE slot."""
+    from src.model_fabric.configuration import _boot_revoke_plan, near_tee_slot_block_reason
+    configured = _boot_revoke_with_near_tee()
+    assert near_tee_slot_block_reason(configured, "text") is None
+    plan, final, base = _boot_revoke_plan(configured)
+    assert plan == "publish" and base == 7 and final.egress_revision == 9
+    assert all(profile.enabled is False for profile in final.profiles if profile.provider_kind == "openrouter")
+    assert final.near_tee.slots["text"].purpose_consent_revision == 9
+    assert final.near_tee.slots["vision"].purpose_consent_revision == 9
+    assert near_tee_slot_block_reason(final, "text") is None
+    # Only the consent revision moves; every other slot field is preserved.
+    for name in ("text", "vision"):
+        assert replace(final.near_tee.slots[name], purpose_consent_revision=None) == replace(
+            configured.near_tee.slots[name], purpose_consent_revision=None)
+    # The interrupted path completes with the same carried consent.
+    intermediate = _intermediate(final, base)
+    assert near_tee_slot_block_reason(intermediate, "text") == "provider_policy_revoked"
+    completed, completed_final, completed_base = _boot_revoke_plan(intermediate)
+    assert completed == "complete" and completed_base == 8 and completed_final.egress_revision == 9
+    assert completed_final.near_tee == final.near_tee
+    assert near_tee_slot_block_reason(completed_final, "text") is None
+
+
+def test_boot_revoke_never_creates_near_tee_slot_consent():
+    """A slot whose consent was not current stays blocked; nothing is widened."""
+    from src.model_fabric.configuration import _boot_revoke_plan, near_tee_slot_block_reason
+    for stale in (None, 6, 9):
+        configured = _boot_revoke_with_near_tee(vision_consent=stale)
+        plan, final, _base = _boot_revoke_plan(configured)
+        assert plan == "publish" and final.egress_revision == 9
+        assert final.near_tee.slots["vision"].purpose_consent_revision is None
+        assert near_tee_slot_block_reason(final, "vision") == "near_tee_purpose_consent_required"
+        # The current sibling is still carried.
+        assert near_tee_slot_block_reason(final, "text") is None
+    disabled = _boot_revoke_with_near_tee()
+    disabled = replace(disabled, near_tee=replace(disabled.near_tee, slots={**disabled.near_tee.slots,
+        "text": replace(disabled.near_tee.slots["text"], enabled=False)}))
+    _plan, final, _base = _boot_revoke_plan(disabled)
+    assert final.near_tee.slots["text"].purpose_consent_revision is None
+    assert near_tee_slot_block_reason(final, "text") == "near_tee_slot_disabled"
+
+
+def test_boot_revoke_does_not_unrevoke_globally_revoked_near_tee():
+    """A globally revoked configuration stays revoked and carries no consent."""
+    from src.model_fabric.configuration import _boot_revoke_plan, near_tee_slot_block_reason
+    configured = _boot_revoke_with_near_tee(egress_revoked=True)
+    plan, final, base = _boot_revoke_plan(configured)
+    assert plan == "publish" and final.egress_revision == 9
+    assert final.egress_revoked is True
+    assert all(slot.purpose_consent_revision is None for slot in final.near_tee.slots.values())
+    assert near_tee_slot_block_reason(final, "text") == "provider_policy_revoked"
+    _completed, completed_final, _completed_base = _boot_revoke_plan(_intermediate(final, base))
+    assert completed_final.egress_revoked is True
+    assert all(slot.purpose_consent_revision is None for slot in completed_final.near_tee.slots.values())
+    # Even if a later operator un-revoke cleared the flag, no slot would be consented.
+    assert near_tee_slot_block_reason(replace(completed_final, egress_revoked=False),
+        "text") == "near_tee_purpose_consent_required"

@@ -316,6 +316,7 @@ def test_keyless_cordis_cli_uses_the_backend_interpreter_not_a_bare_python3():
     assert "function cordis_cli_python()" in manage
     assert '"$SCRIPT_DIR/backend/.venv/bin/python"' in manage
     assert not re.search(r"^\s*python3 (-B )?-m src\.runtime_plugins\.cli", manage, re.M)
-    # The two keyless Cordis CLI paths plus the #1198 composition dump.
-    assert manage.count('"$(cordis_cli_python)"') == 3
+    # The two keyless Cordis CLI paths, the #1198 composition dump and the
+    # #1277 local workspace lifecycle CLI.
+    assert manage.count('"$(cordis_cli_python)"') == 4
     assert not re.search(r"^\s*python3 (-B )?-m src\.runtime_plugins\.composition_dump", manage, re.M)

@@ -2288,6 +2288,7 @@ Useful probes:
 
 ```bash
 ./manage.sh -e dev local status
+./manage.sh -e dev local workspace-status
 curl -sS http://127.0.0.1:8004/health
 curl -sS http://127.0.0.1:8004/api/runtime/status
 curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
@@ -4997,6 +4998,32 @@ missing target rows receive source evidence in a blocked state with no lease
 and a revision/fence newer than both generations; conflicting or missing source
 jobs reject the transaction. Exact interrupted retry retains that fresh fence
 and preserves audit/FK rows. It grants no job execution.
+
+The managed local stack has the same commands under `local`
+([#1277](https://github.com/seraph-quest/seraph/issues/1277)). They resolve
+`LOCAL_WORKSPACE_DIR` and `docker-data/dev/workspace-lifecycle` through the
+same `manage.sh` resolution that `local up` uses and run the backend's own
+interpreter. When `LOCAL_WORKSPACE_DIR` moves (for example from
+`/tmp/seraph-dev-data` to `~/.seraph/dev-data`), the descriptor still names the
+prior root, so chat fails with `accounting_deployment_binding_unavailable` and
+`local up` prints the recovery command. To recover:
+
+```bash
+./manage.sh -e dev local down
+./manage.sh -e dev local identity            # accounting_continuity_reason_code names the block
+./manage.sh -e dev local accounting-rebind --from-root /absolute/prior/root --confirm
+./manage.sh -e dev local up
+```
+
+Then re-consent to provider policy in Settings. The prior root must still
+exist. The rebind behaves as in production: it retains the ledger and
+unresolved liabilities, revokes provider policy and grants no job execution.
+The local backend does not hold the maintenance lease, so `local identity` and
+`local accounting-rebind` refuse while any part of the local backend is still
+up (PID or Seraph listener). `local workspace-status` prints the read-only
+lifecycle receipt at any time. `local status` still reports the stack. The
+production `identity`, `status` and `accounting-rebind` commands stay
+`-e prod` only.
 
 The typed durable job contract persists a monotonic row revision alongside its
 owner fencing token. Claim, heartbeat, expired-lease transfer, and terminal

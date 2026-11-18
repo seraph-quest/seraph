@@ -4,7 +4,7 @@ import { NEAR_TEE_TEXT_MODELS, dollarsToMicrousd } from "../../lib/modelFabric";
 import type { InferenceLaneValue, ModelFabricSettingsStatus, NearTeeSlotStatus } from "../../lib/modelFabric";
 import {
   NearTeeRequestError, isNearUnavailable, nearTeeKeySavePayload, nearTeeSlotFields, nearTeeSlotSavePayload,
-  postNearTeeCapabilityCheck, postNearTeeCatalogCheck,
+  postAccountingPeriodReview, postNearTeeCapabilityCheck, postNearTeeCatalogCheck,
 } from "../../lib/nearTeeActions";
 import type { NearTeeSlotFields } from "../../lib/nearTeeActions";
 import { SETTINGS_MODEL_CARD_ID } from "../../lib/settingsNavigation";
@@ -23,8 +23,8 @@ export interface ChatRouteReadiness {
 }
 
 export type ModelCardState =
-  | "loading" | "unreadable" | "missing_key" | "no_budget" | "not_set_up" | "needs_ok" | "overrun"
-  | "budget_used" | "near_down" | "needs_test" | "ready" | "blocked";
+  | "loading" | "unreadable" | "new_month" | "overrun" | "missing_key" | "no_budget" | "not_set_up" | "needs_ok"
+  | "budget_used" | "near_down" | "needs_test" | "route_unknown" | "ready" | "blocked";
 
 /** Chat checks in the order the Model card runs them; structured output is last and optional. */
 export const CHAT_REQUIRED_CHECKS = ["health", "latency_ms", "text", "streaming", "tool_use"] as const;
@@ -52,6 +52,8 @@ export function dollars(microusd: number): string {
 
 const CONSENT_CODES = new Set(["provider_policy_revoked", "near_tee_purpose_consent_required"]);
 const BUDGET_CODES = new Set(["inference_lane_required", "near_tee_request_reserve_exceeds_lane_ceiling"]);
+/** The accounting owner denies every request in a new UTC month until the operator reviews it. */
+export const PERIOD_CODES = new Set(["accounting_period_review_required", "accounting_clock_correction_required"]);
 const UNREADABLE_CODES = new Set(["configuration_unreadable", "provider_policy_continuity_unavailable"]);
 const isProofGap = (value: string | null | undefined) => /^proof_(missing|expired)/.test(value ?? "");
 
@@ -83,6 +85,10 @@ export function modelCardState(settings: ModelFabricSettingsStatus | null, route
   const accounting = settings.inference_accounting;
   if ((settings.configuration_status != null && settings.configuration_status !== "ready")
     || UNREADABLE_CODES.has(settings.error_code ?? "") || settings.near_tee_metadata_unavailable) return "unreadable";
+  // Accounting gates come first: while one is open every settings save is refused,
+  // and neither needs consent to clear.
+  if (accounting?.period_review && (PERIOD_CODES.has(accounting.reason_code ?? "") || reasons.some(code => PERIOD_CODES.has(code)))) return "new_month";
+  if ((accounting?.unreviewed_overruns?.length ?? 0) > 0 || reasons.includes("provider_charge_exceeded_reservation")) return "overrun";
   const noBudget = !settings.inference_lane?.published || reasons.some(code => BUDGET_CODES.has(code));
   const noKey = !near?.key_present || reasons.includes("near_tee_credential_required");
   // A key can only be saved once a budget exists, so the budget comes first then.
@@ -91,14 +97,22 @@ export function modelCardState(settings: ModelFabricSettingsStatus | null, route
   if (noBudget) return "no_budget";
   if (!slot || !slot.enabled) return "not_set_up";
   if (settings.egress_revoked || !slot.consent_current || reasons.some(code => CONSENT_CODES.has(code))) return "needs_ok";
-  if ((accounting?.unreviewed_overruns?.length ?? 0) > 0 || reasons.includes("provider_charge_exceeded_reservation")) return "overrun";
   if (typeof accounting?.remaining_microusd === "number" && accounting.remaining_microusd < slot.request_cost_bound_microusd) return "budget_used";
   // Session-local: the last check in this session found NEAR not answering.
   if (nearDown) return "near_down";
   const missing = missingChatChecks(slot);
   if (!missing || missing.required.length > 0) return "needs_test";
-  if (route?.inference_ready) return "ready";
+  // Without the runtime route the card cannot tell; it never guesses green.
+  if (!route) return "route_unknown";
+  // Ready needs both the route and the slot itself: the route alone does not
+  // carry accounting or proof-metadata blocks.
+  if (route.inference_ready && slot.status === "ready" && !slot.reason_code) return "ready";
   return "blocked";
+}
+
+/** The month review the accounting owner asks for, when one is open. */
+export function periodReviewOf(settings: ModelFabricSettingsStatus | null) {
+  return settings?.inference_accounting?.period_review ?? null;
 }
 
 interface Props {
@@ -117,6 +131,8 @@ interface Step { label: string; done: boolean }
 interface CheckRecord { capability: string; outcome: string; code: string | null }
 type Tone = "good" | "warn" | "bad";
 
+/** The backend's largest monthly budget (spend_ceiling_microusd le=1_000_000_000). */
+const MAX_MONTHLY_BUDGET = 1_000_000_000;
 const TEXT_SLOT_DEFAULTS = { maxInput: 8192, timeout: 30, reserve: 20_000, ttl: 24 };
 const buttonClass = "border border-retro-highlight px-3 py-1 text-[10px] uppercase tracking-wider text-retro-highlight disabled:border-retro-text/20 disabled:text-retro-text/30";
 const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-[10px] text-retro-text disabled:opacity-40";
@@ -138,6 +154,10 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   const [moneyDraft, setMoneyDraft] = useState("");
   const [pickedModel, setPickedModel] = useState("");
   const [changingModel, setChangingModel] = useState(false);
+  /** What the running action is doing, in plain words. */
+  const [busyText, setBusyText] = useState("Working…");
+  /** Whether the last action saved anything before it stopped. */
+  const [savedInLastRun, setSavedInLastRun] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
@@ -203,7 +223,8 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
       } catch (reason) {
         if (reason instanceof NearTeeRequestError) {
           setChecks(current => [...current, { capability, outcome: "refused", code: reason.message }]);
-          if (isNearUnavailable(null, reason.status)) setNearDown(true);
+          // An optional check never decides whether NEAR is answering chat.
+          if (!optional && isNearUnavailable(null, reason.status)) setNearDown(true);
           if (!optional) throw new Error(`Check ${capability}: ${reason.message}`);
         } else if (!optional) throw reason;
       }
@@ -211,8 +232,8 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
     markStep("Testing chat");
   }
 
-  async function run(stepLabels: string[], body: () => Promise<void>) {
-    setBusy(true); setFailure(null); setChecks([]);
+  async function run(text: string, stepLabels: string[], body: () => Promise<void>) {
+    setBusy(true); setBusyText(text); setFailure(null); setChecks([]); setSavedInLastRun(false);
     setSteps(stepLabels.map(label => ({ label, done: false })));
     try {
       await body();
@@ -229,8 +250,9 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   function allowAndTurnOn(fields: NearTeeSlotFields, paidAllowed: number) {
     if (!acknowledged || revision === undefined) return;
     const payload = nearTeeSlotSavePayload({ slot: "text", fields, acknowledged: true, revision });
-    void run(["Saving your OK", "Checking NEAR"], async () => {
+    void run(fields.model_id !== slot?.model_id && slot?.enabled ? "Switching model…" : "Turning chat on…", ["Saving your OK", "Checking NEAR"], async () => {
       const saved = await onSave(payload);
+      setSavedInLastRun(true);
       if (!mounted.current) return;
       setAcknowledged(false);
       markStep("Saving your OK");
@@ -241,21 +263,22 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
 
   function testOnly(paidAllowed: number) {
     if (revision === undefined) return;
-    void run(["Checking NEAR"], () => checkAndTest(revision, paidAllowed));
+    void run(paidAllowed > 0 ? "Running test…" : "Checking NEAR…", ["Checking NEAR"], () => checkAndTest(revision, paidAllowed));
   }
 
   /** A budget save keeps every other lane value; a free catalog check follows when chat already has consent. */
-  function saveLane(change: Partial<InferenceLaneValue>, label: string) {
+  function saveLane(change: Partial<InferenceLaneValue>, label: string, text: string) {
     if (revision === undefined) return;
     const value: InferenceLaneValue = {
-      spend_ceiling_microusd: lane?.spend_ceiling_microusd ?? 0,
+      spend_ceiling_microusd: lane?.spend_ceiling_microusd ?? accounting?.ceiling_microusd ?? 0,
       max_queued: lane?.max_queued ?? 64, max_inflight: 1,
       max_outstanding_per_owner: lane?.max_outstanding_per_owner ?? 16, max_retries: lane?.max_retries ?? 2,
       ...(lane?.request_reserve_review_microusd ? { request_reserve_review_microusd: lane.request_reserve_review_microusd } : {}),
       ...change,
     };
-    void run([label], async () => {
+    void run(text, [label], async () => {
       const saved = await onSave({ expected_policy_revision: revision, inference_lane: value });
+      setSavedInLastRun(true);
       markStep(label);
       setMoneyDraft("");
       const text = saved.near_tee?.slots.text;
@@ -277,9 +300,10 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   function saveKey() {
     if (revision === undefined || !keyDraft.trim()) return;
     const payload = nearTeeKeySavePayload(keyDraft, revision);
-    void run(["Saving your key"], async () => {
+    void run("Saving key…", ["Saving your key"], async () => {
       try {
         const saved = await onSave(payload);
+        setSavedInLastRun(true);
         markStep("Saving your key");
         const text = saved.near_tee?.slots.text;
         if (text?.enabled && text.consent_current && Number.isSafeInteger(saved.egress_revision)) {
@@ -296,7 +320,22 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   function turnOff() {
     if (!slot || revision === undefined) return;
     const payload = nearTeeSlotSavePayload({ slot: "text", fields: { ...nearTeeSlotFields(slot), enabled: false }, acknowledged: false, revision });
-    void run(["Turning chat off"], async () => { await onSave(payload); markStep("Turning chat off"); });
+    void run("Turning chat off…", ["Turning chat off"], async () => { await onSave(payload); setSavedInLastRun(true); markStep("Turning chat off"); });
+  }
+
+  /** The operator's own review of a new accounting month; nothing else changes. */
+  function confirmMonth() {
+    const review = periodReviewOf(settings);
+    if (!review) return;
+    void run("Confirming the month…", ["Confirming the month"], async () => {
+      await postAccountingPeriodReview(review);
+      setSavedInLastRun(true);
+      markStep("Confirming the month");
+    });
+  }
+
+  function recheck() {
+    void run("Checking chat…", [], async () => {});
   }
 
   // ---- what the card says
@@ -306,6 +345,7 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   const ceiling = lane?.spend_ceiling_microusd ?? accounting?.ceiling_microusd ?? 0;
   const spent = typeof accounting?.remaining_microusd === "number" ? Math.max(ceiling - accounting.remaining_microusd, 0) : (accounting?.committed_microusd ?? 0);
   const plainModel = `${modelName(slot?.model_id)}, hosted by NEAR`;
+  const budgetBelowReserve = Boolean(slot && lane?.published && slot.request_cost_bound_microusd > lane.spend_ceiling_microusd);
   const consentChoice = (
     <label className="flex items-start gap-2 text-[10px]">
       <input type="checkbox" aria-label={CONSENT_TEXT} checked={acknowledged} disabled={disabled}
@@ -328,7 +368,7 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
   let action: ReactNode = null;
 
   if (busy || state === null) {
-    status = "Turning chat on…";
+    status = busyText;
     second = <ul className="text-[10px]" aria-label="Progress">{steps.map(step =>
       <li key={step.label}>{step.done ? "✓" : "…"} {step.label}</li>)}</ul>;
   } else if (changingModel && state === "ready" && slot) {
@@ -357,12 +397,14 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
       action = <button type="button" className={buttonClass} disabled={disabled || !keyDraft.trim()} onClick={saveKey}>Save key</button>;
       break;
     case "no_budget":
-      status = "Chat is off. Set a monthly budget first.";
+      status = budgetBelowReserve
+        ? `Chat is off. The monthly budget is smaller than one request's limit (${dollars(bound)}).`
+        : "Chat is off. Set a monthly budget first.";
       second = <label className="flex items-center gap-2 text-[10px]">Monthly budget ($)
         <input className={inputClass + " w-24"} inputMode="decimal" aria-label="Monthly budget in dollars" value={moneyDraft}
           disabled={disabled} onChange={event => setMoneyDraft(event.target.value)} /></label>;
       action = <button type="button" className={buttonClass} disabled={disabled || !moneyDraft.trim()}
-        onClick={() => { const value = budgetFromDraft(0); if (value) saveLane({ spend_ceiling_microusd: value }, "Saving your budget"); }}>Save budget</button>;
+        onClick={() => { const value = budgetFromDraft(budgetBelowReserve ? bound - 1 : 0); if (value) saveLane({ spend_ceiling_microusd: value }, "Saving your budget", "Saving budget…"); }}>Save budget</button>;
       break;
     case "not_set_up": {
       status = "Chat is off. Pick a model to turn it on.";
@@ -384,25 +426,46 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
       action = slot && <button type="button" className={buttonClass} disabled={disabled || !acknowledged}
         onClick={() => allowAndTurnOn(nearTeeSlotFields(slot), paidBudget(true))}>Allow and turn on chat</button>;
       break;
+    case "new_month": {
+      const clock = settings?.inference_accounting?.reason_code === "accounting_clock_correction_required";
+      status = clock ? "Chat is paused. The computer's clock moved back. Confirm this month's spending to continue."
+        : "Chat is paused. A new month started. Confirm last month's spending to continue.";
+      second = (accounting?.unknown_microusd ?? 0) > 0
+        ? `Up to ${dollars(accounting?.unknown_microusd ?? 0)} from earlier requests is not yet confirmed by NEAR and stays counted. Nothing else changes.`
+        : "Nothing else changes.";
+      action = <button type="button" className={buttonClass} disabled={disabled || !periodReviewOf(settings)} onClick={confirmMonth}>Confirm and continue</button>;
+      break;
+    }
+    case "route_unknown":
+      status = "Can't check chat status right now.";
+      second = "Your settings were read; the chat route could not be.";
+      action = <button type="button" className={buttonClass} disabled={busy} onClick={recheck}>Try again</button>;
+      break;
     case "overrun":
       status = "Chat is paused. One request cost more than its limit.";
       second = largestOverrun ? `It cost ${dollars(largestOverrun.actual)}. The limit was ${dollars(largestOverrun.bound)}.`
         : `It cost ${dollars(reviewNeeded)}.`;
       action = <button type="button" className={buttonClass} disabled={disabled || reviewNeeded < 1}
-        onClick={() => saveLane({ request_reserve_review_microusd: Math.max(reviewNeeded, lane?.request_reserve_review_microusd ?? 0) }, "Recording your review")}>Accept and continue</button>;
+        onClick={() => saveLane({ request_reserve_review_microusd: Math.max(reviewNeeded, lane?.request_reserve_review_microusd ?? 0) }, "Recording your review", "Recording your review…")}>Accept and continue</button>;
       break;
     case "budget_used":
       status = "Chat is paused. This month's budget is used up.";
+      if (ceiling >= MAX_MONTHLY_BUDGET) {
+        second = `${dollars(spent)} of ${dollars(ceiling)} spent. ${dollars(MAX_MONTHLY_BUDGET)} a month is the most Seraph allows, so chat resumes next month.`;
+        break;
+      }
       second = <div className="flex flex-col gap-2"><p className="text-[10px]">{dollars(spent)} of {dollars(ceiling)} spent.</p>
-        <label className="flex items-center gap-2 text-[10px]">New monthly budget ($)
+        <label className="flex items-center gap-2 text-[10px]">New monthly budget ($, up to {dollars(MAX_MONTHLY_BUDGET)})
           <input className={inputClass + " w-24"} inputMode="decimal" aria-label="New monthly budget in dollars" value={moneyDraft}
             disabled={disabled} onChange={event => setMoneyDraft(event.target.value)} /></label></div>;
       action = <button type="button" className={buttonClass} disabled={disabled || !moneyDraft.trim()}
-        onClick={() => { const value = budgetFromDraft(ceiling); if (value) saveLane({ spend_ceiling_microusd: value }, "Saving your budget"); }}>Raise budget</button>;
+        onClick={() => { const value = budgetFromDraft(ceiling); if (value) saveLane({ spend_ceiling_microusd: value }, "Saving your budget", "Saving budget…"); }}>Raise budget</button>;
       break;
     case "near_down":
       tone = "bad"; status = "NEAR isn't answering right now.";
-      second = <div className="flex flex-col gap-2"><p className="text-[10px]">Your settings are fine. Nothing was changed.</p>
+      second = <div className="flex flex-col gap-2"><p className="text-[10px]">{savedInLastRun
+        ? "Your change was saved, but NEAR didn't answer the check that follows it."
+        : "Your settings are fine. Nothing was changed."}</p>
         {paidBudget(false) > 0 && costNote(costLine(paidBudget(false), Boolean(missing)))}</div>;
       action = <button type="button" className={buttonClass} disabled={disabled} onClick={() => testOnly(paidBudget(false))}>Try again</button>;
       break;
@@ -464,7 +527,7 @@ export function ModelCard({ settings, route, stale, onSave, onSettings, onRefres
         {slot?.enabled && slot.catalog_receipt_current && <div className="mt-2 flex flex-col gap-1">
           <p className="text-[9px] text-retro-text/60">Structured output check: one paid request, at most {dollars(bound)}.</p>
           <button type="button" className="w-fit border border-retro-text/20 px-2 py-0.5 text-[9px]" disabled={disabled}
-            onClick={() => void run(["Testing structured output"], async () => {
+            onClick={() => void run("Running check…", ["Testing structured output"], async () => {
               const result = await postNearTeeCapabilityCheck(slot, "structured_output");
               setChecks([{ capability: "structured_output", outcome: result.outcome, code: result.error_code }]);
               markStep("Testing structured output");

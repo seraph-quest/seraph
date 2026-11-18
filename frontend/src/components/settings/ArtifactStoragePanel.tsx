@@ -777,6 +777,8 @@ export function ArtifactStoragePanel({ advanced }: ArtifactStoragePanelProps = {
       setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     } catch {
       if (isCancelled()) return;
+      // The Model card never shows a last-known route as current (#1280).
+      setChatRoute(null);
       setModelFabricStale(true);
       setModelFabricError("Model-fabric metadata is temporarily unavailable; showing last-known settings.");
     }

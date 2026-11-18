@@ -1015,8 +1015,11 @@ click. The previous tab content sits in one closed "Advanced and diagnostics"
 fold. Blocked chat messages are provider-neutral and the WebSocket error frame
 carries `code`, `recovery_action` and `settings_section`, rendered as an **Open
 Settings** button; the status line names the effective route ("Chat is using
-DeepSeek V4.1 Flash via NEAR.") and is omitted when the route is blocked. No
-consent, budget or check semantics changed. Evidence is component and
+DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
+(route, accounting, proofs, chat checks, remaining budget) would block the
+turn. A new UTC month shows a plain "Confirm and continue" that posts the
+existing period review on the operator's click. No consent, budget or check
+semantics changed. Evidence is component and
 intercepted-transport tests only; the remaining tab migration is later #1280
 slices. See the [app guide](./12-current-app-guide.md#the-model-card-1280).
 

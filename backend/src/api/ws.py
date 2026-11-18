@@ -1060,7 +1060,7 @@ async def websocket_chat(websocket: WebSocket):
                 )
                 revocation_guard_token = set_revocation_guard(revocation_guard)
                 try:
-                    if route_status_line := chat_runtime_status_text(current_chat_route()):
+                    if route_status_line := chat_runtime_status_text(await current_chat_route()):
                         await websocket.send_text(
                             WSResponse(
                                 type="status",
@@ -1351,7 +1351,7 @@ async def websocket_chat(websocket: WebSocket):
                     active_turn_completed = True
                     continue
                 active_cordis_turn.attach(agent)
-            if route_status_line := chat_runtime_status_text(current_chat_route()):
+            if route_status_line := chat_runtime_status_text(await current_chat_route()):
                 await websocket.send_text(
                     WSResponse(
                         type="status",

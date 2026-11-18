@@ -103,7 +103,8 @@ async def route_block_overrun_minimum(error: BaseException) -> int | None:
 _CONSENT_CODES = frozenset({"provider_policy_revoked", "near_tee_purpose_consent_required"})
 _SETUP_CODES = frozenset({"near_tee_slot_unconfigured", "near_tee_slot_disabled"})
 _CATALOG_CODES = frozenset({"near_tee_catalog_receipt_stale", "near_tee_catalog_receipt_missing"})
-_BUDGET_CODES = frozenset({"inference_lane_required", "near_tee_request_reserve_exceeds_lane_ceiling"})
+# The accounting owner denies every request in a new UTC month until the operator reviews it.
+_PERIOD_CODES = frozenset({"accounting_period_review_required", "accounting_clock_correction_required"})
 CHAT_NEEDS_TEST_MESSAGE = "Chat needs one quick test first."
 
 
@@ -123,13 +124,23 @@ def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) ->
         return f"Chat is off: no chat model is turned on. Pick one in {_SETTINGS}.", "choose_model"
     if code in _CATALOG_CODES:
         return CHAT_NEEDS_TEST_MESSAGE, "run_chat_test"
-    if code in _BUDGET_CODES:
+    if code == "inference_lane_required":
         return f"Chat is off: set a monthly budget in {_SETTINGS} first.", "set_budget"
+    if code == "near_tee_request_reserve_exceeds_lane_ceiling":
+        return (
+            f"Chat is off: the monthly budget is smaller than one request's limit. Raise it in {_SETTINGS}.",
+            "set_budget",
+        )
+    if code in _PERIOD_CODES:
+        return (
+            f"Chat is paused: a new month started. Confirm last month's spending in {_SETTINGS} to continue.",
+            "review_period",
+        )
     if code == "deployment_cost_budget_exhausted":
         return "Chat is paused: this month's budget is used up.", "raise_budget"
     if code == "openrouter_retired":
         return (
-            "Chat is off: no chat model is set up. OpenRouter is retired (ADR-035); set up NEAR in "
+            "Chat is off: no chat model is set up. OpenRouter is no longer used; set up NEAR in "
             f"{_SETTINGS}. Existing OpenRouter costs can still be settled.",
             "openrouter_retired",
         )

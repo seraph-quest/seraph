@@ -223,6 +223,15 @@ def test_expired_proof_yields_specific_rejection_and_recovery_message():
     ("near_tee_catalog_receipt_stale", "Chat needs one quick test first. Nothing was sent.", "run_chat_test"),
     ("near_tee_catalog_receipt_missing", "Chat needs one quick test first. Nothing was sent.", "run_chat_test"),
     ("inference_lane_required", "Chat is off: set a monthly budget in Settings → Model first. Nothing was sent.", "set_budget"),
+    ("near_tee_request_reserve_exceeds_lane_ceiling",
+     "Chat is off: the monthly budget is smaller than one request's limit. Raise it in Settings → Model. Nothing was sent.",
+     "set_budget"),
+    ("accounting_period_review_required",
+     "Chat is paused: a new month started. Confirm last month's spending in Settings → Model to continue. Nothing was sent.",
+     "review_period"),
+    ("accounting_clock_correction_required",
+     "Chat is paused: a new month started. Confirm last month's spending in Settings → Model to continue. Nothing was sent.",
+     "review_period"),
     ("deployment_cost_budget_exhausted", "Chat is paused: this month's budget is used up. Nothing was sent.", "raise_budget"),
     ("proof_missing:streaming", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
     ("proof_expired:tool_use", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
@@ -256,6 +265,34 @@ def test_chat_status_line_names_the_effective_route_and_is_silent_when_blocked()
     assert chat_runtime_status_text({**ready, "mode": "blocked"}) is None
     assert chat_runtime_status_text({**ready, "provider": "none", "model": ""}) is None
     assert chat_runtime_status_text(None) is None
+
+
+@pytest.mark.asyncio
+async def test_current_chat_route_runs_the_real_readiness_path(db):
+    """The unpatched route helper imports and computes the full readiness (#1280)."""
+    from src.runtime_plugins.agent_turns import chat_runtime_status_text, current_chat_route
+
+    route = await current_chat_route()
+    assert isinstance(route, dict)
+    assert route["runtime_path"] == "chat_agent"
+    assert "inference_readiness" in route
+    # Nothing is configured in the test workspace, so chat is blocked and no line prints.
+    assert route["inference_ready"] is False
+    assert chat_runtime_status_text(route) is None
+
+
+def test_near_chat_blocks_cover_missing_chat_checks_and_an_exhausted_budget():
+    from src.runtime_plugins.agent_turns import _near_chat_blocks
+
+    def fabric(capabilities, remaining):
+        return {"near_tee": {"slots": {"text": {"chat_capabilities": capabilities, "request_cost_bound_microusd": 20_000}}},
+                "inference_accounting": {"remaining_microusd": remaining}}
+
+    assert _near_chat_blocks(fabric({"streaming": "ready", "tool_use": "ready"}, 1_000_000)) == []
+    assert _near_chat_blocks(fabric({"streaming": "proof_missing:streaming", "tool_use": "ready"}, 1_000_000)) == [
+        "streaming:proof_missing:streaming"]
+    assert _near_chat_blocks(fabric({"streaming": "ready", "tool_use": "ready"}, 19_999)) == ["deployment_cost_budget_exhausted"]
+    assert _near_chat_blocks({}) == ["near_tee_status_unavailable"]
 
 
 def test_unknown_route_reason_keeps_configuration_guidance():

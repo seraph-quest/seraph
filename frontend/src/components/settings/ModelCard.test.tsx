@@ -84,7 +84,19 @@ describe("modelCardState (appendix B)", () => {
     ["needs_test", raw({ slot: rawSlot({ chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "ready" } }) }), READY],
     ["ready", raw(), READY],
     ["blocked", raw(), BLOCKED("near_tee_slot_timeout_exceeds_chat_turn")],
-  ] as const)("%s", (expected, value, route) => {
+    // The route alone can say ready while the slot is blocked by accounting or proof metadata.
+    ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }), READY],
+    ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "inference_accounting_unavailable" }) }), READY],
+    ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "proof_metadata_unavailable" }) }), READY],
+    ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "near_tee_credential_unavailable" }) }), READY],
+    ["new_month", raw({ accounting: { status: "blocked", reason_code: "accounting_period_review_required", revision: 483, period_id: "2026-12",
+      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-12", expected_revision: 483 } },
+      slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }), READY],
+    // An open overrun refuses every NEAR save, so it shows before the consent step.
+    ["overrun", raw({ top: { egress_revoked: true }, slot: rawSlot({ consent_current: false }),
+      accounting: { unreviewed_overruns: [{ operation_id: "op", job_id: "job", bound_microusd: 20_000, actual_cost_microusd: 30_000 }] } }), BLOCKED("provider_policy_revoked")],
+    ["route_unknown", raw(), null],
+  ] as Array<[string, Raw, ChatRouteReadiness | null]>)("%s", (expected, value, route) => {
     expect(modelCardState(settingsOf(value), route)).toBe(expected);
   });
 
@@ -292,5 +304,101 @@ describe("Model card", () => {
     renderCard(settingsOf(revokedRaw()), BLOCKED("provider_policy_revoked"), { stale: true });
     expect(screen.getByRole("checkbox", { name: CONSENT })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Allow and turn on chat" })).toBeDisabled();
+  });
+
+  it("new month: one explicit click posts the existing period review and nothing else", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) });
+      return json({ status: "ready" });
+    }));
+    const onSave = vi.fn();
+    const settings = settingsOf(raw({ accounting: { status: "blocked", reason_code: "accounting_period_review_required", revision: 483, period_id: "2026-12",
+      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-12", expected_revision: 483 } },
+      slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }));
+    const { props } = renderCard(settings, BLOCKED("accounting_period_review_required"), { onSave });
+    expect(statusLine()).toHaveTextContent("Chat is paused. A new month started. Confirm last month's spending to continue.");
+    expect(calls).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm and continue" }));
+    expect(statusLine()).toHaveTextContent("Confirming the month…");
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
+    expect(calls).toEqual([{ url: expect.stringContaining("/api/settings/model-fabric/accounting/period"), body: { period_id: "2026-12", expected_revision: 483 } }]);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("a refused optional structured output check does not mark NEAR down", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("catalog-check")) return json(afterCatalogCheck({ chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "ready" },
+        structured_output_capability: "proof_missing:structured_output" }));
+      return JSON.parse(String(init?.body)).capability === "structured_output" ? json({ detail: "upstream" }, 502) : json({ outcome: "passed", error_code: null });
+    }));
+    const { props } = renderCard(settingsOf(raw({ slot: rawSlot({ catalog_receipt_current: false, chat_capabilities: {} }) })), READY);
+    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    expect(statusLine()).toHaveTextContent("Running test…");
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
+    await waitFor(() => expect(statusLine()).not.toHaveTextContent("Running test…"));
+    expect(statusLine()).not.toHaveTextContent("NEAR isn't answering");
+    expect(card()).toHaveTextContent("structured_output: refused (upstream)");
+  });
+
+  it("NEAR down after a saved OK says the change was saved", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ detail: "upstream" }, 503)));
+    const onSave = vi.fn(async (_payload: Record<string, unknown>) => settingsOf(raw({ top: { egress_revision: 10 } })));
+    let current = settingsOf(revokedRaw());
+    const view = renderCard(current, BLOCKED("provider_policy_revoked"), { onSave });
+    // After the refresh the backend reports the OK as current; the catalog check still failed.
+    (view.props.onRefresh as ReturnType<typeof vi.fn>).mockImplementation(async () => { current = settingsOf(raw({ top: { egress_revision: 10 }, slot: rawSlot({ catalog_receipt_current: false, chat_capabilities: {} }) })); });
+    fireEvent.click(screen.getByRole("checkbox", { name: CONSENT }));
+    fireEvent.click(screen.getByRole("button", { name: "Allow and turn on chat" }));
+    await waitFor(() => expect(view.props.onRefresh).toHaveBeenCalled());
+    view.rerender(<ModelCard {...view.props} settings={current} route={READY} />);
+    await waitFor(() => expect(statusLine()).toHaveTextContent("NEAR isn't answering right now."));
+    expect(card()).toHaveTextContent("Your change was saved, but NEAR didn't answer the check that follows it.");
+    expect(card()).not.toHaveTextContent("Nothing was changed.");
+  });
+
+  it("can't check the route: a neutral line and Try again re-reads", async () => {
+    const { props } = renderCard(settingsOf(raw()), null);
+    expect(statusLine()).toHaveTextContent("Can't check chat status right now.");
+    expect(card()).not.toHaveTextContent("Chat is blocked.");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
+  });
+
+  it("says plainly when the budget is already at the maximum, and when it is below one request's limit", () => {
+    const max = renderCard(settingsOf(raw({ accounting: { remaining_microusd: 0 } })), READY);
+    expect(card()).toHaveTextContent("$1,000 a month is the most Seraph allows, so chat resumes next month.");
+    expect(screen.queryByRole("button", { name: "Raise budget" })).toBeNull();
+    max.unmount();
+    renderCard(settingsOf(raw({ lane: { spend_ceiling_microusd: 10_000 } })), BLOCKED("near_tee_request_reserve_exceeds_lane_ceiling"));
+    expect(statusLine()).toHaveTextContent("Chat is off. The monthly budget is smaller than one request's limit ($0.02).");
+  });
+
+  it("switching model sends the stored slot with the new model and a fresh tick", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(afterCatalogCheck())));
+    const onSave = vi.fn(async (_payload: Record<string, unknown>) => settingsOf(raw({ top: { egress_revision: 10 } })));
+    const { props } = renderCard(settingsOf(raw()), READY, { onSave });
+    fireEvent.click(screen.getByRole("button", { name: "Change model" }));
+    fireEvent.change(screen.getByLabelText("Chat model"), { target: { value: "Qwen/Qwen3.8-27B" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: CONSENT }));
+    fireEvent.click(screen.getByRole("button", { name: "Allow and switch model" }));
+    expect(statusLine()).toHaveTextContent("Switching model…");
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0]).toEqual({ expected_policy_revision: 8, near_tee: { schema_version: "seraph.near.tee.setup.v1",
+      api_base: "https://cloud-api.near.ai/v1", slots: { text: { model_id: "Qwen/Qwen3.8-27B", enabled: true, max_input_tokens: 8192,
+        max_output_tokens: 4096, timeout_seconds: 30, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24,
+        plaintext_provider_egress_acknowledged: true } } } });
+  });
+
+  it("turn off chat sends the stored slot disabled, with no acknowledgement and no key", async () => {
+    const onSave = vi.fn(async (_payload: Record<string, unknown>) => settingsOf(raw({ slot: rawSlot({ enabled: false }) })));
+    const { props } = renderCard(settingsOf(raw()), READY, { onSave });
+    fireEvent.click(screen.getByRole("button", { name: "Turn off chat" }));
+    expect(statusLine()).toHaveTextContent("Turning chat off…");
+    await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0]).toEqual({ expected_policy_revision: 8, near_tee: { schema_version: "seraph.near.tee.setup.v1",
+      api_base: "https://cloud-api.near.ai/v1", slots: { text: { model_id: MODEL, enabled: false, max_input_tokens: 8192,
+        max_output_tokens: 4096, timeout_seconds: 30, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24,
+        plaintext_provider_egress_acknowledged: false } } } });
   });
 });

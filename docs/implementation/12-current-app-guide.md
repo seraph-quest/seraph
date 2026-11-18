@@ -721,7 +721,10 @@ fix and never falls back to legacy. Rollback is another higher epoch.
 `/api/runtime/status` reports `chat_runtime {loop, route, owner_epoch, reason,
 recovery}` and the Settings Cordis panel shows it. The WS status line names the
 effective chat route, not the loop: "Chat is using DeepSeek V4.1 Flash via
-NEAR." (#1280). It is not sent when the route is blocked; the loop id stays in
+NEAR." (#1280). It is built from the same full readiness `/api/runtime/status`
+reports (consent, key, catalog receipt, accounting, status proofs) plus the
+`streaming` and `tool_use` checks and the month's remaining budget, and is not
+sent when any of them would block the turn; the loop id stays in
 `chat_runtime.loop`.
 
 **Default cutover and operator control.** `runtime_plugins/cutover.py` holds an
@@ -1790,13 +1793,20 @@ closed **Advanced and diagnostics** fold under the card, unchanged.
 
 The card reads `GET /api/settings/model-fabric` and
 `/api/runtime/status.effective_runtime` and shows the first state that applies:
-settings unreadable (**Open Diagnostics**, which opens the fold), missing key
-(one key field, **Save key**), no budget (**Save budget**), not set up (model
-picker and consent tick, **Turn on chat**), needs your OK (**Allow and turn on
-chat**), a request cost too much (**Accept and continue**), budget used up
-(**Raise budget**), NEAR not answering (**Try again**), one quick test left
-(**Run test**), or chat on (**Change model**). "NEAR not answering" is only this
-session's last failed check; no state depends on time passing.
+settings unreadable (**Open Diagnostics**, which opens the fold), a new
+accounting month (**Confirm and continue**, which posts the existing
+`/api/settings/model-fabric/accounting/period` review), a request cost too
+much (**Accept and continue**), missing key (one key field, **Save key**), no
+budget or a budget below one request's limit (**Save budget**), not set up
+(model picker and consent tick, **Turn on chat**), needs your OK (**Allow and
+turn on chat**), budget used up (**Raise budget**, or a plain note at the
+$1,000 maximum), NEAR not answering (**Try again**), one quick test left (**Run
+test**), route status unreadable (**Try again**), chat on (**Change model**), or
+blocked for another reason (**Open Diagnostics**). The two accounting states
+come first because every settings save is refused while one is open. "Chat is
+on" needs both `effective_runtime.inference_ready` and a ready text slot with no
+reason code. "NEAR not answering" is only this session's last failed required
+check; no state depends on time passing, and none is cleared automatically.
 
 **Allow and turn on chat** is enabled only after the operator ticks "I
 understand NEAR sees my messages as plain text: no end-to-end encryption, and
@@ -1816,7 +1826,9 @@ results, reason codes, **Run structured output check** and a **Turn off chat**
 link.
 
 A blocked chat message is plain and provider-neutral ("Chat is paused until you
-give your OK. Nothing was sent.") and the WebSocket error frame carries `code`,
+give your OK. Nothing was sent."; a new month reads "Chat is paused: a new
+month started. Confirm last month's spending in Settings → Model to continue.")
+and the WebSocket error frame carries `code`,
 `recovery_action` and `settings_section: "model"`; the chat shows an **Open
 Settings** button that opens the Model tab with the card in view.
 

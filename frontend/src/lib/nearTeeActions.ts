@@ -134,3 +134,13 @@ export function isNearUnavailable(code: string | null | undefined, status?: numb
   if (status === null || (typeof status === "number" && status >= 500)) return true;
   return Boolean(code && /(catalog_unavailable|_transport_uncertain|_http_error|_deadline_expired|_stream_deadline|_stream_interrupted)$/.test(code));
 }
+
+/**
+ * Record the operator's review of the current accounting month: the explicit
+ * click the accounting owner requires before any request in a new UTC month.
+ */
+export async function postAccountingPeriodReview(review: { endpoint: string; period_id: string; expected_revision: number }): Promise<void> {
+  if (review.endpoint !== "/api/settings/model-fabric/accounting/period") throw new NearTeeRequestError("unexpected review endpoint", 400);
+  const response = await post(review.endpoint, { period_id: review.period_id, expected_revision: review.expected_revision });
+  if (!response.ok) throw new NearTeeRequestError(await responseDetail(response), response.status);
+}

@@ -301,16 +301,55 @@ def chat_runtime_status_text(route: dict | None) -> str | None:
     return f"Chat is using {name} via {provider_name}."
 
 
-def current_chat_route() -> dict | None:
-    """The effective chat route, computed locally (no provider contact)."""
-    try:
-        from src.app import _active_chat_runtime_status, _adr035_chat_identity, _effective_runtime_route_status
+def _near_chat_blocks(fabric: dict) -> list[str]:
+    """Causes that block a NEAR TEE chat turn beyond the route readiness (#1280).
 
+    The status line is printed only when nothing would block the turn:
+    streaming and tool-use checks present and the month's budget covering one
+    more request (accounting and status-proof blocks already arrive through
+    the slot's own reason).
+    """
+    near = fabric.get("near_tee") if isinstance(fabric, dict) else None
+    slot = ((near or {}).get("slots") or {}).get("text") if isinstance(near, dict) else None
+    if not isinstance(slot, dict):
+        return ["near_tee_status_unavailable"]
+    blocks = [f"{name}:{value}" for name, value in sorted((slot.get("chat_capabilities") or {}).items())
+              if value != "ready"]
+    accounting = fabric.get("inference_accounting") if isinstance(fabric, dict) else None
+    remaining = (accounting or {}).get("remaining_microusd") if isinstance(accounting, dict) else None
+    bound = slot.get("request_cost_bound_microusd")
+    if isinstance(remaining, int) and isinstance(bound, int) and remaining < bound:
+        blocks.append("deployment_cost_budget_exhausted")
+    return blocks
+
+
+async def current_chat_route() -> dict | None:
+    """The effective chat route with the same full readiness ``/api/runtime/status`` reports.
+
+    Local reads only (configuration, receipts, proofs, accounting); no
+    provider contact. A failure to compute it prints no status line.
+    """
+    from src.api.model_fabric_settings import model_fabric_runtime_status
+    from src.app import (
+        _active_chat_runtime_status,
+        _adr035_chat_identity,
+        _augment_inference_readiness,
+        _effective_runtime_route_status,
+    )
+
+    try:
         runtime = _active_chat_runtime_status()
-        runtime, route = _adr035_chat_identity(runtime, _effective_runtime_route_status(runtime, {}))
-        return route
+        fabric = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
+        route = _augment_inference_readiness(_effective_runtime_route_status(runtime, {}), fabric)
+        runtime, route = _adr035_chat_identity(runtime, route)
     except Exception:
+        logger.warning("chat status line route unavailable", exc_info=True)
         return None
+    if route.get("active_provider_policy") == "near_tee_only" and (blocks := _near_chat_blocks(fabric)):
+        readiness = dict(route.get("inference_readiness") or {})
+        readiness["reasons"] = list(dict.fromkeys([*(readiness.get("reasons") or []), *blocks]))
+        route = {**route, "inference_ready": False, "inference_readiness": readiness}
+    return route
 
 
 def chat_runtime_unavailable_message(status: dict) -> str:

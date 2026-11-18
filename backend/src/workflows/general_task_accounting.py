@@ -178,8 +178,12 @@ async def validate_group(db, run, group):
 
 
 def reservation_liability(row):
-    """Whole original liability, independent of accounting-period rollover."""
-    if type(row.bound_microusd) is not int or row.bound_microusd <= 0:
+    """Whole original liability, independent of accounting-period rollover.
+
+    A request record written since #1284 carries ``bound_microusd = 0``: it
+    counts only its settled charge.
+    """
+    if type(row.bound_microusd) is not int or row.bound_microusd < 0:
         raise InferenceAccountingError("general_task_group_unknown")
     if row.state in {"reserved", "contact_started", "unknown"}:
         return row.bound_microusd
@@ -187,7 +191,7 @@ def reservation_liability(row):
         actual = row.actual_cost_microusd
         if type(actual) is not int or actual < 0:
             raise InferenceAccountingError("general_task_group_unknown")
-        if actual > row.bound_microusd:
+        if row.bound_microusd and actual > row.bound_microusd:
             raise InferenceAccountingError("general_task_group_cost_limit")
         return actual
     if row.state == "released" and row.contact_started_at is None:

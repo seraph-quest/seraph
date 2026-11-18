@@ -305,9 +305,8 @@ def _near_chat_blocks(fabric: dict) -> list[str]:
     """Causes that block a NEAR TEE chat turn beyond the route readiness (#1280).
 
     The status line is printed only when nothing would block the turn:
-    streaming and tool-use checks present and the month's budget covering one
-    more request (accounting and status-proof blocks already arrive through
-    the slot's own reason).
+    streaming and tool-use checks present (status-proof blocks already arrive
+    through the slot's own reason). No spend figure blocks a turn (#1284).
     """
     near = fabric.get("near_tee") if isinstance(fabric, dict) else None
     slot = ((near or {}).get("slots") or {}).get("text") if isinstance(near, dict) else None
@@ -315,11 +314,6 @@ def _near_chat_blocks(fabric: dict) -> list[str]:
         return ["near_tee_status_unavailable"]
     blocks = [f"{name}:{value}" for name, value in sorted((slot.get("chat_capabilities") or {}).items())
               if value != "ready"]
-    accounting = fabric.get("inference_accounting") if isinstance(fabric, dict) else None
-    remaining = (accounting or {}).get("remaining_microusd") if isinstance(accounting, dict) else None
-    bound = slot.get("request_cost_bound_microusd")
-    if isinstance(remaining, int) and isinstance(bound, int) and remaining < bound:
-        blocks.append("deployment_cost_budget_exhausted")
     return blocks
 
 

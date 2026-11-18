@@ -180,8 +180,10 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
         # settlement returned. Recovery adopts bytes, never calls the provider.
         snapshot = await jobs.inference_accounting_snapshot(job_id=child_id)
         settled = next((row for row in snapshot["operations"] if row["operation_id"] == "remote:"+child_id), None)
-        if (snapshot.get("accounting_continuity_verified") is not True or not settled or settled["state"] != "settled"
-            or settled["actual_cost_microusd"] is None or settled["contact_started_at"] is None
+        # ADR-037 (#1284): the call must have completed; NEAR's price (or its
+        # absence, "not priced yet") never withholds the output.
+        if (snapshot.get("accounting_continuity_verified") is not True or not settled
+            or settled["state"] not in {"settled", "unknown"} or settled["contact_started_at"] is None
             or settled["payload_digest"] != ready["payload_digest"]
             or reserved_output["creation_digest"] != ready["creation_digest"]):
             raise ValueError("research reserved output lacks its original actual settled contact")
@@ -272,8 +274,9 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
     verified_child(raw, sources)
     snapshot = await jobs.inference_accounting_snapshot(job_id=child_id)
     settled = next((row for row in snapshot["operations"] if row["operation_id"] == request.operation_id), None)
-    if snapshot.get("accounting_continuity_verified") is not True or not settled or settled["state"] != "settled":
-        raise RuntimeError("research output requires actual settled accounting readback")
+    if (snapshot.get("accounting_continuity_verified") is not True or not settled
+            or settled["state"] not in {"settled", "unknown"}):
+        raise RuntimeError("research output requires its completed request record")
     artifact = await write_verified(jobs, job_id=child_id, owner=owner, fence=fence,
         creation_digest=ready["creation_digest"], slot=ready["slot"], kind="child", content=raw, max_bytes=16384)
     await _adopt_child(jobs, child_id=child_id, owner=owner, fence=fence, artifact=artifact,
@@ -390,7 +393,6 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
         output_tokens=body["max_tokens"], timeout_seconds=remaining, principal=principal,
         job_id=job_id, request_id=operation_id)
     context = replace(context, deadline_at=witness.plan.deadline_at.timestamp(),
-        owner_budget_microusd=witness.plan.limits.cost_limit_microusd,
         requirements=replace(context.requirements, max_latency_ms=int(setup.timeout_seconds * 1000)))
     near_call = None
     if target.get("near_tee"):
@@ -478,8 +480,9 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
         raise ValueError("programme child output exceeds its original bound")
     snapshot = await jobs.inference_accounting_snapshot(job_id=job_id)
     settled = next((row for row in snapshot["operations"] if row["operation_id"] == operation_id), None)
-    if snapshot.get("accounting_continuity_verified") is not True or not settled or settled["state"] != "settled":
-        raise RuntimeError("programme output lacks actual original settlement")
+    if (snapshot.get("accounting_continuity_verified") is not True or not settled
+            or settled["state"] not in {"settled", "unknown"}):
+        raise RuntimeError("programme output lacks its completed original request record")
     witness = await physical_discovery_inputs(jobs, job_id)
     artifact = stage_discovery_artifact(programme_id=witness.plan.programme_id.hex,
         job_id=job_id, kind="child", slot=slot, content=raw)

@@ -269,8 +269,7 @@ def _evaluate_embedding(facts: CatalogFacts, *, slot) -> tuple[str | None, int |
     The catalog lists an output price for the embedding model, but no source
     states how NEAR bills embedding output (per vector, per dimension or not
     at all). The bound therefore includes ``max_output_tokens`` (fixed at 1)
-    x the output price as well as the input; the reserve is a local admission
-    hold and an over-bound genuine charge still goes to overrun review.
+    x the output price as well as the input. The figure is display only (#1284).
     """
     required = required_cost_microusd(facts, max_input_tokens=slot.max_input_tokens,
         max_output_tokens=slot.max_output_tokens)
@@ -288,8 +287,8 @@ def _evaluate_embedding(facts: CatalogFacts, *, slot) -> tuple[str | None, int |
         return "near_tee_catalog_context_too_small", required
     if required is None:
         return "near_tee_catalog_price_missing", required
-    if slot.request_cost_bound_microusd < required:
-        return "near_tee_catalog_cost_bound_too_small", required
+    # ADR-037 (#1284): the listed price is display only ("a test costs about
+    # $X"); it is never compared with a bound.
     return None, required
 
 
@@ -325,8 +324,8 @@ def evaluate_catalog(facts: CatalogFacts, *, slot_name: str, slot) -> tuple[str 
         return "near_tee_catalog_response_invalid", required
     if required is None:
         return "near_tee_catalog_price_missing", required
-    if slot.request_cost_bound_microusd < required:
-        return "near_tee_catalog_cost_bound_too_small", required
+    # ADR-037 (#1284): the listed price is display only ("a test costs about
+    # $X"); it is never compared with a bound.
     return None, required
 
 

@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any, Mapping
 
 from .effective_policy import current_inference_policy
-from src.workflows.inference_accounting import InferenceAccountingError
+from src.workflows.inference_accounting import ACCOUNTING_LEDGER_UNINITIALIZED, InferenceAccountingError
 
 
 _current_usage: ContextVar[dict[str, object] | None] = ContextVar("inference_account_usage", default=None)
@@ -444,7 +444,7 @@ class DurableInferenceBrokerMixin:
             near = request.runtime_path == "near_text_native"
             if tee_slot is not None:
                 # Exact NEAR TEE slot binding: the canonical route's slot (or
-                # the capability check's exact profile) and its own reserve.
+                # the capability check's exact profile). No amount (#1284).
                 from .configuration import near_tee_slot, route_slot_for_task_class
                 from .caller_context import canonical_route_spec
                 if request.runtime_path != "capability_probe":
@@ -455,18 +455,16 @@ class DurableInferenceBrokerMixin:
                     if route_slot != tee_slot:
                         raise InferenceAccountingError("accounting_profile_binding_invalid")
                 setup = configured.near_tee
-                tee_config = near_tee_slot(configured, tee_slot)
-                bound = tee_config.request_cost_bound_microusd
+                if near_tee_slot(configured, tee_slot) is None:
+                    raise InferenceAccountingError("accounting_profile_binding_invalid")
             else:
                 setup = configured.near_text if near else configured.openrouter_setup
-                bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
             from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION, route_slot_for_task_class
             if tee_slot is not None:
                 pass
             elif near:
                 if _profile_bindings.get().get(request.operation_id) != "near.text":
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
-                bound = setup.request_cost_bound_microusd
             elif setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
                 from .caller_context import canonical_route_spec
                 profile_id = _profile_bindings.get().get(request.operation_id)
@@ -479,10 +477,6 @@ class DurableInferenceBrokerMixin:
                 route = (setup.routes or {}).get(slot)
                 if route is None or not route.enabled or profile_id != f"openrouter.{slot}" or slot != "text" and (setup.purpose_consents or {}).get(slot) != configured.egress_revision:
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
-                bound = route.request_cost_bound_microusd
-            if type(bound) is not int or bound <= 0:
-                raise InferenceAccountingError("accounting_server_bound_required")
-            request = replace(request, estimated_cost_microusd=bound)
             task_binding = _task_group.get()
             repository_witness = current_repository_iteration_accounting_witness()
             expected_task_route = ("strategist_agent" if repository_witness is not None
@@ -514,19 +508,16 @@ class DurableInferenceBrokerMixin:
                     reservation = await rebind_funded_child(repository, request=request,
                         owner=binding.owner, fencing_token=binding.fencing_token,
                         policy_digest=policy_digest,
-                        profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)),
-                        bound=bound)
+                        profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)))
                     return _AccountingHandle(request, repository, binding.job_id,
                         binding.owner, binding.fencing_token, policy_digest,
                         reservation["sequence"], False, profile_id=bound_profile)
             snapshot = await repository.inference_accounting_snapshot()
-            if snapshot["status"] != "ready":
+            if snapshot.get("reason_code") == ACCOUNTING_LEDGER_UNINITIALIZED:
+                # The spend ledger is created on the first request (#1284).
+                await repository.ensure_inference_ledger()
+            elif snapshot["status"] != "ready":
                 raise InferenceAccountingError(str(snapshot.get("reason_code") or "accounting_continuity_unavailable"))
-            from .configuration import deployment_spend_ceiling
-            if snapshot["ceiling_microusd"] != deployment_spend_ceiling(configured):
-                raise InferenceAccountingError("accounting_settings_revision_unavailable")
-            if snapshot.get("overrun_max_cost_microusd", 0) > 0:
-                raise InferenceAccountingError("provider_charge_exceeded_reservation")
             if ephemeral:
                 if request.owner_id.startswith("operator:") and not request.session_id:
                     raise InferenceAccountingError("accounting_job_authority_invalid")
@@ -565,7 +556,6 @@ class DurableInferenceBrokerMixin:
                 payload_digest=request.data_digest, policy_digest=policy_digest,
                 runtime_path=request.runtime_path,
                 profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)),
-                bound_microusd=bound, owner_ceiling_microusd=request.owner_budget_microusd,
                 priority=request.priority.rank, deadline_at=request.deadline_at,
                 owner=owner, fencing_token=fence,
                 general_task_binding=task_binding,
@@ -643,20 +633,23 @@ class DurableInferenceBrokerMixin:
         except Exception:
             adoption_allowed = False
         if near:
+            # ADR-037 (#1284): a NEAR answer is adopted whether or not NEAR has
+            # priced it. A reported charge must still match the record.
             snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
-            adoption_allowed = (adoption_allowed and billing is not None and row["state"] == "settled"
-                and row.get("provider_operation_id") == billing.provider_request_id
-                and row.get("actual_cost_microusd") == billing.cost_microusd
-                and snapshot.get("accounting_continuity_verified") is True
-                and snapshot.get("status") == "ready"
-                and snapshot.get("overrun_max_cost_microusd", 0) == 0)
+            adoption_allowed = (adoption_allowed and row["state"] in {"settled", "unknown"}
+                and (billing is None or (row.get("provider_operation_id") == billing.provider_request_id
+                    and row.get("actual_cost_microusd") == billing.cost_microusd))
+                and snapshot.get("accounting_continuity_verified") is True)
         if handle.ephemeral:
-            state = ("succeeded" if adoption_allowed else "blocked") if row["state"] == "settled" else "cost_liability" if handle.contacted else "blocked"
+            contacted = row["state"] in {"settled", "unknown"}
+            state = ("succeeded" if adoption_allowed else "blocked") if contacted else "blocked"
             if state == "succeeded":
-                # Actual persisted ledger readback, not a seeded receipt.
+                # Actual persisted ledger readback, not a seeded receipt. A
+                # request NEAR has not priced yet reads back as such (#1284).
                 snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
                 persisted = next((item for item in snapshot.get("operations", []) if item["operation_id"] == handle.request.operation_id), None)
-                if snapshot.get("accounting_continuity_verified") is not True or persisted is None or persisted["state"] != "settled":
+                if (snapshot.get("accounting_continuity_verified") is not True or persisted is None
+                        or persisted["state"] != row["state"]):
                     raise InferenceAccountingError("accounting_settlement_readback_failed")
                 await handle.repository.record_readback(handle.job_id,
                     target_path="inference_accounting:" + handle.request.operation_id,

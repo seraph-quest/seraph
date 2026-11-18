@@ -43,8 +43,9 @@ class NearTeeVerticalRoute:
     profile_id: str
     profile_contract_hash: str
     model_id: str
-    request_cost_bound_microusd: int
-    spend_ceiling_microusd: int
+    # Legacy stored amounts (#1284), display/compat only; never compared here.
+    request_cost_bound_microusd: int | None
+    spend_ceiling_microusd: int | None
     max_output_tokens: int
     timeout_seconds: float
 
@@ -68,8 +69,9 @@ def near_tee_vertical_route(runtime_path: str, configured: Any = None) -> NearTe
         return None
     return NearTeeVerticalRoute(runtime_path=runtime_path, profile_id=profile.id,
         profile_contract_hash=profile.contract_hash, model_id=slot.model_id,
-        request_cost_bound_microusd=int(slot.request_cost_bound_microusd),
-        spend_ceiling_microusd=int(configured.inference_lane.spend_ceiling_microusd),
+        request_cost_bound_microusd=slot.request_cost_bound_microusd,
+        spend_ceiling_microusd=(configured.inference_lane.spend_ceiling_microusd
+            if configured.inference_lane is not None else None),
         max_output_tokens=int(slot.max_output_tokens), timeout_seconds=float(slot.timeout_seconds))
 
 
@@ -77,16 +79,16 @@ def near_tee_vertical_route(runtime_path: str, configured: Any = None) -> NearTe
 class VerticalRouteSetup:
     """The reviewed route bounds a vertical binds into its durable authority.
 
-    For NEAR TEE: the text slot's model, request cost bound, output bound,
-    timeout and temperature, under the shared lane's spend ceiling. In the
+    For NEAR TEE: the text slot's model, output bound, timeout and
+    temperature. Stored legacy amounts are carried for compatibility only. In the
     explicit legacy test mode the retained OpenRouter setup is used instead.
     """
 
     near_tee: bool
     profile_id: str
     model_id: str
-    request_cost_bound_microusd: int
-    spend_ceiling_microusd: int
+    request_cost_bound_microusd: int | None
+    spend_ceiling_microusd: int | None
     max_output_tokens: int
     timeout_seconds: float
     temperature: float

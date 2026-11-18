@@ -161,11 +161,13 @@ class OpenRouterRoute:
     max_output_tokens: int
     timeout_seconds: float
     zero_data_retention: bool
-    request_cost_bound_microusd: int
+    # Legacy (#1284): read past, never compared. Retained only so a stored
+    # route keeps its exact profile contract and policy digest.
+    request_cost_bound_microusd: int | None = None
     context_window_tokens: int | None = None
 
 
-_OPENROUTER_ROUTE_OPTIONAL_FIELDS = frozenset({"context_window_tokens"})
+_OPENROUTER_ROUTE_OPTIONAL_FIELDS = frozenset({"context_window_tokens", "request_cost_bound_microusd"})
 
 
 @dataclass(frozen=True)
@@ -207,8 +209,10 @@ class OpenRouterSetup:
 
 @dataclass(frozen=True)
 class NearTextSetup:
-    spend_ceiling_microusd: int
-    request_cost_bound_microusd: int
+    # Legacy (#1284): read past, never compared, written back only when a
+    # stored file already carried them (so its policy digest is unchanged).
+    spend_ceiling_microusd: int | None = None
+    request_cost_bound_microusd: int | None = None
     schema_version: str = NEAR_TEXT_SCHEMA_VERSION
     enabled: bool = False
     profile_id: str = NEAR_TEXT_PROFILE_ID
@@ -223,21 +227,18 @@ class NearTextSetup:
 
 @dataclass(frozen=True)
 class InferenceLaneConfig:
-    """Provider-neutral limits of the one shared remote-inference lane (ADR-035).
+    """Queue and concurrency bounds of the one shared remote-inference lane (ADR-035).
 
-    The lane owns the deployment spend ceiling and the broker bounds. It binds
-    the same deployment ledger and witness as before; provider setups mirror
-    the ceiling and never fund their own.
+    Since ADR-037 (#1284) the lane holds no money: spending limits live in the
+    provider account. A stored ``spend_ceiling_microusd`` or
+    ``request_reserve_review_microusd`` is read past and never compared.
     """
 
-    spend_ceiling_microusd: int
+    spend_ceiling_microusd: int | None = None
     max_queued: int = _MAX_OPENROUTER_QUEUE
     max_inflight: int = 1
     max_outstanding_per_owner: int = _MAX_OPENROUTER_OWNER_OUTSTANDING
     max_retries: int = _MAX_OPENROUTER_RETRIES
-    # Explicit operator reserve review (ADR-035 "reserve review"): reviews an
-    # unreviewed overrun up to this bound when the lane is published, even when
-    # no provider route is enabled (for example an OpenRouter-only install).
     request_reserve_review_microusd: int | None = None
     schema_version: str = INFERENCE_LANE_SCHEMA_VERSION
 
@@ -255,7 +256,10 @@ class NearTeeSlot:
     model_id: str
     max_input_tokens: int
     max_output_tokens: int
-    request_cost_bound_microusd: int
+    # Legacy (#1284): read past and never compared. A stored value stays part
+    # of the slot (and so of its profile contract hash) so capability proofs
+    # and consent recorded before the upgrade remain bound.
+    request_cost_bound_microusd: int | None = None
     enabled: bool = False
     timeout_seconds: float = 30.0
     temperature: float | None = None
@@ -306,10 +310,11 @@ def validate_near_tee_slot(slot_name: str, slot: NearTeeSlot) -> None:
         raise ValueError("invalid NEAR TEE enabled")
     for field, upper in (("max_input_tokens", allowlist[slot.model_id]),
             ("max_output_tokens", _MAX_NEAR_TEE_OUTPUT_TOKENS),
-            ("request_cost_bound_microusd", 1_000_000_000), ("catalog_ttl_hours", 24)):
+            ("catalog_ttl_hours", 24)):
         value = getattr(slot, field)
         if type(value) is not int or not 1 <= value <= upper:
             raise ValueError(f"invalid NEAR TEE {field}")
+    _validate_legacy_amount(slot.request_cost_bound_microusd, "NEAR TEE request_cost_bound_microusd")
     timeout = slot.timeout_seconds
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= _MAX_NEAR_TEE_TIMEOUT_SECONDS:
         raise ValueError("invalid NEAR TEE timeout_seconds")
@@ -331,6 +336,12 @@ def validate_near_tee_slot(slot_name: str, slot: NearTeeSlot) -> None:
             raise ValueError("NEAR TEE embedding slot has no temperature")
     elif batch is not None:
         raise ValueError("max_batch_size is embedding-only")
+
+
+def _validate_legacy_amount(value: object, label: str) -> None:
+    """A legacy stored amount keeps its old shape; its size is never compared."""
+    if value is not None and (type(value) is not int or not 0 <= value <= 1_000_000_000):
+        raise ValueError(f"invalid {label}")
 
 
 def validate_near_tee_setup(setup: NearTeeSetup) -> None:
@@ -363,8 +374,10 @@ def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProf
         "vision_analysis", "memory_embedding") if route_slot_for_task_class(task) == slot_name)
     controls = {"temperature": slot.temperature, "output_limit": slot.max_output_tokens,
         "timeout_seconds": float(slot.timeout_seconds), "input_limit": slot.max_input_tokens,
-        "request_cost_bound_microusd": slot.request_cost_bound_microusd,
         "catalog_ttl_hours": slot.catalog_ttl_hours}
+    if slot.request_cost_bound_microusd is not None:
+        # Legacy slot only: keeps the pre-#1284 contract hash; never compared.
+        controls["request_cost_bound_microusd"] = slot.request_cost_bound_microusd
     embedding = slot_name == "embedding"
     if embedding:
         controls["max_batch_size"] = slot.max_batch_size
@@ -382,10 +395,10 @@ def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProf
         enabled=slot.enabled, keyless=False,
         transport_adapter="openai_compatible_embeddings" if embedding else "openai_compatible_chat",
         context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
-        cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",
-        # Prices come from the catalog setup receipt, re-validated at dispatch by
-        # binding (model, profile hash, revision), never by age (#1178).
-        cost_source_updated_at=0.0, max_latency_ms=int(slot.timeout_seconds * 1000),
+        cost_microusd=slot.request_cost_bound_microusd,
+        cost_source="near_tee_catalog_receipt" if slot.request_cost_bound_microusd is not None else None,
+        # Display only (#1284): no cost is compared at dispatch.
+        cost_source_updated_at=0.0 if slot.request_cost_bound_microusd is not None else None, max_latency_ms=int(slot.timeout_seconds * 1000),
         safety_notes=("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives "
             "requests in plaintext; no end-to-end encryption."))
 
@@ -443,10 +456,6 @@ def near_tee_slot_block_reason(configuration: "ModelFabricConfiguration", slot_n
         return "near_tee_purpose_consent_required"
     if not setup.credential_fingerprint:
         return "near_tee_credential_required"
-    if configuration.inference_lane is None:
-        return "inference_lane_required"
-    if slot.request_cost_bound_microusd > configuration.inference_lane.spend_ceiling_microusd:
-        return "near_tee_request_reserve_exceeds_lane_ceiling"
     return None
 
 
@@ -461,8 +470,7 @@ def near_tee_policy_for_runtime(configuration: "ModelFabricConfiguration", runti
         return None
     return WorkloadPolicy(runtime_path=runtime_path, egress_class=EgressClass.CLOUD_ALLOWED_FULL,
         cloud_egress_acknowledged=True, allowed_profile_ids=(near_tee_profile_id(slot_name),),
-        allowed_provider_kinds=(NEAR_TEE_PROVIDER_KIND,), fallback_allowed=False,
-        max_cost_microusd=configuration.inference_lane.spend_ceiling_microusd)
+        allowed_provider_kinds=(NEAR_TEE_PROVIDER_KIND,), fallback_allowed=False)
 
 
 async def capture_near_tee_credential(*, expected_revision: int, expected_fingerprint: str) -> str:
@@ -584,7 +592,7 @@ def near_tee_credential_bound_since(fingerprint: str | None = None) -> float | N
 
 def _near_tee_slot_from_payload(raw: object) -> NearTeeSlot:
     declared = set(NearTeeSlot.__dataclass_fields__)
-    required = {"model_id", "max_input_tokens", "max_output_tokens", "request_cost_bound_microusd"}
+    required = {"model_id", "max_input_tokens", "max_output_tokens"}
     if not isinstance(raw, dict) or not required <= set(raw) <= declared:
         raise ValueError("NEAR TEE slot must contain exactly the declared fields")
     return NearTeeSlot(**raw)
@@ -608,31 +616,46 @@ def _near_tee_from_payload(raw: object) -> NearTeeSetup:
     return setup
 
 
+_LEGACY_AMOUNT_FIELDS = ("spend_ceiling_microusd", "request_cost_bound_microusd", "request_reserve_review_microusd")
+
+
+def _without_unset_legacy_amounts(payload: dict[str, object], *fields: str) -> dict[str, object]:
+    """Omit legacy amount keys when none is set; a stored set is written back unchanged.
+
+    A file saved before #1284 always carried its amounts (and a null reserve
+    review), so its payload and policy digest stay byte-identical (#1284).
+    """
+    present = [field for field in (fields or _LEGACY_AMOUNT_FIELDS) if field in payload]
+    if all(payload[field] is None for field in present):
+        for field in present:
+            del payload[field]
+    return payload
+
+
 def _near_tee_payload(setup: NearTeeSetup) -> dict[str, object]:
     payload = asdict(setup)
-    payload["slots"] = {name: (None if slot is None else asdict(slot)) for name, slot in (setup.slots or {}).items()}
+    payload["slots"] = {name: (None if slot is None else _without_unset_legacy_amounts(asdict(slot), "request_cost_bound_microusd"))
+        for name, slot in (setup.slots or {}).items()}
     return payload
 
 
 def validate_inference_lane(lane: InferenceLaneConfig) -> None:
     if not isinstance(lane, InferenceLaneConfig) or lane.schema_version != INFERENCE_LANE_SCHEMA_VERSION:
         raise ValueError("unsupported inference lane schema")
-    for field, lower, upper in (("spend_ceiling_microusd", 1, 1_000_000_000),
-            ("max_queued", 1, _MAX_OPENROUTER_QUEUE), ("max_inflight", 1, 1),
+    for field, lower, upper in (("max_queued", 1, _MAX_OPENROUTER_QUEUE), ("max_inflight", 1, 1),
             ("max_outstanding_per_owner", 1, _MAX_OPENROUTER_OWNER_OUTSTANDING),
             ("max_retries", 0, _MAX_OPENROUTER_RETRIES)):
         value = getattr(lane, field)
         if type(value) is not int or not lower <= value <= upper:
             raise ValueError(f"invalid inference lane {field}")
-    review = lane.request_reserve_review_microusd
-    if review is not None and (type(review) is not int or not 1 <= review <= lane.spend_ceiling_microusd):
-        raise ValueError("invalid inference lane request_reserve_review_microusd")
+    for field in ("spend_ceiling_microusd", "request_reserve_review_microusd"):
+        _validate_legacy_amount(getattr(lane, field), f"inference lane {field}")
 
 
 def _inference_lane_from_payload(payload: object) -> InferenceLaneConfig:
     declared = set(InferenceLaneConfig.__dataclass_fields__)
-    if not isinstance(payload, dict) or set(payload) != declared:
-        raise ValueError("inference lane must contain exactly the declared fields")
+    if not isinstance(payload, dict) or set(payload) - declared:
+        raise ValueError("inference lane must contain only the declared fields")
     lane = InferenceLaneConfig(**payload)
     validate_inference_lane(lane)
     return lane
@@ -640,21 +663,20 @@ def _inference_lane_from_payload(payload: object) -> InferenceLaneConfig:
 
 def migrate_inference_lane(openrouter_setup: "OpenRouterSetup | None",
         near_text: "NearTextSetup | None") -> InferenceLaneConfig | None:
-    """Pure projection of the legacy lane limits into the neutral lane.
+    """Pure projection of the legacy queue bounds into the neutral lane.
 
-    Copies the persisted values exactly; it never touches ledgers, liabilities,
-    reservations or revisions, and makes no provider contact.
+    Copies only the queue and concurrency bounds (#1284: no amount); it never
+    touches ledgers, reservations or revisions, and makes no provider contact.
     """
     if openrouter_setup is not None:
         lane = InferenceLaneConfig(
-            spend_ceiling_microusd=openrouter_setup.spend_ceiling_microusd,
             max_queued=openrouter_setup.max_queued,
             max_inflight=openrouter_setup.max_inflight,
             max_outstanding_per_owner=openrouter_setup.max_outstanding_per_owner,
             max_retries=openrouter_setup.max_retries,
         )
     elif near_text is not None:
-        lane = InferenceLaneConfig(spend_ceiling_microusd=near_text.spend_ceiling_microusd)
+        lane = InferenceLaneConfig()
     else:
         return None
     validate_inference_lane(lane)
@@ -698,16 +720,14 @@ def validate_near_text_setup(setup: NearTextSetup) -> None:
             raise ValueError(f"invalid NEAR {field}")
     if type(setup.enabled) is not bool:
         raise ValueError("invalid NEAR enabled")
-    for field, maximum in (("max_output_tokens", 1024),
-            ("request_cost_bound_microusd", 1_000_000_000), ("spend_ceiling_microusd", 1_000_000_000)):
-        value = getattr(setup, field)
-        if type(value) is not int or not 1 <= value <= maximum:
-            raise ValueError(f"invalid NEAR {field}")
+    value = setup.max_output_tokens
+    if type(value) is not int or not 1 <= value <= 1024:
+        raise ValueError("invalid NEAR max_output_tokens")
+    for field in ("request_cost_bound_microusd", "spend_ceiling_microusd"):
+        _validate_legacy_amount(getattr(setup, field), f"NEAR {field}")
     value = setup.timeout_seconds
     if type(value) not in (int, float) or not math.isfinite(value) or not 1 <= value <= 45:
         raise ValueError("invalid NEAR timeout_seconds")
-    if setup.request_cost_bound_microusd > setup.spend_ceiling_microusd:
-        raise ValueError("NEAR request reserve exceeds shared ceiling")
     if setup.credential_fingerprint is not None and (not isinstance(setup.credential_fingerprint, str)
             or re.fullmatch(r"[0-9a-f]{12}", setup.credential_fingerprint) is None):
         raise ValueError("invalid NEAR credential fingerprint")
@@ -725,28 +745,6 @@ def near_text_profile_for_setup(setup: NearTextSetup) -> ProviderProfile:
         capabilities=("text",), task_class="near_text_native", enabled=setup.enabled,
         max_output_tokens=setup.max_output_tokens, max_latency_ms=int(setup.timeout_seconds * 1000),
         safety_notes="NEAR receives plaintext over HTTPS; no TEE or E2EE verification.")
-
-
-def deployment_spend_ceiling(configuration: ModelFabricConfiguration) -> int:
-    """Return the one deployment ceiling.
-
-    Once the provider-neutral lane is published it is the only authority:
-    NEAR text must mirror it, and a retained (retired) OpenRouter ceiling is
-    historical readback only. Before publication, the legacy mirror rule
-    between OpenRouter and NEAR text still applies.
-    """
-    if configuration.inference_lane is not None:
-        values = [configuration.inference_lane.spend_ceiling_microusd]
-        if configuration.near_text is not None:
-            values.append(configuration.near_text.spend_ceiling_microusd)
-    else:
-        values = [setup.spend_ceiling_microusd for setup in
-            (configuration.openrouter_setup, configuration.near_text) if setup is not None]
-    if not values or any(type(value) is not int or not 1 <= value <= 1_000_000_000 for value in values):
-        raise ValueError("deployment spend ceiling unavailable")
-    if len(set(values)) != 1:
-        raise ValueError("deployment spend ceiling mismatch")
-    return values[0]
 
 
 async def capture_near_text_credential(*, expected_revision: int, expected_fingerprint: str) -> str:
@@ -811,7 +809,6 @@ def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> Wo
         allowed_profile_ids=(profile_id,),
         allowed_provider_kinds=(OPENROUTER_PROVIDER_KIND,),
         fallback_allowed=False,
-        max_cost_microusd=setup.spend_ceiling_microusd,
     )
 
 
@@ -938,9 +935,7 @@ def validate_active_model_fabric_configuration(
     if validated.inference_lane is not None:
         validate_inference_lane(validated.inference_lane)
     if validated.near_tee is not None:
-        _validate_near_tee_against_lane(validated)
-    if validated.near_text is not None or validated.inference_lane is not None:
-        deployment_spend_ceiling(validated)
+        validate_near_tee_setup(validated.near_tee)
 
 
 _openrouter_route_revoke_status: dict[str, object] = {"status": "not_run", "reason_code": None}
@@ -1086,7 +1081,6 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
                 max_queued=lane.max_queued,
                 max_inflight=lane.max_inflight,
                 max_outstanding_per_owner=lane.max_outstanding_per_owner,
-                max_owner_cost_microusd=lane.spend_ceiling_microusd,
                 max_retries=lane.max_retries,
             )
     else:
@@ -1174,12 +1168,10 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         near_tee=tee,
     )
     if tee is not None:
-        _validate_near_tee_against_lane(configuration)
+        validate_near_tee_setup(tee)
     if configuration.audio_metadata_access is not None:
         from .audio_documentation import AudioMetadataAccessV1
         AudioMetadataAccessV1.model_validate(configuration.audio_metadata_access)
-    if near is not None or lane is not None:
-        deployment_spend_ceiling(configuration)
     return configuration
 
 
@@ -1261,10 +1253,9 @@ def _policy_from_payload(payload: object) -> WorkloadPolicy:
         raise ValueError("invalid workload policy runtime path")
     if policy.egress_class is not EgressClass.LOCAL_ONLY and not policy.cloud_egress_acknowledged:
         raise ValueError("cloud egress requires explicit operator acknowledgement")
-    if policy.max_cost_microusd is not None and policy.max_cost_microusd < 0:
-        raise ValueError("workload policy cost ceiling must be nonnegative")
-    if policy.egress_class is not EgressClass.LOCAL_ONLY and policy.max_cost_microusd is None:
-        raise ValueError("cloud egress requires an explicit cost ceiling")
+    # ``max_cost_microusd`` is a legacy field (#1284): optional, never compared.
+    if policy.max_cost_microusd is not None and (type(policy.max_cost_microusd) is not int or policy.max_cost_microusd < 0):
+        raise ValueError("workload policy cost field must be a nonnegative integer")
     return policy
 
 
@@ -1293,23 +1284,12 @@ def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str,
     if configuration.openrouter_setup is not None:
         payload["openrouter_setup"] = _openrouter_setup_payload(configuration.openrouter_setup)
     if configuration.near_text is not None:
-        payload["near_text"] = asdict(configuration.near_text)
+        payload["near_text"] = _without_unset_legacy_amounts(asdict(configuration.near_text))
     if configuration.inference_lane is not None:
-        payload["inference_lane"] = asdict(configuration.inference_lane)
+        payload["inference_lane"] = _without_unset_legacy_amounts(asdict(configuration.inference_lane))
     if configuration.near_tee is not None:
         payload["near_tee"] = _near_tee_payload(configuration.near_tee)
     return payload
-
-
-def _validate_near_tee_against_lane(configuration: ModelFabricConfiguration) -> None:
-    """NEAR TEE mirrors the provider-neutral lane ceiling; it never funds its own."""
-    validate_near_tee_setup(configuration.near_tee)
-    enabled = [slot for slot in (configuration.near_tee.slots or {}).values() if slot is not None and slot.enabled]
-    if enabled and configuration.inference_lane is None:
-        raise ValueError("inference_lane_required")
-    for slot in enabled:
-        if slot.request_cost_bound_microusd > configuration.inference_lane.spend_ceiling_microusd:
-            raise ValueError("NEAR TEE request reserve exceeds shared ceiling")
 
 
 def _profile_payload(profile: ProviderProfile) -> dict[str, object]:
@@ -1375,9 +1355,9 @@ def _legacy_setup_for_route(setup: OpenRouterSetup, route: OpenRouterRoute) -> O
 def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRouterRoute, *, allow_unconsented: bool = False) -> None:
     if not isinstance(route, OpenRouterRoute) or type(route.enabled) is not bool or type(route.zero_data_retention) is not bool:
         raise ValueError("OpenRouter route booleans must be literal")
-    for field in ("max_output_tokens", "request_cost_bound_microusd"):
-        if type(getattr(route, field)) is not int:
-            raise ValueError("OpenRouter route integers must be strict")
+    if type(route.max_output_tokens) is not int:
+        raise ValueError("OpenRouter route integers must be strict")
+    _validate_legacy_amount(route.request_cost_bound_microusd, "OpenRouter route request_cost_bound_microusd")
     for field in ("temperature", "timeout_seconds"):
         if type(getattr(route, field)) not in {float, int}:
             raise ValueError("OpenRouter route numbers must be finite")
@@ -1393,7 +1373,7 @@ def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRou
             raise ValueError("audio_endpoint_not_exact")
         validate_exact_audio_endpoint_slug(route.allowed_upstreams[0])
         normalize_openrouter_model_id(route.model_id)
-        if not math.isfinite(route.temperature) or not math.isfinite(route.timeout_seconds) or not 1 <= route.timeout_seconds <= 60 or not 1 <= route.max_output_tokens <= 8192 or route.zero_data_retention is not True or not 1 <= route.request_cost_bound_microusd <= setup.spend_ceiling_microusd:
+        if not math.isfinite(route.temperature) or not math.isfinite(route.timeout_seconds) or not 1 <= route.timeout_seconds <= 60 or not 1 <= route.max_output_tokens <= 8192 or route.zero_data_retention is not True:
             raise ValueError("audio_route_bounds_invalid")
         return
     required = {"text": {"text"}, "vision": {"text", "vision"}, "embedding": {"embedding"}}[slot]
@@ -1530,10 +1510,9 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
         raise ValueError("vision and embedding workloads require zero-data-retention policy")
     if setup.egress_class is EgressClass.LOCAL_ONLY or not setup.cloud_egress_acknowledged and not (allow_unconsented and setup.cloud_egress_acknowledged is False):
         raise ValueError("OpenRouter setup requires explicit cloud egress acknowledgement")
-    if type(setup.spend_ceiling_microusd) is not int or not 1 <= setup.spend_ceiling_microusd <= 1_000_000_000:
-        raise ValueError("OpenRouter setup requires a positive finite spend ceiling")
-    if setup.request_cost_bound_microusd is not None and (type(setup.request_cost_bound_microusd) is not int or not 1 <= setup.request_cost_bound_microusd <= setup.spend_ceiling_microusd):
-        raise ValueError("OpenRouter request cost bound must be a positive integer within the deployment ceiling")
+    # Retired provider (ADR-035); its stored amounts are read past (#1284).
+    _validate_legacy_amount(setup.spend_ceiling_microusd, "OpenRouter spend_ceiling_microusd")
+    _validate_legacy_amount(setup.request_cost_bound_microusd, "OpenRouter request_cost_bound_microusd")
     if setup.max_inflight != 1:
         raise ValueError("OpenRouter admission allows exactly one in-flight request")
     if not 1 <= int(setup.max_queued) <= _MAX_OPENROUTER_QUEUE:
@@ -1695,9 +1674,11 @@ def _profile_for_validated_setup(setup: OpenRouterSetup) -> ProviderProfile:
         ),
         context_window_tokens=openrouter_context_window_tokens(setup),
         max_output_tokens=setup.max_output_tokens,
+        # Legacy display fields only (#1284): set when a stored amount exists.
         cost_microusd=setup.spend_ceiling_microusd,
-        cost_source="operator_spend_ceiling",
-        cost_source_updated_at=datetime.now(timezone.utc).timestamp(),
+        cost_source="operator_spend_ceiling" if setup.spend_ceiling_microusd is not None else None,
+        cost_source_updated_at=(datetime.now(timezone.utc).timestamp()
+            if setup.spend_ceiling_microusd is not None else None),
         max_latency_ms=max(int(setup.timeout_seconds * 1000), 1),
     )
 

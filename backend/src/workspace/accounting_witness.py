@@ -16,32 +16,6 @@ def utc_period(now=None):
     return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
 
 
-def period_state(account, rows, period):
-    history = json.loads(account["settings_history_json"])
-    authorized = datetime.fromisoformat(account["created_at"]).strftime("%Y-%m")
-    reviewed = False
-    periods = [authorized, *[row["period_id"] for row in rows]]
-    for entry in history:
-        if entry.get("kind") in {"period_initialized", "period_review"}:
-            authorized = entry["period_id"]
-            reviewed = entry.get("kind") == "period_review"
-        if entry.get("kind") in {"period_initialized", "period_review", "period_observed"}:
-            periods.append(entry["period_id"])
-    high_water = max(periods)
-    reason = ("accounting_clock_correction_required" if period < high_water and (period != authorized or not reviewed)
-        else "accounting_period_review_required" if period != authorized else None)
-    return {"authorized_period": authorized, "period_high_water": high_water, "reason_code": reason}
-
-
-def unreviewed_overruns(account, rows):
-    covered = set()
-    for entry in json.loads(account["settings_history_json"]):
-        if entry.get("kind") == "request_reserve_review":
-            covered.update((row["operation_id"], row["sequence"], row["revision"]) for row in entry.get("operations", []))
-    return [row for row in rows if row["state"] == "settled" and (row["actual_cost_microusd"] or 0) > row["bound_microusd"]
-        and (row["operation_id"], row["sequence"], row["revision"]) not in covered]
-
-
 def assert_deployment_binding(workspace):
     directory = workspace.lifecycle_directory
     if (not os.environ.get(LIFECYCLE_PATH_ENV) and workspace.lifecycle_path is None
@@ -69,8 +43,14 @@ ROW_DIGEST_COLUMN = "ledger_row_digest"
 TOTALS_COLUMN = "ledger_totals_json"
 _DATETIME_FIELDS = ("created_at", "updated_at", "deadline_at", "contact_started_at")
 _OPEN_STATES = ("reserved", "contact_started", "unknown")
+# Sealed totals schema. Version 2 (#1284) drops the overrun set (nothing is
+# compared with a bound any more) and counts an owner's open NEAR text request
+# only while it is reserved or contacted, never once it is "not priced yet".
+# Version 1 totals stay verifiable so an upgraded ledger reseals forward.
+LEDGER_TOTALS_VERSION = 2
 _OVERRUN_FIELDS = ("operation_id", "sequence", "revision", "actual_cost_microusd", "bound_microusd",
     "job_id", "runtime_path", "period_id")
+_NEAR_TEXT_OPEN_STATES = {1: _OPEN_STATES, 2: ("reserved", "contact_started")}
 
 
 def ledger_record(values):
@@ -181,14 +161,23 @@ def stored_row_digest_mismatch(rows):
         if row.get(ROW_DIGEST_COLUMN) is not None and row.get(ROW_DIGEST_COLUMN) != row_digest(row)]
 
 
-def empty_ledger_totals():
+def empty_ledger_totals(schema_version=LEDGER_TOTALS_VERSION):
     # The scoped counts let a writer prove that an indexed read returned every
     # row it must see: a row hidden by editing its owner, group key or state
     # changes the read but not these sealed counts.
-    return {"schema_version": 1, "open_bound_by_state": {state: 0 for state in _OPEN_STATES},
+    if schema_version not in _NEAR_TEXT_OPEN_STATES:
+        raise ProductionWorkspaceReconciliationError("accounting totals version unavailable")
+    totals = {"schema_version": schema_version, "open_bound_by_state": {state: 0 for state in _OPEN_STATES},
         "owner_open_bound": {}, "settled_by_period": {}, "owner_settled_by_period": {},
-        "overruns": {}, "rows_by_period": {}, "row_count": 0,
+        "rows_by_period": {}, "row_count": 0,
         "rows_by_owner": {}, "rows_by_group": {}, "owner_near_text_open": {}}
+    if schema_version == 1:
+        totals["overruns"] = {}
+    else:
+        # Display only: how many requests are open per state (an ``unknown``
+        # row is "not priced yet"). Sealed so the shown count is verified.
+        totals["open_rows_by_state"] = {state: 0 for state in _OPEN_STATES}
+    return totals
 
 
 _GROUP_EVIDENCE_KIND = "general_task_group_reservation.v1"
@@ -222,6 +211,8 @@ def apply_ledger_contribution(totals, row, sign):
     """Add (sign=1) or remove (sign=-1) one reservation's held amounts."""
     state, owner = row["state"], row["owner_id"]
     if state in _OPEN_STATES:
+        if "open_rows_by_state" in totals:
+            totals["open_rows_by_state"][state] += sign
         bound = int(row["bound_microusd"])
         totals["open_bound_by_state"][state] += sign * bound
         totals["owner_open_bound"][owner] = totals["owner_open_bound"].get(owner, 0) + sign * bound
@@ -230,7 +221,7 @@ def apply_ledger_contribution(totals, row, sign):
         totals["settled_by_period"][period] = totals["settled_by_period"].get(period, 0) + sign * actual
         by_owner = totals["owner_settled_by_period"].setdefault(owner, {})
         by_owner[period] = by_owner.get(period, 0) + sign * actual
-        if actual > int(row["bound_microusd"]):
+        if "overruns" in totals and actual > int(row["bound_microusd"]):
             if sign > 0:
                 totals["overruns"][row["operation_id"]] = {field: row[field] for field in _OVERRUN_FIELDS}
             else:
@@ -242,7 +233,7 @@ def apply_ledger_contribution(totals, row, sign):
     group_key = evidence_group_key(row.get("evidence_json"))
     if group_key is not None:
         _bump(totals["rows_by_group"], group_key, sign)
-    if state in _OPEN_STATES and row.get("runtime_path") == _NEAR_TEXT_RUNTIME:
+    if state in _NEAR_TEXT_OPEN_STATES[totals["schema_version"]] and row.get("runtime_path") == _NEAR_TEXT_RUNTIME:
         _bump(totals["owner_near_text_open"], owner, sign)
     _drop_zeros(totals)
 
@@ -261,33 +252,12 @@ def _drop_zeros(totals):
             del totals["owner_settled_by_period"][owner]
 
 
-def ledger_totals(rows):
+def ledger_totals(rows, schema_version=LEDGER_TOTALS_VERSION):
     """Running totals recomputed from every row (the full-verification oracle)."""
-    totals = empty_ledger_totals()
+    totals = empty_ledger_totals(schema_version)
     for row in rows:
         apply_ledger_contribution(totals, ledger_record(row), 1)
     return totals
-
-
-def held_microusd(totals, period, owner=None):
-    """Open liabilities plus settlements at or after ``period`` (``held()``)."""
-    if owner is None:
-        open_bound = sum(totals["open_bound_by_state"].values())
-        settled = totals["settled_by_period"]
-    else:
-        open_bound = totals["owner_open_bound"].get(owner, 0)
-        settled = totals["owner_settled_by_period"].get(owner, {})
-    return open_bound + sum(value for key, value in settled.items() if key >= period)
-
-
-def totals_period_rows(totals):
-    """The only row input ``period_state`` reads: the highest row period."""
-    return [{"period_id": max(totals["rows_by_period"])}] if totals["rows_by_period"] else []
-
-
-def totals_overrun_rows(totals):
-    """The only rows ``unreviewed_overruns`` can return: settled overruns."""
-    return [{**row, "state": "settled"} for row in totals["overruns"].values()]
 
 
 def witness(account):

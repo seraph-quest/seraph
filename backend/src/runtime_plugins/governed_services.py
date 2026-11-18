@@ -361,9 +361,10 @@ async def _request_inference(jobs, run, candidate) -> dict:
             from dataclasses import replace
             from src.model_fabric.configuration import read_model_fabric_configuration
             if near_controls is not None:
-                from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
-                # The slot timeout plus its reserved billing window.
-                timeout_seconds = near_controls["timeout_seconds"] + NEAR_TEE_BILLING_RESERVE_SECONDS
+                from src.model_fabric.near_tee import NEAR_TEE_BILLING_LOOKUP_SECONDS
+                # The slot timeout plus room for the best-effort billing
+                # lookup (deadline sizing only, never a denial, #1284).
+                timeout_seconds = near_controls["timeout_seconds"] + NEAR_TEE_BILLING_LOOKUP_SECONDS
             else:
                 setup = read_model_fabric_configuration().openrouter_setup
                 if setup is None:

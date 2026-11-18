@@ -16,7 +16,6 @@ from src.llm_runtime import (
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.model_fabric.contracts import NoCompliantModelRouteError
-from src.workflows.inference_accounting import InferenceAccountingError
 
 
 CHAT_ROUTE_BLOCKED_MESSAGE = "Chat is blocked. Nothing was sent."
@@ -32,12 +31,11 @@ _MID_TURN = (
 )
 # Settings section a blocked chat message opens (#1280): the Model card.
 CHAT_BLOCK_SETTINGS_SECTION = "model"
-PROVIDER_OVERRUN_CODE = "provider_charge_exceeded_reservation"
 # REST and WebSocket cut a lightweight turn at this outer bound.
 DIRECT_CHAT_TURN_CAP_SECONDS = 60.0
 # ADR-035: a NEAR TEE turn's own deadline ends this much before the outer cut,
-# so the stream (ended 16s before that deadline) and its billing readback
-# both finish while the turn is still alive.
+# so the stream ends while the turn is still alive. The billing readback after
+# it is best effort and never withholds the answer (#1284).
 NEAR_TEE_OUTER_MARGIN_SECONDS = 2.0
 
 
@@ -75,38 +73,13 @@ def openrouter_route_block_reason(error: BaseException) -> str:
     return "no_compliant_route"
 
 
-def microusd_dollars(value: int) -> str:
-    """Exact dollar text for an integer micro-USD amount, e.g. 61234 -> 0.061234."""
-    whole, fraction = divmod(int(value), 1_000_000)
-    text = f"{fraction:06d}".rstrip("0")
-    return f"{whole}.{text}" if text else str(whole)
-
-
-async def route_block_overrun_minimum(error: BaseException) -> int | None:
-    """Return the bound that reviews the current overrun, for an overrun block only.
-
-    The value is the largest unreviewed settled charge from the accounting
-    owner: a bounded, non-sensitive amount the operator needs to recover.
-    """
-    if openrouter_route_block_reason(error).partition(":")[0] != PROVIDER_OVERRUN_CODE:
-        return None
-    try:
-        from src.workflows.job_runtime import durable_job_repository
-
-        snapshot = await durable_job_repository.inference_accounting_snapshot()
-    except Exception:
-        return None
-    value = snapshot.get("overrun_max_cost_microusd")
-    return value if type(value) is int and 0 < value <= 1_000_000_000_000 else None
-
-
 _CONSENT_CODES = frozenset({"provider_policy_revoked", "near_tee_purpose_consent_required"})
 _SETUP_CODES = frozenset({"near_tee_slot_unconfigured", "near_tee_slot_disabled"})
 _CATALOG_CODES = frozenset({"near_tee_catalog_receipt_stale", "near_tee_catalog_receipt_missing"})
 CHAT_NEEDS_TEST_MESSAGE = "Chat needs one quick test first."
 
 
-def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) -> tuple[str, str]:
+def _route_block_body(reason: str) -> tuple[str, str]:
     """Plain operator copy and recovery action for one selector rejection (#1280).
 
     The copy names no retired provider and points at the Model card; the
@@ -122,43 +95,11 @@ def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) ->
         return f"Chat is off: no chat model is turned on. Pick one in {_SETTINGS}.", "choose_model"
     if code in _CATALOG_CODES:
         return CHAT_NEEDS_TEST_MESSAGE, "run_chat_test"
-    if code == "inference_lane_required":
-        return f"Chat is off: set a monthly budget in {_SETTINGS} first.", "set_budget"
-    if code == "near_tee_request_reserve_exceeds_lane_ceiling":
-        return (
-            f"Chat is off: the monthly budget is smaller than one request's limit. Raise it in {_SETTINGS}.",
-            "set_budget",
-        )
-    if code == "accounting_period_review_required":
-        return (
-            "Chat is paused: a new month started. Your monthly budget starts again once you press "
-            f"Start the new month in {_SETTINGS}.",
-            "review_period",
-        )
-    if code == "accounting_clock_correction_required":
-        return (
-            f"Chat is paused: the computer's clock moved back. Confirm the month in {_SETTINGS}; "
-            "charges already counted for later months stay counted.",
-            "review_clock_correction",
-        )
-    if code == "deployment_cost_budget_exhausted":
-        return "Chat is paused: this month's budget is used up.", "raise_budget"
     if code == "openrouter_retired":
         return (
             "Chat is off: no chat model is set up. OpenRouter is no longer used; set up NEAR in "
             f"{_SETTINGS}. Existing OpenRouter costs can still be settled.",
             "openrouter_retired",
-        )
-    if code == PROVIDER_OVERRUN_CODE:
-        target = (
-            f"${microusd_dollars(minimum_bound_microusd)} (the largest unreviewed charge)"
-            if minimum_bound_microusd else "the billed charge"
-        )
-        return (
-            "Chat is paused: one request cost more than its limit, so every further paid request waits "
-            f"for your review. Open {_SETTINGS} and press Accept and continue; it records a review "
-            f"of up to {target}.",
-            "review_cost_overrun",
         )
     if code in {"proof_missing", "proof_expired"}:
         # NEAR proofs never age out (#1178); either code means the check is absent.
@@ -187,12 +128,6 @@ def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) ->
             f"Run the test again in {_SETTINGS}.",
             "prove_route",
         )
-    if code.startswith("profile_cost"):
-        return (
-            "Chat is blocked: the chat model's cost limits are missing or above the monthly budget. "
-            f"Review them in {_SETTINGS}.",
-            "review_spend_ceiling",
-        )
     return "Chat is blocked.", "open_model_settings"
 
 
@@ -200,7 +135,6 @@ def openrouter_route_block_recovery(
     reason: str,
     *,
     provider_contacted: bool = False,
-    minimum_bound_microusd: int | None = None,
 ) -> tuple[str, str]:
     """Map one selector rejection code to an operator message and recovery action.
 
@@ -210,7 +144,7 @@ def openrouter_route_block_recovery(
     of the same turn reached the provider, so the message must not claim that
     no model call was made.
     """
-    body, action = _route_block_body(reason, minimum_bound_microusd)
+    body, action = _route_block_body(reason)
     if provider_contacted:
         return f"{body} {_MID_TURN}", action
     return f"{body} {_NO_CALL}", action
@@ -220,12 +154,10 @@ def openrouter_route_blocked_message(
     error: BaseException,
     *,
     provider_contacted: bool = False,
-    minimum_bound_microusd: int | None = None,
 ) -> str:
     return openrouter_route_block_recovery(
         openrouter_route_block_reason(error),
         provider_contacted=provider_contacted,
-        minimum_bound_microusd=minimum_bound_microusd,
     )[0]
 
 
@@ -239,7 +171,6 @@ async def route_block_frame_fields(error: BaseException, *, provider_contacted: 
     message, action = openrouter_route_block_recovery(
         reason,
         provider_contacted=provider_contacted,
-        minimum_bound_microusd=await route_block_overrun_minimum(error),
     )
     return {"content": message, "code": reason, "recovery_action": action,
             "settings_section": CHAT_BLOCK_SETTINGS_SECTION}
@@ -465,26 +396,19 @@ async def stream_direct_local_chat(
     )
     parts: list[str] = []
     from contextlib import aclosing
-    try:
-        # aclosing: a turn that stops early closes the provider stream in
-        # this task (a NEAR TEE stream then still settles its billing).
-        async with aclosing(stream_completion_with_fallback(
-            messages=messages,
-            temperature=settings.model_temperature,
-            max_tokens=min(settings.model_max_tokens, 512),
-            runtime_path=runtime_path,
-            request_context=context,
-            request_id=context.request_id,
-        )) as stream:
-            async for delta in stream:
-                parts.append(delta)
-                yield delta
-    except InferenceAccountingError as exc:
-        # An unreviewed overrun is refused at reservation, before the
-        # transport runs; report it as the no-contact block it is.
-        if parts or exc.code != PROVIDER_OVERRUN_CODE:
-            raise
-        raise NoCompliantModelRouteError((exc.code,)) from exc
+    # aclosing: a turn that stops early closes the provider stream in this
+    # task (a NEAR TEE stream then still reads its billing back, best effort).
+    async with aclosing(stream_completion_with_fallback(
+        messages=messages,
+        temperature=settings.model_temperature,
+        max_tokens=min(settings.model_max_tokens, 512),
+        runtime_path=runtime_path,
+        request_context=context,
+        request_id=context.request_id,
+    )) as stream:
+        async for delta in stream:
+            parts.append(delta)
+            yield delta
 
     if not parts:
         fallback = "I am here. What should we focus on first?"

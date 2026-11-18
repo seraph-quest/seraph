@@ -272,24 +272,19 @@ async def expired_finance_binding(db, task, attempt, run, *, observed):
 
 async def _ledger(db,receipt,*,job):
     row=await ledger_before_output(db,operation_id=receipt.operation_id,job=job)
-    if row.actual_cost_microusd!=receipt.cost_microusd or row.provider_operation_id!=receipt.provider_request_id:
-        raise BoardError('near_cost_readback_required','The charge receipt differs from its canonical ledger')
+    # The receipt must agree with its request record; an unpriced request has no charge on either.
+    if row.actual_cost_microusd!=receipt.cost_microusd or (row.state=='settled' and row.provider_operation_id!=receipt.provider_request_id):
+        raise BoardError('near_ledger_readback_mismatch','The charge receipt differs from its canonical ledger')
     return row
 
 async def ledger_before_output(db,*,operation_id,job):
     row=await db.get(InferenceCostReservation,operation_id,populate_existing=True)
+    # ADR-037 (#1284): the provider call must have completed (priced or not
+    # priced yet); its charge never withholds the output.
     if (row is None or row.job_id!=job or row.runtime_path!=RUNTIME or row.profile_id!='near.text'
-        or row.state!='settled' or row.actual_cost_microusd is None or not row.provider_operation_id):
-        raise BoardError('near_cost_readback_required','The authoritative charge must be settled')
-    # The canonical continuity owner records overrun review separately from settlement.
-    if row.actual_cost_microusd>row.bound_microusd:
-        from src.workspace.accounting_witness import unreviewed_overruns
-        from src.db.models import InferenceAccountingOwner
-        account=await db.scalar(select(InferenceAccountingOwner).where(InferenceAccountingOwner.deployment_id==row.deployment_id).execution_options(populate_existing=True))
-        rows=(await db.execute(select(InferenceCostReservation).where(InferenceCostReservation.deployment_id==row.deployment_id))).scalars().all()
-        from src.workflows.inference_accounting import _operation_payload
-        if account is None or unreviewed_overruns(account.model_dump(mode='json'),[_operation_payload(r) for r in rows]):
-            raise BoardError('near_cost_overrun_review_required','The actual charge overrun requires review')
+        or row.state not in {'settled','unknown'} or row.contact_started_at is None
+        or (row.state=='settled' and (row.actual_cost_microusd is None or not row.provider_operation_id))):
+        raise BoardError('near_ledger_readback_mismatch','The completed request record is required')
     return row
 
 async def execute(task,attempt,inputs,*,jobs,runner,admission_only,session_provider):
@@ -393,7 +388,7 @@ async def execute(task,attempt,inputs,*,jobs,runner,admission_only,session_provi
         with native_policy_scope(witness,'terminal') as scope:
             result=await jobs.transition_job(witness.job_id,'succeeded',owner=runner,fencing_token=fence,
                 terminal_authority_check=terminal_guard,result={'no_learning':True,'output_digest':digest(content)},
-                result_summary='NEAR HTTPS answer retained privately; settled cost; no_learning')
+                result_summary='NEAR HTTPS answer retained privately; spend recorded; no_learning')
         return {**result,'memory_status':'no_learning','admission_only':False}
     except asyncio.CancelledError:raise
     except Exception as exc:
@@ -408,10 +403,10 @@ async def execute(task,attempt,inputs,*,jobs,runner,admission_only,session_provi
         logging.getLogger(__name__).info('NEAR original attempt blocked: %s',getattr(exc,'code',type(exc).__name__))
         latest=await jobs.get_job(witness.job_id)
         if latest.get('status')=='running':
-            return await jobs.transition_job(witness.job_id,'blocked',owner=runner,fencing_token=fence,reason='near_cost_readback_required',
-                result={'reason_code':'near_cost_readback_required','cause_code':getattr(exc,'code',type(exc).__name__),'no_learning':True},result_summary='NEAR answer unavailable; inspect original accounting')
+            return await jobs.transition_job(witness.job_id,'blocked',owner=runner,fencing_token=fence,reason='near_answer_unavailable',
+                result={'reason_code':'near_answer_unavailable','cause_code':getattr(exc,'code',type(exc).__name__),'no_learning':True},result_summary='NEAR answer unavailable; inspect the original attempt')
         if latest.get('status')=='cost_liability':
-            return {**latest,'reason_code':'near_cost_readback_required','no_learning':True}
+            return {**latest,'reason_code':'near_answer_unavailable','no_learning':True}
         raise
     finally:
         answer=None

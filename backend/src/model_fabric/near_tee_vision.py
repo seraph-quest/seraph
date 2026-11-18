@@ -31,7 +31,7 @@ import time
 
 from .contracts import NEAR_TEE_PROVIDER_KIND, bind_final_inference_payload
 from .near_client import near_request_headers
-from .near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS, NearTeeCall, NearTeeDenied
+from .near_tee import NEAR_TEE_BILLING_LOOKUP_SECONDS, NearTeeCall, NearTeeDenied
 
 
 VISION_RUNTIME_PATH = "screenshot_image_analysis"
@@ -218,8 +218,8 @@ async def prepare_near_tee_vision_call(
         body["response_format"] = _response_format(response_schema)
     if len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()) > NEAR_TEE_VISION_REQUEST_CAP:
         raise NearTeeDenied("near_tee_vision_request_too_large")
-    # The billing window is reserved out of the original deadline.
-    context_timeout = float(slot.timeout_seconds) + NEAR_TEE_BILLING_RESERVE_SECONDS
+    # Room for the best-effort billing lookup after the request (#1284).
+    context_timeout = float(slot.timeout_seconds) + NEAR_TEE_BILLING_LOOKUP_SECONDS
     context = build_canonical_inference_context(VISION_RUNTIME_PATH, payload=body,
         output_tokens=slot.max_output_tokens, timeout_seconds=context_timeout)
     # Replace the byte-length proxy (which would count base64 as text) with
@@ -230,8 +230,7 @@ async def prepare_near_tee_vision_call(
             or context.allowed_profile_ids != (profile.id,):
         raise _denied("near_tee_route_invalid", context)
     checked = time.time() if now is None else now
-    inference_timeout = min(float(slot.timeout_seconds),
-        context.deadline_at - checked - NEAR_TEE_BILLING_RESERVE_SECONDS)
+    inference_timeout = min(float(slot.timeout_seconds), context.deadline_at - checked)
     if inference_timeout < 1:
         raise _denied("near_tee_deadline_insufficient", context)
     try:
@@ -264,7 +263,7 @@ async def prepare_near_tee_vision_call(
         raise denied
     headers = near_request_headers(key=key, no_aliasing=True, json_body=True)
     call = NearTeeCall(context=context, decision=decision, proof_hashes=decision.proof_hashes, body=body,
-        key=key, slot_name="vision", request_cost_bound_microusd=slot.request_cost_bound_microusd,
+        key=key, slot_name="vision",
         inference_timeout_seconds=inference_timeout, headers=headers)
     return call, structured
 

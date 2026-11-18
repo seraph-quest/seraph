@@ -1199,9 +1199,11 @@ async def read_captured_terminal_output(db, owner, action, *, adapter):
     for row in rows:
         entry = entry_for(row)
         if entry and entry["group"]["group_id"] == reservation.proposal_group.group_id:
-            if row.state not in {"settled", "released"} or (row.state == "settled" and (
-                type(row.actual_cost_microusd) is not int or not 0 <= row.actual_cost_microusd <= row.bound_microusd)):
-                raise BoardError("channel_output_accounting_unresolved", "Original inference liability must settle", status_code=409)
+            # The call must have finished; its charge (priced, not priced yet
+            # or of any size) never withholds the output (ADR-037, #1284).
+            if row.state not in {"settled", "unknown", "released"} or (row.state == "settled" and (
+                type(row.actual_cost_microusd) is not int or row.actual_cost_microusd < 0)):
+                raise BoardError("channel_output_accounting_unresolved", "Original inference call must finish", status_code=409)
     envelope = await verify_readonly_native_projection(db, owner, parent, task, attempt, manifest)
     plan = current_plan(manifest, envelope)
     step_ids = [step.step_id for step in plan.steps]

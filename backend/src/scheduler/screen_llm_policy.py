@@ -38,8 +38,6 @@ async def _profile_ready(runtime_path: str, profile_id: str) -> tuple[bool, str]
         return False, "model_fabric_profile_missing"
     if reason := active_provider_exclusion_reason(profile):
         return False, f"model_fabric_profile_{reason}"
-    if profile.cost_microusd is None or not profile.cost_source or profile.cost_source_updated_at is None:
-        return False, "model_fabric_cost_bound_missing"
     candidate = candidate_from_profile(profile)
     spec = canonical_route_spec(runtime_path)
     required = {capability.value for capability in spec.capabilities}
@@ -148,7 +146,6 @@ async def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDeci
         or not policy.cloud_egress_acknowledged
         or set(policy.allowed_provider_kinds) != {"openrouter"}
         or policy.fallback_allowed
-        or policy.max_cost_microusd is None
     ):
         return ScreenDerivedLlmDecision(
             allowed=False,
@@ -191,7 +188,7 @@ async def _near_tee_decision(runtime_path: str, policy) -> ScreenDerivedLlmDecis
             runtime_profile=profile_id)
 
     if (slot is None or policy.egress_class is not EgressClass.CLOUD_ALLOWED_FULL
-            or not policy.cloud_egress_acknowledged or policy.fallback_allowed or policy.max_cost_microusd is None):
+            or not policy.cloud_egress_acknowledged or policy.fallback_allowed):
         return blocked("near_tee_cloud_policy_missing")
     if reason := near_tee_slot_block_reason(read_model_fabric_configuration(), slot):
         return blocked(reason)

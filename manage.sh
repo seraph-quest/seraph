@@ -34,7 +34,6 @@
 #   ./manage.sh -e prod backup          - Create a verified workspace archive.
 #   ./manage.sh -e prod accounting-reconcile --confirm - Repair a retained accounting commit checkpoint.
 #   ./manage.sh -e prod accounting-reconcile --policy --confirm - Recover provider policy revoked.
-#   ./manage.sh -e prod accounting-reconcile --period YYYY-MM --expected-revision N --confirm - Review exact current UTC month.
 #   ./manage.sh -e prod accounting-rebind --from-root /prior/root --confirm - Retain deployment accounting before root adoption.
 #   ./manage.sh -e prod restore --archive <archive> --confirm
 #   ./manage.sh -e prod status          - Show the durable lifecycle result.
@@ -725,7 +724,7 @@ function print_local_accounting_binding_hint() {
     receipt="$(cat)"
     reason="$(printf '%s' "$receipt" | sed -n 's/.*"accounting_continuity_reason_code": "\([a-z_]*\)".*/\1/p')"
     if [ "$reason" = "accounting_deployment_binding_unavailable" ]; then
-        echo "Accounting continuity blocked (accounting_deployment_binding_unavailable): the deployment descriptor is bound to a different workspace root than $LOCAL_WORKSPACE_DIR; billable inference stays blocked." >&2
+        echo "Accounting continuity blocked (accounting_deployment_binding_unavailable): the deployment descriptor is bound to a different workspace root than $LOCAL_WORKSPACE_DIR; inference stays off until you rebind and give your OK again, so a revoked consent cannot come back with a moved or restored workspace." >&2
         echo "  Fix: if the workspace root moved, run '$PROG_NAME -e $ENV local down', then '$(local_accounting_rebind_command)', then '$PROG_NAME -e $ENV local up' and re-consent to provider policy in Settings." >&2
     fi
 }
@@ -753,14 +752,14 @@ function local_workspace_lifecycle() {
     if [ "$lifecycle_command" = "identity" ]; then
         printf '%s' "$receipt" | print_local_accounting_binding_hint
     elif [ "$lifecycle_command" = "accounting-rebind" ] && [ "$status" -eq 0 ]; then
-        echo "Accounting rebound: the ledger and unresolved liabilities were retained and provider policy was revoked. Start with '$PROG_NAME -e $ENV local up', then re-consent to provider policy in Settings before billable inference." >&2
+        echo "Accounting rebound: spend history was retained and provider policy was revoked. Start with '$PROG_NAME -e $ENV local up', then give your OK again in Settings before any inference." >&2
     fi
     return "$status"
 }
 
 function check_local_accounting_binding() {
-    # Boot-time hint only: startup continues either way and billable inference
-    # stays blocked by the backend's own continuity check.
+    # Boot-time hint only: startup continues either way and inference stays
+    # off (a consent fence) by the backend's own continuity check.
     local receipt
     receipt="$(local_workspace_cli identity 2>/dev/null)" || return 0
     printf '%s' "$receipt" | print_local_accounting_binding_hint
@@ -784,7 +783,7 @@ function start_local_backend() {
     mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
     PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -B -c \
         'import sys; from pathlib import Path; from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory; prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(sys.argv[1]).resolve()))' \
-        "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; billable inference remains blocked." >&2
+        "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; inference stays off until the workspace binding is restored." >&2
     check_local_accounting_binding
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '

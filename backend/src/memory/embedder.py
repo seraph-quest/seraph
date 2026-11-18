@@ -246,12 +246,6 @@ def _validate_route_policy(*, batch_size: int, model: str) -> None:
             batch_size=batch_size,
             model=model,
         )
-    if getattr(policy, "max_cost_microusd", None) is None:
-        _raise_configuration(
-            "embedding_cost_ceiling_required",
-            batch_size=batch_size,
-            model=model,
-        )
     allowed_provider_kinds = tuple(getattr(policy, "allowed_provider_kinds", ()) or ())
     if set(allowed_provider_kinds) != {"openrouter"}:
         _raise_configuration(
@@ -1013,10 +1007,9 @@ def embed_batch_near_tee(
     """One bounded batch on the NEAR TEE embedding slot: (vectors, cost, space).
 
     Precontact denials raise ``EmbeddingConfigurationError`` with the stable
-    slot reason; a settled failure (echo or dimension mismatch, overrun)
-    raises ``EmbeddingResponseError`` and adopts nothing; a contact without
-    authoritative cost raises ``near_tee_cost_liability`` (Unknown, lease
-    blocked until fenced settlement).
+    slot reason; a completed failure (echo or dimension mismatch) raises
+    ``EmbeddingResponseError`` and adopts nothing. A charge NEAR has not
+    reported never fails the batch (#1284).
     """
     from src.model_fabric.gpu_admission import GpuAdmissionError, GpuAdmissionUncertainError
     from src.model_fabric.near_tee import NearTeeDenied, NearTeeError
@@ -1038,9 +1031,8 @@ def embed_batch_near_tee(
         raise EmbeddingConfigurationError(exc.code, stage="route", request_id=request_id) from None
     except GpuAdmissionUncertainError as exc:
         cause = exc.__cause__
-        code = cause.code if isinstance(cause, NearTeeError) else "remote_inference_uncertain"
-        if code != "near_tee_cost_liability":
-            code = "remote_inference_uncertain"
+        del cause
+        code = "remote_inference_uncertain"
         _log_embedding_event("failed", details=_safe_details(stage="admission", reason_code=code,
             batch_size=len(texts), request_id=request_id))
         raise EmbeddingUnavailableError(code, stage="admission", request_id=request_id) from None

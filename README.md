@@ -76,8 +76,8 @@ Open the **[cockpit](http://127.0.0.1:3001)** or
 [API documentation](http://127.0.0.1:8004/docs). The core starts without a provider
 key. To turn chat on, open **Settings → Model**: the Model card at the top says
 whether chat works and shows the one control that fixes it (a NEAR API key, a
-monthly budget, a model, or your explicit OK that NEAR sees messages as plain
-text). Vision and embedding have separate controls under **Advanced and
+model, or your explicit OK that NEAR sees messages as plain text). Seraph sets
+no spending limit of its own: set limits in your NEAR account. Vision and embedding have separate controls under **Advanced and
 diagnostics** on the same tab.
 
 **Upgrade note:** chat now runs on the Cordis agent loop by default, so chat

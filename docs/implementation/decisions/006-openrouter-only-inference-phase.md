@@ -6,6 +6,8 @@ title: "ADR-006: OpenRouter-only inference phase"
 
 **Status:** Accepted for Epic #736 target; effective on merge to `develop`. Superseded by [ADR-035](./035-near-tee-hosted-inference-only.md) for new inference; retained for historical/liability readers (existing OpenRouter configuration, receipts and liability reconciliation). Its accounting continuity (#909), admission and dispatch-gate principles remain in force.
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Decision class:** Superseding phase target
 
 ## Context
@@ -34,6 +36,10 @@ The server validates the fixed `https://openrouter.ai/api/v1` destination,
 keeps the API key in the trusted backend transport, and applies explicit
 upstream allowlisting, parameter requirements, fallback policy, data-collection
 policy, consent, and finite cost budgets before dispatch.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) the "finite cost budgets" clause no longer applies: Seraph
+applies no cost limit before dispatch, and spending limits live in the provider
+account.
 
 The Seraph core and canonical data remain host-local. CPU parsing, image/audio
 normalization, lexical indexing, tool sandboxes, authenticated APIs, and
@@ -69,6 +75,11 @@ change prospective admission; it retains all prior evidence and each new
 reservation binds that immutable revision. If prior ledger identity/high-water
 evidence is absent, stale, or cannot be reconciled, paid egress remains blocked
 pending bounded reconciliation; initializing a fresh ledger is not recovery.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the ceiling clauses of this section. No ceiling revision
+gates admission and a ledger account is created without an amount. The ledger
+keeps request records and spend history; the deployment binding and the
+provider-policy record stay as a consent fence.
 
 A truly empty new deployment may initialize its accounting identity once,
 under the existing managed workspace ownership fence, with an explicitly
@@ -125,6 +136,12 @@ and unrelated settings revisions. Only an explicit adequate reserve-field
 review covering the exact settled operation sequence/revision clears that
 operation's review state; it cannot cover a later-settled unknown liability.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the period, reserve and overrun clauses above. A new
+UTC month needs no acknowledgment, a charge above any former reserve blocks
+nothing, and an unpriced request does not reduce capacity or hold the lane. The
+month stamp on each row only groups spend for display. Ledger continuity
+mismatches stop blocking inference in the second #1284 pull request.
+
 Vision, audio, and embeddings are capability-selected. A required capability
 is blocked with a visible reason until its exact model, request shape, policy,
 and live route have been verified. There is no silent local or direct-vendor
@@ -159,6 +176,8 @@ an application/configuration release must not silently re-enable one.
 - Provider outage, invalid credentials, unsupported capability, consent
   revocation, rate limiting, and budget exhaustion degrade or block inference
   while the local core remains usable.
+
+  **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Budget exhaustion is no longer a cause ([ADR-037](./037-no-local-cost-limits.md)).
 - Screenshots and audio have separate local-capture and cloud-egress consent;
   a provider change does not upload historical backlog.
 - OpenRouter upstream identity, retention, and usage are recorded as returned

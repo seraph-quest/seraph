@@ -27,6 +27,7 @@ const sidebars: SidebarsConfig = {
             'decisions/repository-crash-recovery-evidence',
             'decisions/near-tee-hosted-inference-only',
             'decisions/dsh-style-plugin-structure',
+            'decisions/no-local-cost-limits',
           ],
         },
         'docs-contract',

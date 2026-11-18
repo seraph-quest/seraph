@@ -26,7 +26,7 @@ self-improvement from ordinary task traces, corrections, and skills remains a
 product capability, independent of cancelled #771. Preserve historical receipts
 and label their limits; historical language cannot restore cancelled work or
 authorize calls. Product inference for ordinary approved tasks keeps its normal
-consent, grant, routing, and budget requirements.
+consent, grant, and routing requirements (no Seraph-side cost limit, ADR-037).
 
 ## Ownership
 

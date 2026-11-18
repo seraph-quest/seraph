@@ -1,4 +1,8 @@
-"""Canonical prefunded calls cannot evade a later overrun at contact."""
+"""Canonical prefunded calls cannot evade a later policy change at contact.
+
+#1284: contact no longer denies for an amount; a provider policy revision
+change between reservation and contact is the durable denial exercised here.
+"""
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
@@ -14,14 +18,22 @@ from src.workspace.production import ProductionWorkspace, read_lifecycle_receipt
 # ADR-035: pins historical OpenRouter broker, ledger and settlement mechanics that still settle retained liabilities
 pytestmark = pytest.mark.openrouter_legacy
 
+DENIAL = "provider_policy_revision_changed"
+
+
+def change_policy(configuration):
+    from dataclasses import replace
+    from src.model_fabric.configuration import write_model_fabric_configuration
+    write_model_fabric_configuration(replace(configuration, egress_revision=configuration.egress_revision + 1))
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["async", "sync", "stream"])
 async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_recovery(accounting_db, monkeypatch, mode):
     root, engine, factory = accounting_db
-    setup_configuration()
+    configuration = setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     # Both handles come from the actual canonical broker admission/reservation,
     # before the first settlement. No admission or accounting fixture receipts.
@@ -29,6 +41,7 @@ async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_reco
     sibling = await broker._prepare_accounting(request("prefunded-sibling"))
     await broker._contact_accounting(first)
     await broker._finish_accounting(first, payload={"usage": {"cost": "0.000150"}})
+    change_policy(configuration)
     calls = []
     prepare = broker._prepare_accounting
     async def held_handle(value):
@@ -43,7 +56,7 @@ async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_reco
     async def stream():
         calls.append("forbidden")
         yield {"usage": {"cost": "0.000001"}}
-    with pytest.raises(InferenceAccountingError, match="provider_charge_exceeded_reservation"):
+    with pytest.raises(InferenceAccountingError, match=DENIAL):
         if mode == "sync":
             await asyncio.to_thread(broker.execute_sync, sibling.request, lambda: calls.append("forbidden"))
         elif mode == "stream":
@@ -57,14 +70,13 @@ async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_reco
     await engine.dispose()
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
-    assert snapshot["committed_microusd"] == 150
-    assert snapshot["reserved_microusd"] == 100
+    assert snapshot["spent_microusd"] == 150
     row = next(item for item in snapshot["operations"] if item["operation_id"] == "prefunded-sibling")
     assert row["state"] == "reserved" and row["contact_started_at"] is None
     assert row["recovery_reason"] == "provider_contact_denied"
-    assert row["bound_microusd"] == 100 and row["payload_digest"] == sibling.request.data_digest
+    assert row["bound_microusd"] == 0 and row["payload_digest"] == sibling.request.data_digest
     denial = next(item for item in json.loads(row["evidence_json"]) if item["kind"] == "provider_contact_denied")
-    assert denial["reason"] == "provider_charge_exceeded_reservation"
+    assert denial["reason"] == DENIAL
     assert any(item.get("kind") == "provider_contact_denial_quiesced" for item in json.loads(row["evidence_json"]))
     assert read_lifecycle_receipt(ProductionWorkspace(host_root=root))["inference_accounting"]["revision"] == snapshot["revision"]
     assert (await repository.get_job(sibling.job_id))["status"] == "blocked"
@@ -77,7 +89,7 @@ async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_reco
     assert recovered == [{"job_id": sibling.job_id, "operation_id": "prefunded-sibling", "status": "blocked", "reason": "provider_contact_denied"}]
     after = await repository.inference_accounting_snapshot()
     assert after["accounting_continuity_verified"] is True
-    assert after["reserved_microusd"] == 100 and after["committed_microusd"] == 150
+    assert after["spent_microusd"] == 150
     assert next(item for item in after["operations"] if item["operation_id"] == "prefunded-sibling") == row
 
 
@@ -85,7 +97,7 @@ async def test_prefunded_ordinary_broker_denial_survives_finally_reopen_and_reco
 async def test_normal_contact_still_settles_under_current_policy(accounting_db):
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     calls = []
     async def callback():
         calls.append("contact")
@@ -94,7 +106,8 @@ async def test_normal_contact_still_settles_under_current_policy(accounting_db):
     snapshot = await repository.inference_accounting_snapshot()
     assert calls == ["contact"]
     assert snapshot["accounting_continuity_verified"] is True
-    assert snapshot["committed_microusd"] == 2 and snapshot["reserved_microusd"] == 0
+    assert snapshot["spent_microusd"] == 2
+    assert [row["state"] for row in snapshot["operations"]] == ["settled"]
 
 
 @pytest.mark.asyncio
@@ -104,7 +117,7 @@ async def test_contacted_or_forged_denial_preserves_unknown_lane_and_debt(accoun
     from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
     async def callback():
@@ -117,20 +130,25 @@ async def test_contacted_or_forged_denial_preserves_unknown_lane_and_debt(accoun
     assert calls == ["actual callback started"]
     row = snapshot["operations"][0]
     assert row["state"] == "unknown" and row["contact_started_at"] is not None
-    assert snapshot["unknown_microusd"] == 100
-    assert broker._active_operation_id == "forged-denial"
+    assert snapshot["unpriced_requests"] == 1
+    # #1284: the returned callback's uncertain outcome frees the lane; the
+    # caller still adopts nothing and the row stays an unpriced contact.
+    assert broker._active_operation_id is None
 
 
 async def prepare_denied_broker(repository, monkeypatch, *, seconds=120, run_broker=True):
     from dataclasses import replace
-    setup_configuration()
-    await repository.configure_inference_accounting(1000)
+    configuration = setup_configuration()
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     first = await broker._prepare_accounting(request("first-slot"))
-    pending = replace(request("held-slot"), deadline_at=__import__("time").time()+seconds)
-    sibling = await broker._prepare_accounting(pending)
     await broker._contact_accounting(first)
     await broker._finish_accounting(first, payload={"usage": {"cost": "0.000150"}})
+    # The short expiry deadline starts only now, so the denial (not the
+    # deadline) decides the held sibling's contact.
+    pending = replace(request("held-slot"), deadline_at=__import__("time").time()+seconds)
+    sibling = await broker._prepare_accounting(pending)
+    change_policy(configuration)
     calls = []
     if run_broker:
         async def prepare(_value):
@@ -138,10 +156,10 @@ async def prepare_denied_broker(repository, monkeypatch, *, seconds=120, run_bro
         async def forbidden():
             calls.append("forbidden")
         monkeypatch.setattr(broker, "_prepare_accounting", prepare)
-        with pytest.raises(InferenceAccountingError, match="provider_charge_exceeded_reservation"):
+        with pytest.raises(InferenceAccountingError, match=DENIAL):
             await broker.execute(sibling.request, forbidden)
     else:
-        with pytest.raises(InferenceAccountingError, match="provider_charge_exceeded_reservation"):
+        with pytest.raises(InferenceAccountingError, match=DENIAL):
             await broker._contact_accounting(sibling)
     assert calls == []
     return broker, sibling
@@ -164,7 +182,8 @@ async def test_authorized_quiescent_never_contacted_hold_release_survives_reopen
     await engine.dispose()
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
-    assert snapshot["reserved_microusd"] == 0 and snapshot["committed_microusd"] == 150
+    assert snapshot["spent_microusd"] == 150
+    assert next(row for row in snapshot["operations"] if row["operation_id"] == "held-slot")["state"] == "released"
 
 
 @pytest.mark.asyncio
@@ -183,7 +202,8 @@ async def test_denied_hold_release_requires_actual_closed_authority_and_quiescen
     assert row["state"] == "reserved" and row["contact_started_at"] is None
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
-    assert snapshot["reserved_microusd"] == 100 and snapshot["committed_microusd"] == 150
+    assert snapshot["spent_microusd"] == 150
+    assert next(row for row in snapshot["operations"] if row["operation_id"] == "held-slot")["state"] == "reserved"
 
 
 @pytest.mark.asyncio

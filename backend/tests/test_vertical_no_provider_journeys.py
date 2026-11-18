@@ -101,7 +101,7 @@ async def assert_no_orphans_or_accounting(sessions, jobs=None):
     assert open_attempts == [] and reservations == []
     snapshot = await (jobs or DurableJobRepository()).inference_accounting_snapshot()
     assert snapshot["operations"] == []
-    assert snapshot.get("unknown_microusd", 0) in (0, None)
+    assert snapshot.get("unpriced_requests", 0) in (0, None)
     return runs
 
 

@@ -104,7 +104,7 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
             status="ready",
         )
     )
-    await DurableJobRepository().configure_inference_accounting(25_000)
+    await DurableJobRepository().ensure_inference_ledger()
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     use_inference_broker(monkeypatch, broker)
@@ -428,7 +428,7 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
     assert result["completed"] is True
     assert [method for method, _url in provider_requests] == (["POST", "GET", "POST", "GET", "GET"] if crash_before_contact else ["POST", "GET", "GET"])
     assert len(model_calls) == 1
-    assert (await DurableJobRepository().inference_accounting_snapshot())["committed_microusd"] == 11
+    assert (await DurableJobRepository().inference_accounting_snapshot())["spent_microusd"] == 11
 
     async with async_db() as db:
         receipt = (

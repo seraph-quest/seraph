@@ -33,7 +33,7 @@ def test_billing_capture_requires_actual_near_callback():
 async def test_near_evidence_cannot_settle_openrouter_row(accounting_db, unsealed):
     setup_configuration()
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+    await jobs.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
     async def actual_callback():
@@ -47,7 +47,7 @@ async def test_near_evidence_cannot_settle_openrouter_row(accounting_db, unseale
     after = await jobs.inference_accounting_snapshot()
     assert after["ledger_digest"] == before["ledger_digest"]
     assert after["revision"] == before["revision"]
-    assert after["committed_microusd"] == 7
+    assert after["spent_microusd"] == 7
     assert after["operations"][0]["provider_operation_id"] == "gen-original"
     assert calls == [1]
 
@@ -63,7 +63,7 @@ async def test_active_near_policy_cannot_create_ephemeral_inference(accounting_d
         enabled=True, spend_ceiling_microusd=25000, request_cost_bound_microusd=1000,
         plaintext_egress_consent_revision=1)))
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(25000)
+    await jobs.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     near = replace(request("unlinked-near"), runtime_path="near_text_native")
     bind_accounting_profile(near.operation_id, "near.text")

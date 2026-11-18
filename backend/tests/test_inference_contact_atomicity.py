@@ -1,7 +1,6 @@
 """Actual SQLite writer ordering and contact-time authority changes."""
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,24 +16,22 @@ from src.workspace.production import ProductionWorkspace, read_accounting_checkp
 pytestmark = pytest.mark.openrouter_legacy
 
 
+def change_policy(configuration):
+    from dataclasses import replace
+    from src.model_fabric.configuration import write_model_fabric_configuration
+    write_model_fabric_configuration(replace(configuration, egress_revision=configuration.egress_revision+1))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["policy", "period"])
-async def test_prefunded_contact_rechecks_actual_current_policy_and_period(accounting_db, monkeypatch, change):
+async def test_prefunded_contact_rechecks_actual_current_policy(accounting_db, monkeypatch):
+    # #1284: the month (period) half is gone; a new month never denies contact.
     configuration = setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     handle = await broker._prepare_accounting(request("current-authority"))
-    if change == "policy":
-        from dataclasses import replace
-        from src.model_fabric.configuration import write_model_fabric_configuration
-        write_model_fabric_configuration(replace(configuration,
-            egress_revision=configuration.egress_revision+1,
-            openrouter_setup=replace(configuration.openrouter_setup, request_cost_bound_microusd=101)))
-        expected = "provider_policy_revision_changed"
-    else:
-        await repository.inference_accounting_snapshot(now=datetime.now(timezone.utc)+timedelta(days=70))
-        expected = "accounting_clock_correction_required"
+    change_policy(configuration)
+    expected = "provider_policy_revision_changed"
     async def held(_request):
         return handle
     monkeypatch.setattr(broker, "_prepare_accounting", held)
@@ -49,16 +46,18 @@ async def test_prefunded_contact_rechecks_actual_current_policy_and_period(accou
     row = snapshot["operations"][0]
     assert snapshot["accounting_continuity_verified"] is True
     assert row["state"] == "reserved" and row["contact_started_at"] is None
-    assert row["bound_microusd"] == 100
+    assert row["bound_microusd"] == 0
     assert any(item.get("kind") == "provider_contact_denied" and item["reason"] == expected
         for item in json.loads(row["evidence_json"]))
 
 
 @pytest.mark.asyncio
 async def test_settlement_writer_barrier_precedes_prefunded_sibling_contact(accounting_db, monkeypatch):
+    # #1284: the large settled charge no longer denies the sibling; it still
+    # contacts only after the settlement transaction commits.
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     first = await broker._prepare_accounting(request("writer-first"))
     sibling = await broker._prepare_accounting(request("writer-sibling"))
@@ -92,29 +91,30 @@ async def test_settlement_writer_barrier_precedes_prefunded_sibling_contact(acco
                              what="second writer must wait for actual settlement transaction")
         release.set()
         await asyncio.wait_for(settle, 5)
-        with pytest.raises(InferenceProviderContactDenied, match="provider_charge_exceeded_reservation"):
-            await asyncio.wait_for(contact, 5)
+        await asyncio.wait_for(contact, 5)
     finally:
         release.set()
         await asyncio.gather(settle, *([contact] if contact is not None else []), return_exceptions=True)
         event.remove(accounting_db[1].sync_engine, "before_cursor_execute", observe)
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
-    assert snapshot["committed_microusd"] == 150 and snapshot["reserved_microusd"] == 100
-    assert next(row for row in snapshot["operations"] if row["operation_id"] == "writer-sibling")["contact_started_at"] is None
+    assert snapshot["spent_microusd"] == 150
+    sibling_row = next(row for row in snapshot["operations"] if row["operation_id"] == "writer-sibling")
+    assert sibling_row["state"] == "contact_started" and sibling_row["contact_started_at"] is not None
 
 
 @pytest.mark.asyncio
 async def test_denial_witness_commit_failure_cannot_issue_completion_authority(accounting_db, monkeypatch):
     root, engine, _factory = accounting_db
-    setup_configuration()
+    configuration = setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     first = await broker._prepare_accounting(request("crash-first"))
     sibling = await broker._prepare_accounting(request("crash-sibling"))
     await broker._contact_accounting(first)
     await broker._finish_accounting(first, payload={"usage":{"cost":"0.000150"}})
+    change_policy(configuration)
     original = AsyncSession.commit
     fail_once = True
     async def fail_commit(db):
@@ -130,6 +130,6 @@ async def test_denial_witness_commit_failure_cannot_issue_completion_authority(a
     assert fail_once is False and sibling.committed_denial is None and sibling.contacted is False
     await engine.dispose()
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["status"] == "blocked" and snapshot["reason_code"] == "accounting_continuity_unavailable"
+    assert snapshot["status"] == "unavailable" and snapshot["reason_code"] == "accounting_continuity_unavailable"
     with pytest.raises(InferenceAccountingError, match="continuity_unavailable"):
         await repository.settle_inference_cost(sibling.request.operation_id, reason="cancelled_before_contact")

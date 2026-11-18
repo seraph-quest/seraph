@@ -102,7 +102,7 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
             status="ready",
         )
     )
-    await DurableJobRepository().configure_inference_accounting(25_000)
+    await DurableJobRepository().ensure_inference_ledger()
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     use_inference_broker(monkeypatch, broker)

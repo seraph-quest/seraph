@@ -172,8 +172,9 @@ def test_catalog_check_embedding_modality_cost_and_dimension():
     facts = parse_catalog_record(json.dumps(embedding_catalog()).encode(), model_id=EMBED_MODEL)
     # Input-only cost: 8192 x $0.01/M = 81.92 microUSD -> 82.
     assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True)) == (None, 82)
-    assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True, request_cost_bound_microusd=81))[0] \
-        == "near_tee_catalog_cost_bound_too_small"
+    # #1284: a legacy bound below the catalog price no longer refuses the model.
+    assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True, request_cost_bound_microusd=81)) \
+        == (None, 82)
     assert facts.embedding_dimension is None
     no_output_price = embedding_catalog()
     del no_output_price["outputCostPerToken"]
@@ -253,7 +254,7 @@ def test_reindex_batches_run_below_chat_priority():
 
 async def _configure(client, **slot_changes):
     lane = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
-        "inference_lane": {"spend_ceiling_microusd": 1_000_000}})
+        "inference_lane": {}})
     assert lane.status_code == 200, lane.text
     saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3,
         "near_tee": {"api_key": PROVIDER_KEY, "slots": {"embedding": embedding_slot_payload(**slot_changes)}}})
@@ -344,7 +345,7 @@ async def test_capability_check_measures_dimension_and_dispatch_is_bound(client,
         keyless_openrouter, monkeypatch, isolated_broker, evidence_recorded):
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.memory.embedder import (
-        EmbeddingConfigurationError, EmbeddingResponseError, EmbeddingUnavailableError, embed_batch_near_tee,
+        EmbeddingConfigurationError, EmbeddingResponseError, embed_batch_near_tee,
         embedding_metadata,
     )
     from src.workflows.job_runtime import durable_job_repository
@@ -392,20 +393,22 @@ async def test_capability_check_measures_dimension_and_dispatch_is_bound(client,
             await asyncio.to_thread(embed_batch_near_tee, ["delta"], principal=operator.principal)
         near.dimension = DIMENSION
         snapshot = await durable_job_repository.inference_accounting_snapshot()
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
         assert isolated_broker._active_operation_id is None
 
-        # Missing billing: Unknown liability, serial lease stays blocked.
+        # #1284: missing billing is "not priced yet": vectors are delivered,
+        # the row is unknown and the serial lease is free.
         near.billing_missing = True
-        with pytest.raises(EmbeddingUnavailableError) as unknown:
-            await asyncio.to_thread(embed_batch_near_tee, ["epsilon"], principal=operator.principal)
-        assert unknown.value.reason_code == "near_tee_cost_liability"
+        vectors, cost, _used = await asyncio.to_thread(embed_batch_near_tee, ["epsilon"],
+            principal=operator.principal)
+        assert cost is None and len(vectors) == 1 and len(vectors[0]) == DIMENSION
         snapshot = await durable_job_repository.inference_accounting_snapshot()
         (row,) = [item for item in snapshot["operations"] if item["state"] == "unknown"]
-        assert row["profile_id"] == "near_tee.embedding"
+        assert row["profile_id"] == "near_tee.embedding" and snapshot["unpriced_requests"] == 1
         receipt = isolated_broker.receipt_for(row["operation_id"])
-        assert receipt.status == "blocked" and receipt.reconciliation_required
-        assert receipt.active_operation_id == row["operation_id"]
+        assert receipt.status != "blocked" and not receipt.reconciliation_required
+        assert isolated_broker._active_operation_id is None
+        near.billing_missing = False
     finally:
         reset_runtime_context(tokens)
     # Zero OpenRouter contact: the fixture refuses every other host.
@@ -427,7 +430,9 @@ async def test_response_without_billing_identity_is_unknown(client, model_fabric
         assert raised.value.reason_code == "remote_inference_uncertain"
     finally:
         reset_runtime_context(tokens)
-    assert isolated_broker._active_operation_id is not None  # lease held until fenced settlement
+    # #1284: the callback returned with an uncertain outcome: nothing is
+    # adopted, but the lane is freed immediately (no fenced settlement needed).
+    assert isolated_broker._active_operation_id is None
 
 
 @pytest.mark.asyncio
@@ -479,7 +484,7 @@ async def _run_to_end(client, **kwargs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_reindex_is_consented_budgeted_batched_resumable_and_idempotent(client, model_fabric_workspace,
+async def test_reindex_is_consented_batched_resumable_and_idempotent(client, model_fabric_workspace,
         keyless_openrouter, monkeypatch, isolated_broker, evidence_recorded):
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.memory.vector_store import search_with_status
@@ -487,19 +492,17 @@ async def test_reindex_is_consented_budgeted_batched_resumable_and_idempotent(cl
 
     near, operator = await _ready(client, monkeypatch)
     ids = await _seed_memories(5)
-    # Explicit consent and a budget that covers at least one request reserve.
+    # Explicit consent and the current policy revision (#1284: no budget gate).
     assert (await _start(client, budget=20000, acknowledged=False)).status_code == 403
-    assert (await _start(client, budget=4999)).status_code == 422
-    assert (await _start(client, budget=2_000_000)).status_code == 422
     assert (await _start(client, budget=20000, revision=4)).status_code == 409
     assert _inference_requests(near)[6:] == []
 
-    # Budget 6500 with a 5000 reserve and 1000 actual per batch: two batches, then stop.
+    # max_items 4 with a batch size of 2: two batches, then the run stops incomplete.
     before = len(near.requests)
-    stopped = await _run_to_end(client, budget=6500)
+    stopped = await _run_to_end(client, budget=6500, max_items=4)
     job = stopped["job"]
-    assert job["status"] == "blocked" and job["reason_code"] == "near_tee_reindex_budget_exhausted", job
-    assert job["indexed_items"] == 4 and job["batches"] == 2 and job["spent_microusd"] == 2000
+    assert job["status"] == "succeeded" and job["indexed_items"] == 4 and job["batches"] == 2, job
+    assert stopped["index_reason_code"] == "near_tee_reindex_items_remaining"
     assert stopped["recall_mode"] == "lexical" and stopped["index_complete"] is False
     embedding_posts = [request for request in near.requests[before:] if request.url.raw_path.decode() == "/v1/embeddings"]
     assert [len(json.loads(request.content)["input"]) for request in embedding_posts] == [2, 2]
@@ -549,13 +552,13 @@ async def test_reindex_is_consented_budgeted_batched_resumable_and_idempotent(cl
     assert set(await asyncio.to_thread(namespace_row_texts, metadata)) == set(ids[1:])
     assert len(near.requests) == before
     snapshot = await durable_job_repository.inference_accounting_snapshot()
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 0
     assert {request.url.host for request in near.requests} == {"cloud-api.near.ai"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_reindex_cancel_and_unknown_stop_the_run(client, model_fabric_workspace, keyless_openrouter,
+async def test_reindex_cancel_stops_and_unpriced_billing_completes_the_run(client, model_fabric_workspace, keyless_openrouter,
         monkeypatch, isolated_broker, evidence_recorded):
     from src.memory import near_embedding_reindex as reindex
 
@@ -582,13 +585,13 @@ async def test_reindex_cancel_and_unknown_stop_the_run(client, model_fabric_work
     assert len(near.requests) == before
     monkeypatch.setattr(reindex, "canonical_memory_items", original)
 
-    # Unknown billing stops the run as a cost liability with the lease blocked.
+    # #1284: unpriced billing never stops the run; vectors are adopted, the
+    # rows are unknown ("not priced yet") and the lane is free.
     near.billing_missing = True
-    stopped = await _run_to_end(client, budget=20000)
-    assert stopped["job"]["status"] == "cost_liability", stopped["job"]
-    assert stopped["job"]["reason_code"] == "near_tee_cost_liability"
-    assert stopped["recall_mode"] == "lexical"
-    assert isolated_broker._active_operation_id is not None
+    finished = await _run_to_end(client, budget=20000)
+    assert finished["job"]["status"] == "succeeded", finished["job"]
+    assert finished["index_complete"] is True and finished["recall_mode"] == "semantic"
+    assert isolated_broker._active_operation_id is None
 
 
 @pytest.mark.asyncio

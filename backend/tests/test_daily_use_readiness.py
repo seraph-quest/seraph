@@ -222,19 +222,6 @@ def test_expired_proof_yields_specific_rejection_and_recovery_message():
     ("near_tee_slot_disabled", "Chat is off: no chat model is turned on. Pick one in Settings → Model. Nothing was sent.", "choose_model"),
     ("near_tee_catalog_receipt_stale", "Chat needs one quick test first. Nothing was sent.", "run_chat_test"),
     ("near_tee_catalog_receipt_missing", "Chat needs one quick test first. Nothing was sent.", "run_chat_test"),
-    ("inference_lane_required", "Chat is off: set a monthly budget in Settings → Model first. Nothing was sent.", "set_budget"),
-    ("near_tee_request_reserve_exceeds_lane_ceiling",
-     "Chat is off: the monthly budget is smaller than one request's limit. Raise it in Settings → Model. Nothing was sent.",
-     "set_budget"),
-    ("accounting_period_review_required",
-     "Chat is paused: a new month started. Your monthly budget starts again once you press Start the new month in "
-     "Settings → Model. Nothing was sent.",
-     "review_period"),
-    ("accounting_clock_correction_required",
-     "Chat is paused: the computer's clock moved back. Confirm the month in Settings → Model; charges already counted "
-     "for later months stay counted. Nothing was sent.",
-     "review_clock_correction"),
-    ("deployment_cost_budget_exhausted", "Chat is paused: this month's budget is used up. Nothing was sent.", "raise_budget"),
     ("proof_missing:streaming", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
     ("proof_expired:tool_use", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
     ("something_new", "Chat is blocked. Nothing was sent.", "open_model_settings"),
@@ -283,17 +270,15 @@ async def test_current_chat_route_runs_the_real_readiness_path(db):
     assert chat_runtime_status_text(route) is None
 
 
-def test_near_chat_blocks_cover_missing_chat_checks_and_an_exhausted_budget():
+def test_near_chat_blocks_cover_missing_chat_checks():
     from src.runtime_plugins.agent_turns import _near_chat_blocks
 
-    def fabric(capabilities, remaining):
-        return {"near_tee": {"slots": {"text": {"chat_capabilities": capabilities, "request_cost_bound_microusd": 20_000}}},
-                "inference_accounting": {"remaining_microusd": remaining}}
+    def fabric(capabilities):
+        return {"near_tee": {"slots": {"text": {"chat_capabilities": capabilities}}}}
 
-    assert _near_chat_blocks(fabric({"streaming": "ready", "tool_use": "ready"}, 1_000_000)) == []
-    assert _near_chat_blocks(fabric({"streaming": "proof_missing:streaming", "tool_use": "ready"}, 1_000_000)) == [
+    assert _near_chat_blocks(fabric({"streaming": "ready", "tool_use": "ready"})) == []
+    assert _near_chat_blocks(fabric({"streaming": "proof_missing:streaming", "tool_use": "ready"})) == [
         "streaming:proof_missing:streaming"]
-    assert _near_chat_blocks(fabric({"streaming": "ready", "tool_use": "ready"}, 19_999)) == ["deployment_cost_budget_exhausted"]
     assert _near_chat_blocks({}) == ["near_tee_status_unavailable"]
 
 
@@ -414,13 +399,9 @@ def test_route_error_ignores_an_earlier_handled_denial_in_implicit_context():
         assert route_error_from(unrelated) is None
 
 
-def test_unreviewed_overrun_names_review_recovery_and_mid_turn_is_honest():
-    error = NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))
-    message, action = openrouter_route_block_recovery(openrouter_route_block_reason(error))
-    assert action == "review_cost_overrun"
-    assert "one request cost more than its limit" in message
-    assert "Accept and continue" in message and "up to the billed charge" in message
-    assert message.endswith("Nothing was sent.")
+def test_mid_turn_route_block_is_honest():
+    error = NoCompliantModelRouteError(("proof_expired:tool_use",))
+    assert openrouter_route_blocked_message(error).endswith("Nothing was sent.")
 
     mid_turn = openrouter_route_blocked_message(error, provider_contacted=True)
     assert "Nothing was sent" not in mid_turn
@@ -430,15 +411,14 @@ def test_unreviewed_overrun_names_review_recovery_and_mid_turn_is_honest():
     assert "Earlier steps of this turn had already called the model" in generic_mid_turn
 
 
-def test_accounting_overrun_denial_keeps_its_reason_on_the_route_error():
+def test_accounting_denial_keeps_its_reason_on_the_route_error():
     from src.llm_runtime import _route_denial_error
     from src.workflows.inference_accounting import InferenceAccountingError
 
-    accounting = InferenceAccountingError("provider_charge_exceeded_reservation")
+    accounting = InferenceAccountingError("accounting_continuity_unavailable")
     error = _route_denial_error([], accounting)
-    assert error.reason_codes == ("provider_charge_exceeded_reservation",)
+    assert error.reason_codes == ("accounting_continuity_unavailable",)
     assert error.__cause__ is accounting
-    assert openrouter_route_block_recovery(openrouter_route_block_reason(error))[1] == "review_cost_overrun"
     # Selector denials still win, and unrelated errors add no reason.
     assert _route_denial_error(["proof_missing:text"], accounting).reason_codes == ("proof_missing:text",)
     assert _route_denial_error([], RuntimeError("boom")).reason_codes == ()
@@ -496,32 +476,6 @@ async def test_real_direct_chat_stream_requests_what_the_default_text_route_admi
     assert "streaming" in context.requirements.capabilities
     decision = select_route(context, (candidate_from_profile(profile),), tuple(proofs.values()))
     assert decision.allowed, decision.rejections
-
-
-@pytest.mark.asyncio
-async def test_direct_chat_stream_reports_unreviewed_overrun_as_no_contact_block():
-    from src.agent import direct_chat
-    from src.workflows.inference_accounting import InferenceAccountingError
-
-    setup = _setup()
-
-    async def refused(**_kwargs):
-        raise InferenceAccountingError("provider_charge_exceeded_reservation")
-        yield  # pragma: no cover
-
-    with (
-        patch.object(direct_chat, "stream_completion_with_fallback", refused),
-        patch.object(direct_chat, "_uses_openrouter_profile", return_value=True),
-        patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=PRINCIPAL),
-        patch("src.model_fabric.caller_context.effective_workload_policy",
-              return_value=openrouter_policy_for_setup(setup, "chat_agent")),
-        patch("src.agent.session.session_manager.get_task_continuity_context", AsyncMock(return_value="")),
-        pytest.raises(NoCompliantModelRouteError) as raised,
-    ):
-        async for _delta in direct_chat.stream_direct_local_chat(
-                "hello there", runtime_path="chat_agent", is_onboarding=False, session_id=PRINCIPAL.session_id):
-            pass
-    assert raised.value.reason_codes == ("provider_charge_exceeded_reservation",)
 
 
 def test_real_agent_generate_tool_turn_is_admitted_by_the_default_text_route(monkeypatch):
@@ -609,30 +563,3 @@ def test_enabled_memory_consolidation_still_flushes(background_workspace):
         assert asyncio.run(flush.flush_session_memory("session-1", trigger="post_response")) is True
     consolidate.assert_awaited_once()
     flush._reset_memory_flush_state()
-
-
-def test_overrun_message_names_the_minimum_bound_and_reproving():
-    from src.agent.direct_chat import microusd_dollars
-
-    message, action = openrouter_route_block_recovery(
-        "provider_charge_exceeded_reservation", minimum_bound_microusd=612_340)
-    assert action == "review_cost_overrun"
-    assert "up to $0.61234 (the largest unreviewed charge)" in message
-    assert "Settings → Model" in message and "Accept and continue" in message
-    assert microusd_dollars(1_000_000) == "1" and microusd_dollars(50_000) == "0.05"
-
-
-@pytest.mark.asyncio
-async def test_overrun_minimum_is_read_only_for_overrun_blocks():
-    from src.agent.direct_chat import route_block_overrun_minimum
-    from src.workflows.job_runtime import durable_job_repository
-
-    snapshot = AsyncMock(return_value={"status": "blocked", "overrun_max_cost_microusd": 612_340})
-    with patch.object(durable_job_repository, "inference_accounting_snapshot", snapshot):
-        assert await route_block_overrun_minimum(
-            NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))) == 612_340
-        assert await route_block_overrun_minimum(NoCompliantModelRouteError(("proof_missing:text",))) is None
-    snapshot.assert_awaited_once()
-    with patch.object(durable_job_repository, "inference_accounting_snapshot", AsyncMock(side_effect=RuntimeError("x"))):
-        assert await route_block_overrun_minimum(
-            NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))) is None

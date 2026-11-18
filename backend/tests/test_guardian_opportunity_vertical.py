@@ -85,7 +85,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output")),
         profiles=(), policies=()), egress_revision=configured.egress_revision+1))
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     calls, source_calls = [], []
     controls = {"scenario": scenario}
     if scenario in {"completed", "paused_resume"}:

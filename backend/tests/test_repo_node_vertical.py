@@ -174,7 +174,7 @@ async def test_authenticated_node_work_vertical(client,async_db,tmp_path,monkeyp
     assert len(flow["transport_calls"])==1
     assert (await durable_job_repository.get_job(job_id))["status"]=="succeeded"
     accounting=await durable_job_repository.inference_accounting_snapshot()
-    assert accounting["committed_microusd"]==1,accounting
+    assert accounting["spent_microusd"]==1,accounting
     assert len(accounting["operations"])==1
     assert accounting["operations"][0]["state"]=="settled"
     from src.workspace.production import ProductionWorkspace,read_lifecycle_receipt

@@ -134,7 +134,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
             proven_value=values.get(capability, "verified"))
         assert (await model_fabric_repository.persist_capability_proof(proof)).persisted
     if configure_accounting:
-        await (jobs or DurableJobRepository()).configure_inference_accounting(ceiling_microusd)
+        await (jobs or DurableJobRepository()).ensure_inference_ledger()
     # Only the catalog read happened; no inference.
     assert [request.method for request in near.requests] == ["GET"]
     return near

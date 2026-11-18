@@ -23,7 +23,7 @@ pytestmark = pytest.mark.openrouter_legacy
 async def prepare_source(accounting_db):
     root, engine, _factory = accounting_db
     setup_configuration()
-    await DurableJobRepository().configure_inference_accounting(1000)
+    await DurableJobRepository().ensure_inference_ledger()
     calls = []
     async def charged():
         calls.append("settled")
@@ -114,7 +114,7 @@ async def test_existing_target_jobs_are_blocked_freshly_fenced_and_retry_is_exac
             await repository.record_checkpoint(job_id, checkpoint_id="stale-worker-write", state={"output": "must not adopt"},
                 owner="old-worker", fencing_token=prior["fencing_token"], expected_revision=prior["revision"])
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["status"] == "blocked" and snapshot["reason_code"] == "general_task_group_lookup_invalid", snapshot
+    assert snapshot["status"] == "unavailable" and snapshot["reason_code"] == "general_task_group_lookup_invalid", snapshot
     from src.db.engine import _ensure_inference_group_lookup
     async with engine.begin() as connection:
         await connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -124,8 +124,7 @@ async def test_existing_target_jobs_are_blocked_freshly_fenced_and_retry_is_exac
         await _ensure_inference_group_lookup(connection)
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["status"] == "ready", snapshot
-    assert snapshot["committed_microusd"] == 17 and snapshot["unknown_microusd"] == 100
-    assert snapshot["remaining_microusd"] == 883
+    assert snapshot["spent_microusd"] == 17 and snapshot["unpriced_requests"] == 1
     assert calls == ["settled", "unknown"]
     await engine.dispose()
 

@@ -86,7 +86,7 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=('text', 'structured_output')),
         profiles=(), policies=()), egress_revision=configured.egress_revision+1))
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     calls, source_calls, browser_calls = [], [], []
     original_client = httpx.AsyncClient
     def clients(**kwargs):
@@ -280,7 +280,7 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
             assert report.status_code == 200 and 'no_learning' in report.text, report.text
         assert source_calls == ['https://example.com/public']*2
         final_cost = await durable_job_repository.inference_accounting_snapshot()
-        assert final_cost['committed_microusd'] == staged_cost['committed_microusd']
+        assert final_cost['spent_microusd'] == staged_cost['spent_microusd']
         assert (root/'seraph.db').is_file()
 
 
@@ -314,7 +314,7 @@ async def test_actual_same_goal_three_watches_two_contacted_plan_cap(accounting_
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=('text', 'structured_output')),
         profiles=(), policies=()), egress_revision=configured.egress_revision+1))
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     logical_cadence = ContextVar('focused_assessment_contact_clock', default=False)
     original_now, original_limits = opportunities.now, opportunity_runtime._contact_limits
     cadence_seconds = 0

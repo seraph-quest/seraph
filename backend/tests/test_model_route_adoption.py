@@ -202,7 +202,7 @@ async def test_registered_agent_binds_tools_response_format_and_options_to_exact
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     setup_configuration(ceiling=1000, bound=100)
-    await DurableJobRepository().configure_inference_accounting(1000)
+    await DurableJobRepository().ensure_inference_ledger()
     use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(durable_accounting=True))
     from src.security.trust_contract import (
         canonical_digest,

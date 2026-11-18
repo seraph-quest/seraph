@@ -63,7 +63,7 @@ async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepa
                 replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
                 egress_revision=configured.egress_revision+1))
     jobs=DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+    await jobs.ensure_inference_ledger()
     from src.auth.service import create_session
     _private_token, operator = await create_session()
     now=datetime.now(timezone.utc)

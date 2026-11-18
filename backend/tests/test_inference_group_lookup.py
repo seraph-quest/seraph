@@ -228,7 +228,7 @@ async def test_real_canonical_writer_contact_unknown_settlement_and_snapshot_exc
     root, engine, factory = accounting_db
     setup_configuration()
     owner = DurableJobRepository()
-    await owner.configure_inference_accounting(1000)
+    await owner.ensure_inference_ledger()
     async def scripted_transport():
         return {"id":"gen-private-lookup", "usage":{"prompt_tokens":1}}
     await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("projection-unknown"), scripted_transport)
@@ -315,7 +315,7 @@ async def test_actual_retention_old_new_columns_preserves_financial_wire_and_blo
     root, engine, factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     async def unknown_transport():
         return {"id":"gen-retained", "usage":{"prompt_tokens":1}}
     await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("retention-private-projection"), unknown_transport)
@@ -387,7 +387,7 @@ async def test_actual_interrupted_checkpoint_replay_on_old_and_new_schema_keeps_
     root, engine, factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     workspace = ProductionWorkspace(host_root=root)
     original_commit = AsyncSession.commit
     interrupted = []
@@ -418,7 +418,7 @@ async def test_actual_interrupted_checkpoint_replay_on_old_and_new_schema_keeps_
     expected = read_lifecycle_receipt(workspace)["inference_accounting"]
     before = verify_accounting_generation(root / "seraph.db", expected)
     assert before[1][0]["state"] == "contact_started"
-    assert before[1][0]["bound_microusd"] == 100
+    assert before[1][0]["bound_microusd"] == 0
     if not old_schema:
         async with factory() as db:
             row = await db.get(Row, before[1][0]["operation_id"])
@@ -433,4 +433,4 @@ async def test_actual_interrupted_checkpoint_replay_on_old_and_new_schema_keeps_
     assert (workspace.lifecycle_directory / "accounting-checkpoint.json").read_bytes() == checkpoint_bytes
     assert contacts == []
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["status"] == "ready" and snapshot["unknown_microusd"] == 100
+    assert snapshot["status"] == "ready" and snapshot["operations"][0]["state"] == "contact_started"

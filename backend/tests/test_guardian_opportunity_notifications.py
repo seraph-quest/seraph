@@ -86,7 +86,7 @@ async def _actual_notification_intent(accounting_db, monkeypatch, *, auth_cookie
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output")),
         profiles=(), policies=()), egress_revision=configured.egress_revision+1))
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     calls, sources = [], []
     original_client = httpx.AsyncClient
     def clients(**kwargs):

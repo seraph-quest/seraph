@@ -197,7 +197,8 @@ async def test_v2_save_race_has_exactly_one_success(client, model_fabric_workspa
     assert sorted(reply.status_code for reply in replies) == [200, 409]
     status = (await client.get("/api/settings/model-fabric")).json()
     assert status["egress_revision"] == 3
-    assert status["inference_accounting"]["ceiling_microusd"] == 25_000
+    assert status["inference_accounting"]["status"] == "ready"
+    assert "ceiling_microusd" not in status["inference_accounting"]
 
 
 @pytest.mark.asyncio
@@ -218,7 +219,7 @@ async def test_v2_interrupted_accounting_leaves_revoked_and_compensates_only_key
     async def broken_accounting(*args, **kwargs):
         assert read_model_fabric_configuration().egress_revoked is True
         raise RuntimeError("injected accounting failure")
-    monkeypatch.setattr(durable_job_repository, "configure_inference_accounting", broken_accounting)
+    monkeypatch.setattr(durable_job_repository, "ensure_inference_ledger", broken_accounting)
     response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": _v2_setup_payload(api_key="sk-new-fixture")})
     assert response.status_code == 503
     saved = read_model_fabric_configuration()
@@ -296,8 +297,8 @@ async def test_v2_key_commit_then_raise_compensates_with_revoked_readback(client
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-@pytest.mark.parametrize("fault", ("missing_review", "wrong_bound", "old_settings_revision", "wrong_accounting_revision", "wrong_ledger_digest"))
-async def test_v2_activation_requires_exact_accounting_and_reserve_readback(client, model_fabric_workspace, keyless_openrouter, monkeypatch, fault):
+@pytest.mark.parametrize("fault", ("not_ready", "wrong_accounting_revision", "wrong_ledger_digest"))
+async def test_v2_activation_requires_exact_accounting_readback(client, model_fabric_workspace, keyless_openrouter, monkeypatch, fault):
     from src.workflows.job_runtime import durable_job_repository
     from src.model_fabric.configuration import read_model_fabric_configuration
     snapshot = durable_job_repository.inference_accounting_snapshot
@@ -305,15 +306,10 @@ async def test_v2_activation_requires_exact_accounting_and_reserve_readback(clie
         result = await snapshot(**kwargs)
         if not kwargs.get("continuity_workspace"):
             return result
-        assert result["request_reserve_review"]["bound_microusd"] == 100
-        if fault == "missing_review":
-            result["request_reserve_review"] = None
-        elif fault == "wrong_bound":
-            result["request_reserve_review"]["bound_microusd"] = 99
-        elif fault == "old_settings_revision":
-            result["request_reserve_review"]["settings_revision"] -= 1
+        if fault == "not_ready":
+            result["status"] = "unavailable"
         elif fault == "wrong_accounting_revision":
-            result["request_reserve_review"]["accounting_revision"] += 1
+            result["revision"] += 1
         else:
             result["ledger_digest"] = "0" * 64
         return result
@@ -321,61 +317,12 @@ async def test_v2_activation_requires_exact_accounting_and_reserve_readback(clie
     response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
         "openrouter_setup": _v2_setup_payload(api_key="sk-readback-fixture")})
     assert response.status_code == 503
-    assert response.json()["detail"] == "accounting_settings_revision_unavailable"
     current = read_model_fabric_configuration()
     assert current.egress_revision == 2 and current.egress_revoked
     assert settings.openrouter_api_key == ""
     assert await vault_repository.get("openrouter_api_key") is None
     ledger = await snapshot()
-    assert ledger["operation_count"] == 0 and ledger["committed_microusd"] == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_v2_bound_below_unreviewed_overrun_is_refused_specifically_before_mutation(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
-    from src.workflows.job_runtime import durable_job_repository
-    from src.model_fabric.configuration import read_model_fabric_configuration
-    snapshot = durable_job_repository.inference_accounting_snapshot
-    async def overrun_snapshot(**kwargs):
-        result = await snapshot(**kwargs)
-        result["overrun_max_cost_microusd"] = 612_340
-        return result
-    monkeypatch.setattr(durable_job_repository, "inference_accounting_snapshot", overrun_snapshot)
-    path = model_fabric_workspace / "model-fabric-settings.json"
-    before = path.read_bytes() if path.exists() else None
-    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
-        "openrouter_setup": _v2_setup_payload(api_key="sk-overrun-fixture")})
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["code"] == "request_bound_below_overrun"
-    assert detail["minimum_request_bound_microusd"] == 612_340
-    assert "at least $0.61234 (612,340 µUSD)" in detail["message"]
-    assert "Prove route" in detail["message"]
-    # Refused before revocation, credential or accounting mutation.
-    assert (path.read_bytes() if path.exists() else None) == before
-    assert read_model_fabric_configuration().egress_revoked is False
-    assert await vault_repository.get("openrouter_api_key") is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_legacy_v1_bound_below_unreviewed_overrun_is_refused_before_credential(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
-    from src.workflows.job_runtime import durable_job_repository
-    snapshot = durable_job_repository.inference_accounting_snapshot
-    async def overrun_snapshot(**kwargs):
-        result = await snapshot(**kwargs)
-        result["overrun_max_cost_microusd"] = 612_340
-        return result
-    monkeypatch.setattr(durable_job_repository, "inference_accounting_snapshot", overrun_snapshot)
-    path = model_fabric_workspace / "model-fabric-settings.json"
-    before = path.read_bytes() if path.exists() else None
-    response = await client.put("/api/settings/model-fabric", json={
-        "openrouter_setup": _setup_payload(request_cost_bound_microusd=100, api_key="sk-legacy-overrun")})
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "request_bound_below_overrun"
-    assert response.json()["detail"]["minimum_request_bound_microusd"] == 612_340
-    assert (path.read_bytes() if path.exists() else None) == before
-    assert await vault_repository.get("openrouter_api_key") is None
+    assert ledger["operation_count"] == 0 and ledger["spent_microusd"] == 0
 
 
 @pytest.mark.asyncio
@@ -653,11 +600,11 @@ async def test_v2_vision_edit_preserves_exact_text_proof_but_denies_old_queued_e
         return {"usage": {"cost": "0.000001"}}
     bind_accounting_profile("active-text", before.id)
     bind_accounting_profile("queued-text", before.id)
-    active_task = asyncio.create_task(broker.execute(replace(request("active-text"), owner_budget_microusd=25_000), active))
+    active_task = asyncio.create_task(broker.execute(replace(request("active-text")), active))
     queued_task = None
     try:
         await asyncio.wait_for(started.wait(), 5)
-        queued_task = asyncio.create_task(broker.execute(replace(request("queued-text"), owner_budget_microusd=25_000), forbidden))
+        queued_task = asyncio.create_task(broker.execute(replace(request("queued-text")), forbidden))
         # Reservation precedes enqueue, so a queued request has its durable row.
         await wait_until(lambda: broker._queue == ["queued-text"], what="second request queued behind the active one",
                          task=queued_task, state=lambda: list(broker._queue))
@@ -681,8 +628,8 @@ async def test_v2_vision_edit_preserves_exact_text_proof_but_denies_old_queued_e
     assert all(isinstance(outcome, Exception) for outcome in outcomes)
     assert callbacks == ["active"]
     snapshot = await durable_job_repository.inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 1
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["spent_microusd"] == 1
+    assert snapshot["unpriced_requests"] == 0
 
 
 @pytest.mark.asyncio
@@ -776,7 +723,7 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
     status = (await client.get("/api/settings/model-fabric")).json()
     assert all(state["status"] == "ready" for state in status["openrouter_setup"]["slot_statuses"].values())
     ledger = await durable_job_repository.inference_accounting_snapshot()
-    assert ledger["committed_microusd"] == 11 and ledger["unknown_microusd"] == 0
+    assert ledger["spent_microusd"] == 11 and ledger["unpriced_requests"] == 0
     assert {operation["profile_id"] for operation in ledger["operations"]} == {"openrouter.text", "openrouter.vision", "openrouter.embedding"}
     assert "sk-canary-fixture" not in status.__str__()
 
@@ -872,7 +819,7 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
         assert ordinary_order == ["fixture/embedding", "fixture/text", "fixture/vision"]
         assert contact_state["peak"] == 1 and contact_state["active"] == 0
         snapshot = await durable_job_repository.inference_accounting_snapshot()
-        assert snapshot["committed_microusd"] == 16 and snapshot["unknown_microusd"] == 0
+        assert snapshot["spent_microusd"] == 16 and snapshot["unpriced_requests"] == 0
         assert len(calls) == 16
         # A new target without proof cannot query the prior namespace.
         changed = _v2_setup_payload()
@@ -925,8 +872,8 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
         assert deleted_text not in recalled.context and recalled.hits == ()
         assert await memory_repository.get_memory_tombstone(canonical.memory_id) is not None
         final_ledger = await durable_job_repository.inference_accounting_snapshot()
-        assert final_ledger["committed_microusd"] == len(calls) == 26
-        assert final_ledger["unknown_microusd"] == 0
+        assert final_ledger["spent_microusd"] == len(calls) == 26
+        assert final_ledger["unpriced_requests"] == 0
         assert set(vector_store._get_db().table_names()) == {table_name, target_table}
     finally:
         reset_runtime_context(tokens)
@@ -1053,7 +1000,7 @@ async def test_persisted_controls_drive_profile_and_remote_admission(
     assert admission["max_retries"] == 1
     assert admission["capacity"]["max_queued"] == 8
     assert admission["capacity"]["max_outstanding_per_owner"] == 4
-    assert admission["capacity"]["max_owner_cost_microusd"] == 25_000
+    assert "max_owner_cost_microusd" not in admission["capacity"]
     settings.openrouter_api_key = "test-key"
     runtime_kwargs = build_completion_kwargs(
         messages=[{"role": "user", "content": "hello"}],

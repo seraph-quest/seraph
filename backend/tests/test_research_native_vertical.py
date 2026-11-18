@@ -151,7 +151,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(replace(configured.openrouter_setup, timeout_seconds=30),
         profiles=(), policies=()), egress_revision=configured.egress_revision+1))
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+    await jobs.ensure_inference_ledger()
     calls = []
     controls = {"overrun": scenario in {"overrun_first_response", "cancel_held_denial"}}
     original_client = httpx.AsyncClient

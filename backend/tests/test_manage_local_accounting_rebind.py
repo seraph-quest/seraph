@@ -218,7 +218,7 @@ async def test_local_accounting_rebind_retains_the_ledger_and_revokes_policy(acc
     receipt = json.loads(rebound.stdout)
     assert receipt["status"] == "rebound" and receipt["liabilities_retained"] == 2
     assert receipt["deployment_id"] == deployment_id
-    assert "re-consent to provider policy in Settings" in rebound.stderr
+    assert "give your OK again in Settings" in rebound.stderr
 
     target_workspace = ProductionWorkspace(host_root=target)
     lifecycle_receipt = read_lifecycle_receipt(target_workspace)

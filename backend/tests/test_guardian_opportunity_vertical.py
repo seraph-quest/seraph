@@ -372,7 +372,9 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             costs = list((await db.execute(select(InferenceCostReservation).where(
                 InferenceCostReservation.job_id == final.job_id))).scalars())
             assert len(costs) == 1 and costs[0].priority == GpuPriority.REPORTS_RESEARCH_MEMORY.rank
-            assert costs[0].state == "settled" and costs[0].contact_started_at is not None
+            # #1284: a contacted request that is not priced yet ("unknown") is
+            # adopted like a settled one (result recovery reuses this journey).
+            assert costs[0].state in {"settled", "unknown"} and costs[0].contact_started_at is not None
             assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 0
         native = await durable_job_repository.get_job(final.job_id)
         assert native["status"] == "succeeded"

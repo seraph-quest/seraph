@@ -153,7 +153,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     jobs = DurableJobRepository()
     await jobs.ensure_inference_ledger()
     calls = []
-    controls = {"overrun": scenario in {"overrun_first_response", "cancel_held_denial"}}
+    controls = {"overrun": scenario == "large_first_charge"}
     original_client = httpx.AsyncClient
     def clients(**kwargs):
         if "transport" not in kwargs:
@@ -413,7 +413,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
         detail = await client.get("/api/work-board/tasks/"+task_id)
         (root/"research-vertical-private-readback.json").write_text(json.dumps({"label": "real public source; provider HTTP interception only",
             "scenario": scenario, "task_id": task_id, "receipt": receipt, "detail": detail.json()}, indent=2))
-        if scenario != "completed" and scenario not in recovery_scenarios:
+        if scenario not in {"completed", "large_first_charge"} and scenario not in recovery_scenarios:
             assert receipt["completed"] == 0 and receipt["blocked"] >= 1
             assert len(calls) == 4  # real first contact; held sibling makes zero provider POSTs
             await engine.dispose()
@@ -423,50 +423,18 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             assert len(children) == 2
             contacted = [row for row in children if row["contact_started_at"] is not None]
             assert len(contacted) == 1 and contacted[0]["state"] == "settled"
-            assert contacted[0]["actual_cost_microusd"] == (150 if scenario in {"overrun_first_response", "cancel_held_denial"} else 2)
-            sibling = next(row for row in children if row["contact_started_at"] is None)
-            if scenario in {"overrun_first_response", "cancel_held_denial"}:
-                assert sibling["state"] == "reserved" and sibling["bound_microusd"] == 100
-                assert sibling["recovery_reason"] == "provider_contact_denied"
+            assert contacted[0]["actual_cost_microusd"] == 2
             async with factory.accounting_sessions() as db:
                 rows = list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind.in_(
                     ["research_dossier", "readonly_research_child"])))).all())
                 assert len(rows) == 3
                 completed = [row for row in rows if row.status == "succeeded"]
-                if scenario in {"overrun_first_response", "cancel_held_denial"}:
-                    # The first exact output completed with known actual debt.
-                    # Overrun freezes unfinished work; it must not erase that
-                    # already completed child's result or unclipped charge.
-                    # Both funded slots race for the single remote lane, so
-                    # the first contact is whichever slot the broker admitted
-                    # first; bind the completion to that contacted operation.
-                    assert len(completed) == 1 and completed[0].job_kind == "readonly_research_child"
-                    assert completed[0].run_identity == contacted[0]["job_id"] and completed[0].finished_at is not None
-                    assert completed[0].run_identity.endswith((":child:0", ":child:1"))
-                    assert sibling["job_id"] != contacted[0]["job_id"]
-                else:
-                    assert not completed
+                assert not completed
                 assert next(row for row in rows if row.job_kind == "research_dossier").status != "succeeded"
                 board = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
                 assert board.status.value == "blocked"
             (root/"research-negative-accounting-readback.json").write_text(json.dumps({"scenario": scenario,
                 "provider_post_count": len(calls), "snapshot": reopened}, indent=2))
-            if scenario == "cancel_held_denial":
-                monkeypatch.setattr(work_board, "dispatcher", dispatcher)
-                original = (await client.get("/api/work-board/tasks/"+task_id+"/research")).json()
-                result = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
-                    json={"expected_revision": original["task_revision"], "idempotency_key": "held-denial-cancel"})
-                assert result.status_code == 200, result.text
-                assert result.json()["cancellation"]["cancelled"] is True
-                await engine.dispose()
-                settled = await jobs.inference_accounting_snapshot()
-                current_costs = [row for row in settled["operations"] if row["operation_id"].startswith("remote:research:")]
-                assert settled["accounting_continuity_verified"] is True
-                assert next(row for row in current_costs if row["contact_started_at"] is not None)["actual_cost_microusd"] == 150
-                assert next(row for row in current_costs if row["contact_started_at"] is None)["state"] == "released"
-                assert len(calls) == 4
-                (root/"research-denial-cancel-readback.json").write_text(json.dumps({"original": original,
-                    "cancellation": result.json(), "accounting": settled, "provider_post_count": len(calls)}, indent=2))
             return
         assert receipt["completed"] == 1, detail.json()
         report = await client.get("/api/work-board/tasks/"+task_id+"/research-report")
@@ -477,6 +445,12 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
         await engine.dispose()
         reopened = await jobs.inference_accounting_snapshot()
         assert reopened["accounting_continuity_verified"] is True
+        if scenario == "large_first_charge":
+            # #1284: a large first charge is recorded; it never holds the
+            # prefunded sibling or withholds adoption.
+            children = [row for row in reopened["operations"] if row["operation_id"].startswith("remote:research:")]
+            assert sorted(row["actual_cost_microusd"] for row in children) == [2, 150]
+            assert all(row["state"] == "settled" and row["recovery_reason"] is None for row in children)
         async with factory.accounting_sessions() as db:
             rows = list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.job_kind.in_(
                 ["research_dossier", "readonly_research_child"])))).all())
@@ -487,9 +461,14 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ["revoke_first_response", "goal_change_first_response",
-    "tamper_source_first_response", "overrun_first_response"])
-async def test_current_authority_or_overrun_blocks_prefunded_sibling_and_adoption(accounting_db, real_auth, monkeypatch, scenario):
+    "tamper_source_first_response"])
+async def test_current_authority_blocks_prefunded_sibling_and_adoption(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
+
+
+@pytest.mark.asyncio
+async def test_large_first_charge_never_holds_prefunded_sibling_or_adoption(accounting_db, real_auth, monkeypatch):
+    await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario="large_first_charge")
 
 
 @pytest.mark.asyncio
@@ -500,8 +479,8 @@ async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["cancel_active_provider", "cancel_held_denial"])
-async def test_actual_research_cancel_preserves_contacted_debt_and_releases_proven_denial(accounting_db, real_auth, monkeypatch, scenario):
+@pytest.mark.parametrize("scenario", ["cancel_active_provider"])
+async def test_actual_research_cancel_preserves_contacted_debt(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
 
 

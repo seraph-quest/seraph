@@ -94,7 +94,9 @@ def test_original_liability_math_ignores_period_rollover(state, actual, contact,
     assert reservation_liability(row) == expected
 
 
-@pytest.mark.parametrize("changed", [{"state": "unrecognized"}, {"bound_microusd": 0},
+# A request record written since #1284 carries bound 0 (valid); only a
+# malformed or negative bound is refused.
+@pytest.mark.parametrize("changed", [{"state": "unrecognized"}, {"bound_microusd": -1},
     {"bound_microusd": True}, {"state": "settled", "actual_cost_microusd": None},
     {"state": "settled", "actual_cost_microusd": -1},
     {"state": "settled", "actual_cost_microusd": 101},

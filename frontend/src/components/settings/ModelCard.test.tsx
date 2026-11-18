@@ -12,9 +12,9 @@ type Raw = Record<string, unknown>;
 function rawSlot(overrides: Raw = {}): Raw {
   return {
     model_id: MODEL, enabled: true, max_input_tokens: 8192, max_output_tokens: 4096, timeout_seconds: 30.0,
-    temperature: null, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24, profile_id: "near_tee.text",
+    temperature: null, catalog_ttl_hours: 24, profile_id: "near_tee.text",
     consent_current: true, status: "ready", reason_code: null, catalog_receipt: { model_id: MODEL, outcome: "passed",
-      checked_at_iso: "2026-11-18T10:00:00+00:00", reason_code: null }, catalog_receipt_current: true,
+      checked_at_iso: "2026-11-18T10:00:00+00:00", reason_code: null, required_cost_microusd: 20_000 }, catalog_receipt_current: true,
     tee_hosted_per_catalog: true, tee_hosting_label: "TEE-hosted per NEAR catalog", capability_check_timeout_seconds: 46,
     chat_capabilities: { streaming: "ready", tool_use: "ready" }, structured_output_capability: "ready",
     ...overrides,
@@ -26,11 +26,9 @@ function raw({ slot = rawSlot(), near = {}, top = {}, accounting = {}, lane = {}
     egress_revision: 8, egress_revoked: false,
     near_tee: { configured: true, status: "ready", reason_code: null, key_present: true, credential_fingerprint: "553c52e01ac7",
       tee_verified: false, e2ee: false, slots: { text: slot }, ...near },
-    inference_lane: lane === null ? null : { schema_version: "seraph.inference.lane.v1", spend_ceiling_microusd: 1_000_000_000,
-      max_queued: 64, max_inflight: 1, max_outstanding_per_owner: 16, max_retries: 2, request_reserve_review_microusd: null,
-      published: true, status: "published", ...lane },
-    inference_accounting: { status: "ready", ceiling_microusd: 1_000_000_000, committed_microusd: 5_249, unknown_microusd: 0,
-      remaining_microusd: 999_934_751, overrun_max_cost_microusd: 0, unreviewed_overruns: [], operations: [], ...accounting },
+    inference_lane: lane === null ? null : { max_queued: 64, max_inflight: 1, max_outstanding_per_owner: 16, max_retries: 2, ...lane },
+    inference_accounting: { status: "ready", period_id: "2026-11", spent_microusd: 5_249, unpriced_requests: 0,
+      history_verified: true, operation_count: 0, operations_truncated: false, operations: [], ...accounting },
     ...top,
   };
 }
@@ -68,33 +66,27 @@ describe("modelCardState (appendix B)", () => {
     ["unreadable", raw({ top: { error_code: "provider_policy_continuity_unavailable" } }), READY],
     ["missing_key", raw({ near: { key_present: false } }), READY],
     ["missing_key", raw(), BLOCKED("near_tee_credential_required")],
-    ["no_budget", raw({ lane: null }), READY],
-    ["no_budget", raw({ lane: { published: false } }), READY],
-    ["no_budget", raw(), BLOCKED("near_tee_request_reserve_exceeds_lane_ceiling")],
-    ["no_budget", raw({ lane: null, near: { key_present: false } }), READY],
+    // First-time order is key, then model and OK, then test: there is no budget step.
+    ["missing_key", raw({ lane: null, near: { key_present: false } }), READY],
     ["not_set_up", raw({ slot: null }), READY],
     ["not_set_up", raw({ slot: rawSlot({ enabled: false }) }), READY],
     ["needs_ok", revokedRaw(), BLOCKED("provider_policy_revoked", "near_tee_catalog_receipt_stale")],
     ["needs_ok", raw({ slot: rawSlot({ consent_current: false }) }), READY],
-    ["overrun", raw({ accounting: { unreviewed_overruns: [{ operation_id: "op", job_id: "job", bound_microusd: 20_000, actual_cost_microusd: 30_000 }] } }), READY],
-    ["overrun", raw(), BLOCKED("provider_charge_exceeded_reservation")],
-    ["budget_used", raw({ accounting: { remaining_microusd: 10_000 } }), READY],
     ["needs_test", raw({ slot: rawSlot({ catalog_receipt_current: false, chat_capabilities: {} }) }), READY],
     ["needs_test", raw({ slot: rawSlot({ reason_code: "proof_missing:health" }) }), BLOCKED("proof_missing:health")],
     ["needs_test", raw({ slot: rawSlot({ chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "ready" } }) }), READY],
     ["ready", raw(), READY],
+    ["ready", raw({ lane: null }), READY],
+    ["ready", raw({ accounting: { status: "unavailable" } }), READY],
+    // Limit fields an older backend may still send are ignored.
+    ["ready", raw({ lane: { spend_ceiling_microusd: 1, published: false }, accounting: { remaining_microusd: 0, ceiling_microusd: 1,
+      unreviewed_overruns: [{ operation_id: "op", job_id: "job", bound_microusd: 20_000, actual_cost_microusd: 30_000 }] },
+      slot: rawSlot({ request_cost_bound_microusd: 1_000_000_000 }) }), READY],
     ["blocked", raw(), BLOCKED("near_tee_slot_timeout_exceeds_chat_turn")],
-    // The route alone can say ready while the slot is blocked by accounting or proof metadata.
-    ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }), READY],
+    // The route alone can say ready while the slot is blocked by proof metadata or a local fault.
     ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "inference_accounting_unavailable" }) }), READY],
     ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "proof_metadata_unavailable" }) }), READY],
     ["blocked", raw({ slot: rawSlot({ status: "blocked", reason_code: "near_tee_credential_unavailable" }) }), READY],
-    ["new_month", raw({ accounting: { status: "blocked", reason_code: "accounting_period_review_required", revision: 483, period_id: "2026-12",
-      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-12", expected_revision: 483 } },
-      slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }), READY],
-    // An open overrun refuses every NEAR save, so it shows before the consent step.
-    ["overrun", raw({ top: { egress_revoked: true }, slot: rawSlot({ consent_current: false }),
-      accounting: { unreviewed_overruns: [{ operation_id: "op", job_id: "job", bound_microusd: 20_000, actual_cost_microusd: 30_000 }] } }), BLOCKED("provider_policy_revoked")],
     ["route_unknown", raw(), null],
   ] as Array<[string, Raw, ChatRouteReadiness | null]>)("%s", (expected, value, route) => {
     expect(modelCardState(settingsOf(value), route)).toBe(expected);
@@ -117,7 +109,7 @@ describe("Model card", () => {
     expect(tick).not.toBeChecked();
     const allow = screen.getByRole("button", { name: "Allow and turn on chat" });
     expect(allow).toBeDisabled();
-    expect(screen.getByTestId("model-card-cost")).toHaveTextContent("up to 6 tiny paid requests, at most $0.12 in total");
+    expect(screen.getByTestId("model-card-cost")).toHaveTextContent("up to 6 tiny paid requests, about $0.12 in total");
     fireEvent.click(allow);
     fireEvent.click(tick);
     expect(allow).toBeEnabled();
@@ -148,7 +140,7 @@ describe("Model card", () => {
     expect(payload.expected_policy_revision).toBe(8);
     expect(payload.near_tee).not.toHaveProperty("api_key");
     expect(payload.near_tee.slots).toEqual({ text: { model_id: MODEL, enabled: true, max_input_tokens: 8192, max_output_tokens: 4096,
-      timeout_seconds: 30, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24, plaintext_provider_egress_acknowledged: true } });
+      timeout_seconds: 30, catalog_ttl_hours: 24, plaintext_provider_egress_acknowledged: true } });
     // The catalog check runs at the revision the save returned, before any paid check.
     expect(calls[0].url).toContain("/api/settings/model-fabric/near-tee/catalog-check");
     expect(calls[0].body).toEqual({ expected_policy_revision: 10 });
@@ -169,7 +161,7 @@ describe("Model card", () => {
     const settings = settingsOf(raw({ slot: rawSlot({ reason_code: null, chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "ready" } }) }));
     const { props } = renderCard(settings, READY);
     expect(statusLine()).toHaveTextContent("One quick test left.");
-    expect(screen.getByTestId("model-card-cost")).toHaveTextContent("It sends 1 tiny paid request, at most $0.02 in total.");
+    expect(screen.getByTestId("model-card-cost")).toHaveTextContent("It sends 1 tiny paid request, about $0.02 in total.");
     fireEvent.click(screen.getByRole("button", { name: "Run test" }));
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
     // The catalog check found six missing; none ran because only one was shown.
@@ -241,39 +233,10 @@ describe("Model card", () => {
       plaintext_provider_egress_acknowledged: true } } } });
   });
 
-  it("no budget, budget used up and a request that cost too much each save only the lane", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => json(afterCatalogCheck())));
-    const onSave = vi.fn(async (_payload: Record<string, unknown>) => settingsOf(raw()));
-    const first = renderCard(settingsOf(raw({ lane: null })), BLOCKED("inference_lane_required"), { onSave });
-    expect(statusLine()).toHaveTextContent("Chat is off. Set a monthly budget first.");
-    fireEvent.change(screen.getByLabelText("Monthly budget in dollars"), { target: { value: "25" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
-    await waitFor(() => expect(first.props.onRefresh).toHaveBeenCalled());
-    expect(onSave.mock.calls[0][0]).toMatchObject({ expected_policy_revision: 8, inference_lane: { spend_ceiling_microusd: 25_000_000, max_inflight: 1 } });
-    expect(onSave.mock.calls[0][0]).not.toHaveProperty("near_tee");
-    first.unmount();
-
-    const used = renderCard(settingsOf(raw({ lane: { spend_ceiling_microusd: 1_000_000 }, accounting: { ceiling_microusd: 1_000_000, remaining_microusd: 0 } })), READY, { onSave });
-    expect(statusLine()).toHaveTextContent("Chat is paused. This month's budget is used up.");
-    expect(card()).toHaveTextContent("$1 of $1 spent.");
-    fireEvent.change(screen.getByLabelText("New monthly budget in dollars"), { target: { value: "0.5" } });
-    fireEvent.click(screen.getByRole("button", { name: "Raise budget" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Enter more than $1.");
-    used.unmount();
-
-    const overrun = renderCard(settingsOf(raw({ accounting: { overrun_max_cost_microusd: 30_000,
-      unreviewed_overruns: [{ operation_id: "op", job_id: "job", bound_microusd: 20_000, actual_cost_microusd: 30_000 }] } })), READY, { onSave });
-    expect(statusLine()).toHaveTextContent("Chat is paused. One request cost more than its limit.");
-    expect(card()).toHaveTextContent("It cost $0.03. The limit was $0.02.");
-    fireEvent.click(screen.getByRole("button", { name: "Accept and continue" }));
-    await waitFor(() => expect(overrun.props.onRefresh).toHaveBeenCalled());
-    expect(onSave.mock.calls[onSave.mock.calls.length - 1][0]).toMatchObject({ inference_lane: { spend_ceiling_microusd: 1_000_000_000, request_reserve_review_microusd: 30_000 } });
-  });
-
   it("ready shows the plain line; change model asks for the OK again", () => {
     renderCard(settingsOf(raw()), READY);
     expect(statusLine()).toHaveTextContent("Chat is on.");
-    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. $0.01 of $1,000 used this month.");
+    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. $0.01 used this month.");
     fireEvent.click(screen.getByRole("button", { name: "Change model" }));
     expect(screen.queryByRole("checkbox", { name: CONSENT })).toBeNull();
     fireEvent.change(screen.getByLabelText("Chat model"), { target: { value: "Qwen/Qwen3.8-27B" } });
@@ -304,36 +267,6 @@ describe("Model card", () => {
     renderCard(settingsOf(revokedRaw()), BLOCKED("provider_policy_revoked"), { stale: true });
     expect(screen.getByRole("checkbox", { name: CONSENT })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Allow and turn on chat" })).toBeDisabled();
-  });
-
-  it("new month: one explicit click posts the existing period review and nothing else", async () => {
-    const calls: Array<{ url: string; body: unknown }> = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) });
-      return json({ status: "ready" });
-    }));
-    const onSave = vi.fn();
-    const settings = settingsOf(raw({ accounting: { status: "blocked", reason_code: "accounting_period_review_required", revision: 483, period_id: "2026-12",
-      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-12", expected_revision: 483 } },
-      slot: rawSlot({ status: "blocked", reason_code: "accounting_period_review_required" }) }));
-    const { props } = renderCard(settings, BLOCKED("accounting_period_review_required"), { onSave });
-    expect(statusLine()).toHaveTextContent("Chat is paused. A new month started (December 2026). Your $1,000 monthly budget starts again.");
-    expect(card()).toHaveTextContent("Start December 2026 to turn chat back on.");
-    expect(calls).toHaveLength(0);
-    fireEvent.click(screen.getByRole("button", { name: "Start the new month" }));
-    expect(statusLine()).toHaveTextContent("Starting the month…");
-    await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
-    expect(calls).toEqual([{ url: expect.stringContaining("/api/settings/model-fabric/accounting/period"), body: { period_id: "2026-12", expected_revision: 483 } }]);
-    expect(onSave).not.toHaveBeenCalled();
-  });
-
-  it("a clock correction names the month it confirms", () => {
-    const settings = settingsOf(raw({ accounting: { status: "blocked", reason_code: "accounting_clock_correction_required", revision: 9, period_id: "2026-11",
-      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST", period_id: "2026-11", expected_revision: 9 } } }));
-    renderCard(settings, BLOCKED("accounting_clock_correction_required"));
-    expect(statusLine()).toHaveTextContent("Chat is paused. The computer's clock moved back to November 2026.");
-    expect(card()).toHaveTextContent("Charges already counted for later months stay counted.");
-    expect(screen.getByRole("button", { name: "Confirm November 2026" })).toBeEnabled();
   });
 
   it("a refused optional structured output check does not mark NEAR down", async () => {
@@ -375,15 +308,6 @@ describe("Model card", () => {
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
   });
 
-  it("says plainly when the budget is already at the maximum, and when it is below one request's limit", () => {
-    const max = renderCard(settingsOf(raw({ accounting: { remaining_microusd: 0 } })), READY);
-    expect(card()).toHaveTextContent("$1,000 a month is the most Seraph allows, so chat resumes next month.");
-    expect(screen.queryByRole("button", { name: "Raise budget" })).toBeNull();
-    max.unmount();
-    renderCard(settingsOf(raw({ lane: { spend_ceiling_microusd: 10_000 } })), BLOCKED("near_tee_request_reserve_exceeds_lane_ceiling"));
-    expect(statusLine()).toHaveTextContent("Chat is off. The monthly budget is smaller than one request's limit ($0.02).");
-  });
-
   it("switching model sends the stored slot with the new model and a fresh tick", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(afterCatalogCheck())));
     const onSave = vi.fn(async (_payload: Record<string, unknown>) => settingsOf(raw({ top: { egress_revision: 10 } })));
@@ -396,7 +320,7 @@ describe("Model card", () => {
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
     expect(onSave.mock.calls[0][0]).toEqual({ expected_policy_revision: 8, near_tee: { schema_version: "seraph.near.tee.setup.v1",
       api_base: "https://cloud-api.near.ai/v1", slots: { text: { model_id: "Qwen/Qwen3.8-27B", enabled: true, max_input_tokens: 8192,
-        max_output_tokens: 4096, timeout_seconds: 30, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24,
+        max_output_tokens: 4096, timeout_seconds: 30, catalog_ttl_hours: 24,
         plaintext_provider_egress_acknowledged: true } } } });
   });
 
@@ -408,7 +332,56 @@ describe("Model card", () => {
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
     expect(onSave.mock.calls[0][0]).toEqual({ expected_policy_revision: 8, near_tee: { schema_version: "seraph.near.tee.setup.v1",
       api_base: "https://cloud-api.near.ai/v1", slots: { text: { model_id: MODEL, enabled: false, max_input_tokens: 8192,
-        max_output_tokens: 4096, timeout_seconds: 30, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24,
+        max_output_tokens: 4096, timeout_seconds: 30, catalog_ttl_hours: 24,
         plaintext_provider_egress_acknowledged: false } } } });
+  });
+
+  it("ready reports what was spent this month, with the unpriced count", () => {
+    renderCard(settingsOf(raw({ accounting: { spent_microusd: 3_200_000, unpriced_requests: 2 } })), READY);
+    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. $3.20 used this month. 2 requests are not priced by NEAR yet.");
+  });
+
+  it("ready says nothing was spent, and names one unpriced request in the singular", () => {
+    const first = renderCard(settingsOf(raw({ accounting: { spent_microusd: 0 } })), READY);
+    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. Nothing spent this month.");
+    first.unmount();
+    renderCard(settingsOf(raw({ accounting: { spent_microusd: 0, unpriced_requests: 1 } })), READY);
+    expect(card()).toHaveTextContent("Nothing spent this month. 1 request is not priced by NEAR yet.");
+  });
+
+  it("ready stays on when spend cannot be read", () => {
+    renderCard(settingsOf(raw({ accounting: { status: "unavailable", spent_microusd: undefined } })), READY);
+    expect(statusLine()).toHaveTextContent("Chat is on.");
+    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. Spend this month is not available.");
+  });
+
+  it("never asks for a dollar amount and says where spending limits live", () => {
+    renderCard(settingsOf(raw()), READY);
+    const details = card().querySelector("details") as HTMLElement;
+    expect(within(details).getByText("Spending limits are set in your NEAR account.")).toBeInTheDocument();
+    expect(card()).not.toHaveTextContent(/budget|reserve|ceiling/i);
+    expect(within(details).getByText("Structured output check: one paid request, about $0.02.")).toBeInTheDocument();
+    expect(card().querySelectorAll('input[inputmode="decimal"]')).toHaveLength(0);
+  });
+
+  it("the paid-check note uses NEAR's listed price and omits the amount when NEAR lists none", () => {
+    const priced = renderCard(settingsOf(raw({ slot: rawSlot({ catalog_receipt: { model_id: MODEL, outcome: "passed", reason_code: null,
+      required_cost_microusd: 3_000 }, chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "proof_missing:tool_use" } }) })), READY);
+    expect(screen.getByTestId("model-card-cost")).toHaveTextContent("It sends 2 tiny paid requests, about $0.01 in total.");
+    priced.unmount();
+    const tiny = renderCard(settingsOf(raw({ slot: rawSlot({ catalog_receipt: { model_id: MODEL, outcome: "passed", reason_code: null,
+      required_cost_microusd: 100 }, chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "ready" } }) })), READY);
+    expect(screen.getByTestId("model-card-cost")).toHaveTextContent("It sends 1 tiny paid request, less than $0.01 in total.");
+    tiny.unmount();
+    renderCard(settingsOf(raw({ slot: rawSlot({ catalog_receipt: { model_id: MODEL, outcome: "passed", reason_code: null,
+      required_cost_microusd: null }, chat_capabilities: { streaming: "proof_missing:streaming", tool_use: "proof_missing:tool_use" } }) })), READY);
+    expect(screen.getByTestId("model-card-cost")).toHaveTextContent(/^It sends 2 tiny paid requests\.$/);
+  });
+
+  it("a first-time setup with no key and no lane asks for the key, never a budget", () => {
+    renderCard(settingsOf(raw({ lane: null, near: { key_present: false }, slot: null })), BLOCKED("near_tee_credential_required"));
+    expect(statusLine()).toHaveTextContent("Chat is off. Seraph needs a NEAR API key.");
+    expect(screen.getByLabelText("NEAR API key")).toBeInTheDocument();
+    expect(card()).not.toHaveTextContent(/budget/i);
   });
 });

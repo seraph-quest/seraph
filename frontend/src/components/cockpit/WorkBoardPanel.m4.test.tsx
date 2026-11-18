@@ -311,8 +311,6 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     ["near_tee_purpose_consent_required", /needs its purpose consent; nothing was contacted/],
     ["near_tee_credential_required", /NEAR TEE API key is missing; nothing was contacted/],
     ["near_tee_embedding_evidence_required", /awaits its ADR-035 evidence; nothing was contacted/],
-    ["inference_lane_required", /shared inference lane ceiling in Settings; nothing was contacted/],
-    ["near_tee_request_reserve_exceeds_lane_ceiling", /request bound exceeds the lane ceiling; nothing was contacted/],
     ["near_tee_output_truncated", /hit the slot's output bound; its cost was settled and nothing was adopted/],
     ["near_tee_model_mismatch", /different model; its cost was settled and nothing was adopted/],
   ])("explains the ADR-035 route block %s with its stable code", async (code, text) => {

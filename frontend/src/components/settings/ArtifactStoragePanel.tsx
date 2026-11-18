@@ -22,7 +22,6 @@ import {
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
 import { NearTextPanel } from "./NearTextPanel";
 import { NearTeePanel } from "./NearTeePanel";
-import { InferenceLanePanel } from "./InferenceLanePanel";
 import { CordisRuntimePanel } from "./CordisRuntimePanel";
 
 const PROOF_TTL_CHOICES = [
@@ -1443,14 +1442,6 @@ export function ArtifactStoragePanel({ advanced }: ArtifactStoragePanelProps = {
                       : "normal"
                 }
               />
-              <InferenceLanePanel
-                lane={modelFabric?.inference_lane}
-                stale={modelFabricStale}
-                onSave={saveOpenRouterSetup}
-                policyRevision={modelFabric?.egress_revision}
-                ledgerCeilingMicrousd={modelFabric?.inference_accounting?.ceiling_microusd}
-                laneReason={modelFabric?.inference_lane_reason}
-              />
               <OpenRouterSetupPanel
                 setup={modelFabric?.openrouter_setup}
                 stale={modelFabricStale}
@@ -1465,8 +1456,6 @@ export function ArtifactStoragePanel({ advanced }: ArtifactStoragePanelProps = {
                 onSave={saveOpenRouterSetup}
                 policyRevision={modelFabric?.egress_revision}
                 policyRevoked={modelFabric?.egress_revoked}
-                sharedCeilingMicrousd={modelFabric?.inference_lane?.spend_ceiling_microusd ?? modelFabric?.near_text?.spend_ceiling_microusd ?? modelFabric?.inference_accounting?.ceiling_microusd}
-                sharedCeilingLocked={Boolean(modelFabric?.inference_lane?.published || modelFabric?.openrouter_setup)}
               />
               <NearTeePanel
                 setup={modelFabric?.near_tee}
@@ -1475,7 +1464,6 @@ export function ArtifactStoragePanel({ advanced }: ArtifactStoragePanelProps = {
                 onRefreshed={() => { void fetchModelFabric(); }}
                 policyRevision={modelFabric?.egress_revision}
                 policyRevoked={modelFabric?.egress_revoked}
-                laneCeilingMicrousd={modelFabric?.inference_lane?.published ? modelFabric.inference_lane.spend_ceiling_microusd : null}
               />
               <InferenceAccountingPanel accounting={modelFabric?.inference_accounting} stale={modelFabricStale} onRefresh={fetchModelFabric} />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">

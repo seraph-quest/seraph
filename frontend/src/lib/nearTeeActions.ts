@@ -17,7 +17,6 @@ export interface NearTeeSlotFields {
   max_input_tokens: number;
   max_output_tokens: number;
   timeout_seconds: number;
-  request_cost_bound_microusd: number;
   catalog_ttl_hours: number;
   /** Sent only when set, so an unchanged slot stays byte-for-byte unchanged. */
   temperature?: number | null;
@@ -42,7 +41,6 @@ export function nearTeeSlotSavePayload({ slot, fields, acknowledged, screenshot,
     model_id: fields.model_id, enabled: fields.enabled,
     max_input_tokens: fields.max_input_tokens, max_output_tokens: fields.max_output_tokens,
     timeout_seconds: fields.timeout_seconds,
-    request_cost_bound_microusd: fields.request_cost_bound_microusd,
     catalog_ttl_hours: fields.catalog_ttl_hours,
     ...(fields.temperature != null ? { temperature: fields.temperature } : {}),
     ...(fields.max_batch_size != null ? { max_batch_size: fields.max_batch_size } : {}),
@@ -72,7 +70,7 @@ export function nearTeeSlotFields(slot: NearTeeSlotStatus): NearTeeSlotFields {
   return {
     model_id: slot.model_id, enabled: slot.enabled, max_input_tokens: slot.max_input_tokens,
     max_output_tokens: slot.max_output_tokens, timeout_seconds: slot.timeout_seconds,
-    request_cost_bound_microusd: slot.request_cost_bound_microusd, catalog_ttl_hours: slot.catalog_ttl_hours,
+    catalog_ttl_hours: slot.catalog_ttl_hours,
     temperature: slot.temperature ?? null, max_batch_size: slot.max_batch_size ?? null,
   };
 }
@@ -133,14 +131,4 @@ export async function postNearTeeCapabilityCheck(
 export function isNearUnavailable(code: string | null | undefined, status?: number | null): boolean {
   if (status === null || (typeof status === "number" && status >= 500)) return true;
   return Boolean(code && /(catalog_unavailable|_transport_uncertain|_http_error|_deadline_expired|_stream_deadline|_stream_interrupted)$/.test(code));
-}
-
-/**
- * Record the operator's review of the current accounting month: the explicit
- * click the accounting owner requires before any request in a new UTC month.
- */
-export async function postAccountingPeriodReview(review: { endpoint: string; period_id: string; expected_revision: number }): Promise<void> {
-  if (review.endpoint !== "/api/settings/model-fabric/accounting/period") throw new NearTeeRequestError("unexpected review endpoint", 400);
-  const response = await post(review.endpoint, { period_id: review.period_id, expected_revision: review.expected_revision });
-  if (!response.ok) throw new NearTeeRequestError(await responseDetail(response), response.status);
 }

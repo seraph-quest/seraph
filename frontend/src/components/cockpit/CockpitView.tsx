@@ -150,7 +150,6 @@ interface RuntimeInferenceReadiness {
   active_only?: boolean;
   cloud_egress?: string;
   cloud_consent?: boolean;
-  cost_ceiling_microusd?: number | null;
   profile_id?: string | null;
 }
 
@@ -7760,11 +7759,6 @@ function normalizeRuntimeInferenceReadiness(value: unknown): RuntimeInferenceRea
     active_only: typeof record.active_only === "boolean" ? record.active_only : undefined,
     cloud_egress: typeof record.cloud_egress === "string" ? record.cloud_egress : undefined,
     cloud_consent: typeof record.cloud_consent === "boolean" ? record.cloud_consent : undefined,
-    cost_ceiling_microusd: typeof record.cost_ceiling_microusd === "number" && Number.isFinite(record.cost_ceiling_microusd)
-      ? record.cost_ceiling_microusd
-      : record.cost_ceiling_microusd === null
-        ? null
-        : undefined,
     profile_id: typeof record.profile_id === "string" ? record.profile_id : record.profile_id === null ? null : undefined,
   };
 }
@@ -11465,9 +11459,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ? `${attemptedFabricRoute.profile_id} · ${attemptedFabricRoute.outcome}`
         : selectedFabricRoute?.profile_id ?? runtimeStatus?.effective_runtime?.active_profile ?? null,
     egress: routeReadiness?.cloud_egress ?? "unknown",
-    budget: typeof routeReadiness?.cost_ceiling_microusd === "number"
-      ? `${routeReadiness.cost_ceiling_microusd} µUSD ceiling`
-      : "cost ceiling unknown",
     queue: runtimeStatus?.effective_runtime?.queue_status_endpoint ? "status endpoint advertised" : "queue status unavailable",
     detail: runtimeBlocked
       ? [

@@ -129,6 +129,10 @@ class WSResponse(BaseModel):
     code: str | None = None
     recovery_action: str | None = None
     settings_section: str | None = None
+    # The agent loop that serves this turn, e.g. "cordis.agent-loop.v1" (#1280):
+    # a structured field on the receipt frame now that the status line names
+    # the model route instead of the loop.
+    chat_loop: str | None = None
     options: list[str] | None = None
     # Phase 3 — Proactive messages
     urgency: int | None = None

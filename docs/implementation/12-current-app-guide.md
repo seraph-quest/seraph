@@ -724,8 +724,9 @@ effective chat route, not the loop: "Chat is using DeepSeek V4.1 Flash via
 NEAR." (#1280). It is built from the same full readiness `/api/runtime/status`
 reports (consent, key, catalog receipt, accounting, status proofs) plus the
 `streaming` and `tool_use` checks and the month's remaining budget, and is not
-sent when any of them would block the turn; the loop id stays in
-`chat_runtime.loop`.
+sent when any of them would block the turn. The loop id stays in
+`chat_runtime.loop` and on each turn's "Seraph received the message." frame as
+the structured `chat_loop` field.
 
 **Default cutover and operator control.** `runtime_plugins/cutover.py` holds an
 ordered manifest of domains whose default owner is Cordis

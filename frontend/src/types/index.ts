@@ -53,6 +53,8 @@ export interface WSResponse {
   code?: string | null;
   recovery_action?: string | null;
   settings_section?: string | null;
+  /** The agent loop serving the turn, on the receipt frame (#1280). */
+  chat_loop?: string | null;
   options?: string[];
   urgency?: number;
   intervention_type?: string;

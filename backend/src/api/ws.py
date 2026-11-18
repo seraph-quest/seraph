@@ -982,6 +982,7 @@ async def websocket_chat(websocket: WebSocket):
                 WSResponse(
                     type="status",
                     content="Seraph received the message.",
+                    chat_loop=str(chat_status.get("loop") or "") or None,
                     session_id=session.id,
                     **_ws_lineage_kwargs(session.id, operator, ingress),
                     seq=_next_seq(),

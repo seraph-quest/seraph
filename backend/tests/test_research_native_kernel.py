@@ -141,13 +141,15 @@ async def test_fixed_group_wait_and_paired_funding_preserve_original_lineage_and
     resumed=await resume_parent(jobs,parent_id=spec.identity.job_id,owner="research-kernel",phase="research_funding")
     assert resumed["job_fence"]==2 and resumed["board_fence"]==2
     rows=await fund_fixed_group(jobs,parent_id=spec.identity.job_id,owner="research-kernel",fencing_token=2)
-    assert len(rows)==2 and sum(row["bound_microusd"] for row in rows)==200
+    # #1284: funding writes request records without amounts.
+    assert len(rows)==2 and all(row["bound_microusd"]==0 and row["state"]=="reserved" for row in rows)
     assert rows==await fund_fixed_group(jobs,parent_id=spec.identity.job_id,owner="research-kernel",fencing_token=2)
     await pause_parent(jobs,parent_id=spec.identity.job_id,owner="research-kernel",job_fence=2,
         board_fence=2,board_revision=resumed["task_revision"],reason=WAIT_CHILDREN)
     await accounting_db[1].dispose()
     snapshot=await jobs.inference_accounting_snapshot()
-    assert snapshot["accounting_continuity_verified"] is True and snapshot["reserved_microusd"]==200
+    assert snapshot["accounting_continuity_verified"] is True
+    assert sorted(row["operation_id"] for row in snapshot["operations"] if row["state"]=="reserved")==sorted(row["operation_id"] for row in rows)
     assert (await jobs.get_job(spec.identity.job_id))["deadline_at"]==parent["deadline_at"]
     for slot,child_id in enumerate(creation["child_ids"]):
         child=await jobs.get_job(child_id)

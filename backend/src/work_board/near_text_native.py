@@ -272,8 +272,13 @@ async def expired_finance_binding(db, task, attempt, run, *, observed):
 
 async def _ledger(db,receipt,*,job):
     row=await ledger_before_output(db,operation_id=receipt.operation_id,job=job)
-    # The receipt must agree with its request record; an unpriced request has no charge on either.
-    if row.actual_cost_microusd!=receipt.cost_microusd or (row.state=='settled' and row.provider_operation_id!=receipt.provider_request_id):
+    # The receipt must agree with its request record. An answer delivered
+    # unpriced may later have its charge recorded (#1284); that changes only
+    # spend history, never the delivered output.
+    if receipt.cost_microusd is None:
+        if row.provider_operation_id not in (None,receipt.provider_request_id):
+            raise BoardError('near_ledger_readback_mismatch','The charge receipt differs from its canonical ledger')
+    elif row.actual_cost_microusd!=receipt.cost_microusd or (row.state=='settled' and row.provider_operation_id!=receipt.provider_request_id):
         raise BoardError('near_ledger_readback_mismatch','The charge receipt differs from its canonical ledger')
     return row
 
@@ -283,7 +288,8 @@ async def ledger_before_output(db,*,operation_id,job):
     # priced yet); its charge never withholds the output.
     if (row is None or row.job_id!=job or row.runtime_path!=RUNTIME or row.profile_id!='near.text'
         or row.state not in {'settled','unknown'} or row.contact_started_at is None
-        or (row.state=='settled' and (row.actual_cost_microusd is None or not row.provider_operation_id))):
+        or (row.state=='settled' and (row.actual_cost_microusd is None or not (row.provider_operation_id
+            or any(e.get('provenance')=='manual_externally_unverified' for e in json.loads(row.evidence_json or '[]')))))):
         raise BoardError('near_ledger_readback_mismatch','The completed request record is required')
     return row
 

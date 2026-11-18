@@ -600,7 +600,7 @@
   "tests/test_work_board_m4_review_hardening.py": 53.87,
   "tests/test_work_board_m6_luna_fixes.py": 9.12,
   "tests/test_work_board_m6_provider_free_journey.py": 12.58,
-  "tests/test_work_board_memory.py": 502.32,
+  "tests/test_work_board_memory.py": 18.59,
   "tests/test_work_board_migration.py": 6.14,
   "tests/test_work_board_publication_recovery.py": 12.21,
   "tests/test_work_board_repository.py": 22.07,

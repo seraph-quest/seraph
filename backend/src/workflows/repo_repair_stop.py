@@ -16,6 +16,8 @@ from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc,
 
 STOP_ID = "repository:stop-intent:v1"
 EXPIRY_CLOSER_RETRY_SECONDS = 300
+# ``cost_exhausted`` is never chosen since #1284; it stays readable for stops
+# recorded before the upgrade.
 AUTOMATIC_REASONS = frozenset({"deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"})
 _ISSUED = weakref.WeakKeyDictionary()
 _STAGED = weakref.WeakKeyDictionary()
@@ -470,8 +472,8 @@ async def _validate_repository_stop_context_rows_sql(db, service, jobs, *, conte
 
 
 async def _original_accounting_members(db, context):
-    """Validate original liability without granting terminal settlement."""
-    from src.workflows.general_task_accounting import entry_for, reservation_liability
+    """Validate original membership and calls without granting terminal settlement."""
+    from src.workflows.general_task_accounting import entry_for
     source = _source()
     group = context["group"]
     rows = list((await db.scalars(select(InferenceCostReservation))).all())
@@ -491,17 +493,18 @@ async def _original_accounting_members(db, context):
                     or member["source_checkpoint_digest"] != source._source_digest(context["original"])):
                 raise DurableJobLeaseError("original stop Root accounting changed")
             root_members.append(row)
-    if (len(members) > group.max_inference_calls
-            or sum(reservation_liability(row) for row in members) > group.max_cost_microusd
-            or sum(reservation_liability(row) for row in root_members) > context["work"].limits.max_cost_microusd):
+    # ADR-037 (#1284): the call allowance stays; no dollar allowance.
+    if len(members) > group.max_inference_calls:
         raise DurableJobLeaseError("original stop accounting exceeded original bounds")
     return members
 
 
 async def _accounting(db, context):
     members = await _original_accounting_members(db, context)
-    if any(row.state not in {"settled", "released"} for row in members):
-        raise DurableJobLeaseError("original stop retains unsettled or Unknown liability")
+    # A finished but not yet priced (``unknown``) record does not hold the
+    # stop (ADR-037, #1284); a call still in flight does.
+    if any(row.state not in {"settled", "released", "unknown"} for row in members):
+        raise DurableJobLeaseError("original stop retains an unfinished request")
     return _source()._source_digest([row.model_dump(mode="json")
         for row in sorted(members, key=lambda row: row.operation_id)])
 
@@ -517,8 +520,9 @@ async def _limit_evidence(db, context, *, reason):
     goal = await db.get(Goal, context["goal"].id, populate_existing=True)
     if goal is None or source._source_digest(goal.model_dump(mode="json")) != limits["original_goal_row_digest"]:
         raise DurableJobLeaseError("original stop Goal limit facts changed")
-    # Negative expiry/limit intent retains contacted and Unknown debt. The
-    # terminal owner still requires _accounting's settled-only proof.
+    # Negative expiry/limit intent retains contacted calls. The terminal owner
+    # still requires _accounting's finished-only proof. Spend is recorded
+    # for display, never compared (ADR-037, #1284).
     members = await _original_accounting_members(db, context)
     root_members = [row for row in members if row.job_id == context["run"].run_identity]
     root_cost, group_cost = sum(map(reservation_liability, root_members)), sum(map(reservation_liability, members))
@@ -528,12 +532,14 @@ async def _limit_evidence(db, context, *, reason):
     causes = {
         "deadline_exhausted": now >= cutoff,
         "goal_limit_exhausted": now >= goal_cutoff and cutoff == goal_cutoff,
-        "cost_exhausted": work.limits.max_cost_microusd - root_cost < bound,
-        "shared_group_exhausted": len(members) >= group.max_inference_calls or group.max_cost_microusd - group_cost < bound
+        # Never chosen since #1284; only a stop recorded before the upgrade
+        # with this cause still completes under its recorded evidence.
+        "cost_exhausted": reason == "cost_exhausted",
+        "shared_group_exhausted": len(members) >= group.max_inference_calls
             or now >= group.original_deadline_at,
     }
     if reason is None:
-        candidates = ["goal_limit_exhausted", "deadline_exhausted", "cost_exhausted", "shared_group_exhausted"]
+        candidates = ["goal_limit_exhausted", "deadline_exhausted", "shared_group_exhausted"]
         reason = next((candidate for candidate in candidates if causes[candidate]), None)
         if reason is None:
             return None

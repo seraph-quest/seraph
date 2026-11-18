@@ -108,16 +108,16 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
-@pytest.mark.parametrize("cause", ["cost_exhausted", "shared_group_exhausted"])
-async def test_actual_original_limit_after_failed_patch_releases_only_terminal(accounting_db, monkeypatch, repository_admission_signer, language, cause):
+@pytest.mark.parametrize("actual_cost", [0, 100])
+async def test_actual_original_limit_after_failed_patch_releases_only_terminal(accounting_db, monkeypatch, repository_admission_signer, language, actual_cost):
+    # Design test 13 (#1284): a repair created with no dollar field runs to
+    # its call ceiling, whatever the call cost; only the ceiling stops it.
     from src.work_board.contracts import TaskLimits
-    task_limits = TaskLimits(max_inference_calls=1 if cause == "shared_group_exhausted" else 5,
-        max_cost_microusd=500, wall_seconds=900)
-    work_limits = {"max_iterations": 3, "max_total_seconds": 900,
-        "max_cost_usd": 0.000100 if cause == "cost_exhausted" else 0.0010019}
+    task_limits = TaskLimits(max_inference_calls=1, wall_seconds=900)
+    work_limits = {"max_iterations": 3, "max_total_seconds": 900}
     await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
-        stop_at=cause, task_limits=task_limits, work_limits=work_limits,
-        actual_model_cost_microusd=100 if cause == "cost_exhausted" else 0)
+        stop_at="shared_group_exhausted", task_limits=task_limits, work_limits=work_limits,
+        actual_model_cost_microusd=actual_cost)
 
 
 @pytest.mark.asyncio
@@ -131,9 +131,10 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
     # this same configuration lock; no Source authority is replaced.
     mutation_lock = asyncio.Lock()
     monkeypatch.setattr(effective_policy, "configuration_mutation_lock", mutation_lock)
+    from src.work_board.contracts import TaskLimits
     factory, owner, service, jobs, binding, _ = await actual_native_source(accounting_db, monkeypatch,
-        goal_capacity=2, claim_child=False,
-        work_limits={"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.000050})
+        goal_capacity=2, claim_child=False, task_limits=TaskLimits(max_inference_calls=0, wall_seconds=900),
+        work_limits={"max_iterations": 3, "max_total_seconds": 900})
     operator = await authenticate_session(owner.session_id, touch=False)
     configured = read_model_fabric_configuration()
     reached, release = asyncio.Event(), asyncio.Event()
@@ -174,7 +175,7 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
     actual_mutation = await asyncio.wait_for(mutation, timeout=15)
     assert actual_mutation["status"] == "revoked"
     root_id = outcome["repository_job_id"]
-    assert outcome["stop_reason"] == "cost_exhausted" and outcome["stop_pending"] is rollback
+    assert outcome["stop_reason"] == "shared_group_exhausted" and outcome["stop_pending"] is rollback
     async with factory() as db:
         root = await jobs._fetch(db, root_id)
         assert jobs._repo_repair_reservation_state(root)["status"] == ("held" if rollback else "released")
@@ -275,20 +276,18 @@ async def test_actual_later_goal_cutoff_cannot_govern_original_repository_stop(a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("zero_limit", ["root_cost", "group_cost", "group_calls"])
-async def test_actual_original_zero_allowance_stops_before_contact(accounting_db, monkeypatch, repository_admission_signer, zero_limit):
+async def test_actual_original_zero_call_allowance_stops_before_contact(accounting_db, monkeypatch, repository_admission_signer):
+    # ADR-037 (#1284): only a zero call allowance stops a repair; no dollar field.
     from src.work_board.contracts import TaskLimits
-    task_limits = TaskLimits(max_inference_calls=0 if zero_limit == "group_calls" else 5,
-        max_cost_microusd=0 if zero_limit == "group_cost" else 500, wall_seconds=900)
-    work_limits = {"max_iterations": 3, "max_total_seconds": 900,
-        "max_cost_usd": 0.0 if zero_limit == "root_cost" else 0.0010019}
+    task_limits = TaskLimits(max_inference_calls=0, wall_seconds=900)
+    work_limits = {"max_iterations": 3, "max_total_seconds": 900}
     factory, owner, service, jobs, binding, _ = await actual_native_source(accounting_db, monkeypatch,
         goal_capacity=2, claim_child=False, task_limits=task_limits, work_limits=work_limits)
     operator = await authenticate_session(owner.session_id, touch=False)
     stopped = await prepare_repository_native_source(service, jobs, binding,
         child_owner="actual-original-zero-worker", principal=operator.principal)
     assert stopped["stop_pending"] is False
-    assert stopped["stop_reason"] == ("cost_exhausted" if zero_limit == "root_cost" else "shared_group_exhausted")
+    assert stopped["stop_reason"] == "shared_group_exhausted"
     async with factory() as db:
         root = await jobs._fetch(db, stopped["repository_job_id"])
         assert root.status == "failed" and jobs._repo_repair_reservation_state(root)["status"] == "released"

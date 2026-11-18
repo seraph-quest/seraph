@@ -31,6 +31,7 @@ class TaskLimits(ClosedTaskModel):
     wall_seconds: int = Field(default=900, ge=1, le=900)
     depth: Literal[0] = 0
     max_outstanding_children: int = Field(default=2, ge=0, le=2)
+    # Recorded legacy amount (ADR-037, #1284): parsed, never compared.
     max_cost_microusd: int = Field(default=0, ge=0)
 
 
@@ -332,7 +333,8 @@ class TaskProposalGroupV1(ClosedTaskModel):
     intent_egress_ack_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     limits_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     max_inference_calls: int = Field(ge=0, le=12)
-    max_cost_microusd: int = Field(ge=0)
+    # Recorded legacy amount (ADR-037, #1284): parsed, never compared.
+    max_cost_microusd: int = Field(default=0, ge=0)
     max_steps: int = Field(ge=1, le=16)
     issued_at: datetime
     original_deadline_at: datetime
@@ -679,7 +681,8 @@ class RepositoryNativeLimitEvidenceV1(ClosedTaskModel):
     schema_version: Literal["repository.native_limit_evidence.v1"] = "repository.native_limit_evidence.v1"
     original_limits_digest: TaskDigest
     original_deadline_at: datetime
-    original_server_bound_microusd: int = Field(gt=0)
+    # Recorded legacy amounts (ADR-037, #1284): parsed, never compared.
+    original_server_bound_microusd: int = Field(ge=0)
     root_liability_microusd: int = Field(ge=0)
     group_liability_microusd: int = Field(ge=0)
     group_calls: int = Field(ge=0)

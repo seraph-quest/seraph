@@ -22,7 +22,7 @@ export interface ProgrammeStatus {
   next_source_state: "eligible" | "scheduled" | "held" | "unavailable";
   next_source_eligible_at: string | null; next_source_reason: string | null;
   next_digest_at?: string | null;
-  remaining_allowance_microusd: number | null; recovery: string | null;
+  recovery: string | null;
 }
 export interface ProgrammeDigestSnapshot {
   digests: { id: string; created_at: string; digest: {
@@ -61,8 +61,7 @@ export function isProgrammeDigestSnapshot(value: unknown): value is ProgrammeDig
       || (["held", "unavailable"].includes(p.next_source_state) && p.next_source_eligible_at === null))
     && (p.next_source_reason === null || (typeof p.next_source_reason === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(p.next_source_reason)))
     && (!["held", "unavailable"].includes(p.next_source_state) || p.next_source_reason !== null)
-    && (p.next_digest_at === undefined || timestamp(p.next_digest_at))
-    && (p.remaining_allowance_microusd === null || (Number.isSafeInteger(p.remaining_allowance_microusd) && p.remaining_allowance_microusd >= 0)))
+    && (p.next_digest_at === undefined || timestamp(p.next_digest_at)))
     && Array.isArray(snapshot.digests) && snapshot.digests.every((entry) => entry && typeof entry.id === "string"
       && entry.digest && typeof entry.digest.local_date === "string" && typeof entry.digest.timezone === "string"
       && Array.isArray(entry.digest.blocked_reasons) && entry.digest.blocked_reasons.every((reason) => typeof reason === "string")

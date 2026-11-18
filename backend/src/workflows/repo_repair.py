@@ -314,7 +314,8 @@ class RepoWorkLimits(BaseModel):
 
     max_iterations: int = Field(ge=1, le=3)
     max_total_seconds: int = Field(ge=1, le=900)
-    max_cost_usd: float = Field(ge=0, allow_inf_nan=False)
+    # Recorded legacy amount (ADR-037, #1284): parsed, never compared.
+    max_cost_usd: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
     @property
     def max_cost_microusd(self) -> int:

@@ -54,7 +54,7 @@ is introduced. Contacted and Unknown liabilities remain held at their full bound
 
 **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the original-cost term from these ceilings and the
 holding of contacted or Unknown amounts. Calls, iterations, the 900-second
-limit and the cutoff stay. Delivered in the second #1284 pull request.
+limit and the cutoff stay. Delivered by the second #1284 pull request.
 
 Planning, continuations and repository inference share the original reservation
 writer and serial inference lane. Every model request requires fresh exact

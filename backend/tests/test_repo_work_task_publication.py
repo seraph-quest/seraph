@@ -637,7 +637,7 @@ async def test_actual_source_stop_preserves_prior_ordinary_closure_requirement(a
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('language', ['test_python', 'test_node'])
-async def test_actual_source_unknown_model_cost_retains_original_capacity(accounting_db, monkeypatch, language, repository_admission_signer):
+async def test_actual_source_unpriced_model_call_still_uses_its_response(accounting_db, monkeypatch, language, repository_admission_signer):
     await _actual_source_callback_journey(accounting_db, monkeypatch, False, language,
         unknown_model_cost=True)
 
@@ -734,39 +734,8 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         if planned:
             await _assert_one_scripted_planner_row(db)
     assert (await jobs.get_job(binding.invocation_id))['lease'] == before_child['lease']
-    if unknown_model_cost:
-        with pytest.raises(Exception):
-            await grant_repository_iteration_consent(service.repository_source_service, jobs,
-                job_id=root_id, owner=owner, request=request, general_task_service=service,
-                principal=operator.principal)
-        assert len(contacted) == 1
-        async with factory() as db:
-            rows = list((await db.scalars(_repository_cost_rows(planned))).all())
-            assert len(rows) == 1 and rows[0].state == 'unknown'
-            assert rows[0].contact_started_at is not None
-            assert rows[0].actual_cost_microusd is None
-            from src.workflows.general_task_accounting import reservation_liability
-            assert rows[0].bound_microusd > 0
-            assert reservation_liability(rows[0]) == rows[0].bound_microusd
-            run = await jobs._fetch(db, root_id)
-            held = jobs._repo_repair_reservation_state(run)
-            assert held['status'] == 'held'
-        assert (await jobs.get_job(root_id))['status'] == 'unknown_external_effect'
-        from src.workflows.job_runtime import DurableJobLeaseError
-        with pytest.raises((RepoRepairError, DurableJobLeaseError)):
-            await grant_repository_iteration_consent(service.repository_source_service, jobs,
-                job_id=root_id, owner=owner, request=request, general_task_service=service,
-                principal=operator.principal)
-        from src.workflows.repo_repair_stop import stop_repository_root
-        stopped = await stop_repository_root(service.repository_source_service, jobs,
-            job_id=root_id, owner=owner, general_task_service=service)
-        assert stopped['pending'] is True
-        assert root_id in service.repository_source_service._iterative_lanes
-        async with factory() as db:
-            run = await jobs._fetch(db, root_id)
-            assert jobs._repo_repair_reservation_state(run)['status'] == 'held'
-        assert len(contacted) == 1
-        return
+    # ADR-037 (#1284): an unpriced NEAR call (no billing readback) is finished;
+    # its response is used exactly like a priced one.
     result = await grant_repository_iteration_consent(service.repository_source_service, jobs,
         job_id=root_id, owner=owner, request=request, general_task_service=service,
         principal=operator.principal)
@@ -780,9 +749,10 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     assert after_child['attempt_count'] == 1
     async with factory() as db:
         rows = list((await db.scalars(_repository_cost_rows(planned))).all())
-        assert len(rows) == 1 and rows[0].state == 'settled'
-        assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == actual_model_cost_microusd
-        assert rows[0].job_id == root_id
+        assert len(rows) == 1 and rows[0].state == ('unknown' if unknown_model_cost else 'settled')
+        assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == (
+            None if unknown_model_cost else actual_model_cost_microusd)
+        assert rows[0].job_id == root_id and rows[0].bound_microusd == 0
     if stop_at == 'contacted_wait':
         from src.workflows.repo_repair_stop import stop_repository_root
         stopped = await stop_repository_root(service.repository_source_service, jobs,
@@ -959,7 +929,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     executed = await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,
         owner=owner, request=execution_request, principal=operator.principal)
     assert executed['status'] == ('failed' if three_iterations else 'succeeded') and executed['cleanup_proven'] is True
-    if stop_at in {'cost_exhausted', 'shared_group_exhausted'}:
+    if stop_at == 'shared_group_exhausted':
         from src.workflows.repo_repair_source import _repository_record
         review = executed['repository_review']
         assert review['stop_reason'] == stop_at and review['stop_pending'] is False

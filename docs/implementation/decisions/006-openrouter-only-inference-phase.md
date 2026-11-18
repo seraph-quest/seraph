@@ -139,8 +139,10 @@ operation's review state; it cannot cover a later-settled unknown liability.
 **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the period, reserve and overrun clauses above. A new
 UTC month needs no acknowledgment, a charge above any former reserve blocks
 nothing, and an unpriced request does not reduce capacity or hold the lane. The
-month stamp on each row only groups spend for display. Ledger continuity
-mismatches stop blocking inference in the second #1284 pull request.
+month stamp on each row only groups spend for display. Since the second #1284
+pull request a ledger continuity mismatch no longer blocks inference: the ledger
+reseals and records a history gap. The deployment binding and provider-policy
+record still block.
 
 Vision, audio, and embeddings are capability-selected. A required capability
 is blocked with a visible reason until its exact model, request shape, policy,

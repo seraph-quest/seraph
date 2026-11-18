@@ -990,7 +990,8 @@ describe('RepoRepairInspector literal authenticated Source captures R199', () =>
       } else {
         expect(evidence).not.toBeNull();
         expect(screen.getByText(`Original cutoff: ${evidence!.original_deadline_at}`)).toBeInTheDocument();
-        expect(screen.getByText(`Recorded Root cost: ${evidence!.root_liability_microusd} microusd · original limit ${evidence!.original_root_max_cost_microusd} microusd`)).toBeInTheDocument();
+        expect(screen.getByText(`Recorded Root spend: ${evidence!.root_liability_microusd} microusd`)).toBeInTheDocument();
+        expect(screen.queryByText(/original limit .* microusd/)).toBeNull();
         expect(screen.getByText(`Recorded group calls: ${evidence!.group_calls} · original limit ${evidence!.original_group_max_calls}`)).toBeInTheDocument();
       }
       if (review.contact_state === 'not_prepared') {

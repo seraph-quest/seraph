@@ -41,7 +41,6 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
   const [pending, setPending] = useState<GeneralTaskCreateRequest | null>(() => scope ? pendingCreates.get(scope) ?? null : null);
   const [goalId, setGoalId] = useState(pending?.input.goal_ref ?? "");
   const [intent, setIntent] = useState(pending?.input.intent ?? "");
-  const [cost, setCost] = useState(String(pending?.input.limits.max_cost_microusd ?? 0));
   const [egress, setEgress] = useState(pending?.input.inference_egress_acknowledged ?? false);
   const [read, setRead] = useState<GeneralTaskPlanRead | null>(null);
   const [localDocument, setLocalDocument] = useState(false);
@@ -95,7 +94,7 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     setPendingRevision(null); setReplacementDraft(""); setRevisionReason("");
     const retained = scope ? pendingCreates.get(scope) ?? null : null;
     setPending(retained); setIntent(retained?.input.intent ?? ""); setGoalId(retained?.input.goal_ref ?? "");
-    setCost(String(retained?.input.limits.max_cost_microusd ?? 0)); setEgress(retained?.input.inference_egress_acknowledged ?? false);
+    setEgress(retained?.input.inference_egress_acknowledged ?? false);
     if (task && owned) void refresh();
     return () => { ++generation.current; partialInspection.current?.abort(); };
   }, [scope, task?.task_id, task?.task_revision, owned]); // Exact scope fences late readbacks.
@@ -175,12 +174,12 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
     const version = generation.current;
     let request = pending;
     if (!request) {
-      if (!goal?.revision || !intent.trim() || new TextEncoder().encode(intent).length > 8192 || !Number.isSafeInteger(Number(cost)) || Number(cost) < 0) {
-        setError("Choose an active owned Goal and an intent of at most 8192 UTF-8 bytes with a finite nonnegative budget."); return;
+      if (!goal?.revision || !intent.trim() || new TextEncoder().encode(intent).length > 8192) {
+        setError("Choose an active owned Goal and an intent of at most 8192 UTF-8 bytes."); return;
       }
       request = { goal_revision: goal.revision, idempotency_key: crypto.randomUUID(), input: {
         goal_ref: goal.id, intent, evidence_refs: [], requested_output: { type: "object" },
-        limits: { max_steps: 16, max_inference_calls: 12, wall_seconds: 900, depth: 0, max_outstanding_children: 2, max_cost_microusd: Number(cost) },
+        limits: { max_steps: 16, max_inference_calls: 12, wall_seconds: 900, depth: 0, max_outstanding_children: 2 },
         inference_egress_acknowledged: egress,
       } };
       pendingCreates.set(scope, request); setPending(request);
@@ -341,9 +340,8 @@ export function GeneralTaskPanel({ ownerPrincipalId, ownerSessionId, task, goals
       <fieldset disabled={busy || Boolean(pending) || !owned} className="grid gap-3 mt-3">
         <label>Task Goal<select aria-label="Task Goal" value={goalId} onChange={e => setGoalId(e.target.value)}><option value="">Choose active Goal</option>{ownedGoals.map(g => <option key={g.id} value={g.id}>{g.title} · revision {g.revision}</option>)}</select></label>
         <label>What should Seraph do?<textarea aria-label="What should Seraph do?" className="cockpit-input w-full" rows={4} maxLength={8192} value={intent} onChange={e => setIntent(e.target.value)} /></label>
-        <label>Inference budget in micro USD<input aria-label="Inference budget in micro USD" type="number" min={0} step={1} value={cost} onChange={e => setCost(e.target.value)} /></label>
         <label><input type="checkbox" checked={egress} onChange={e => setEgress(e.target.checked)} />I acknowledge sending this intent and public tool contracts through the governed inference route. Current consent and capability gates still apply.</label>
-        <p className="text-xs">Bounds: 16 steps, 12 inference calls, 900 seconds, depth 0, 2 outstanding children. Output: a JSON object. Zero budget leaves inference-dependent planning blocked.</p>
+        <p className="text-xs">Bounds: 16 steps, 12 inference calls, 900 seconds, depth 0, 2 outstanding children. Output: a JSON object.</p>
       </fieldset>
       <button type="button" className="cockpit-feedback-button mt-3" disabled={busy || !owned || (!pending && (!goal || !intent.trim()))} onClick={() => void create()}>{busy ? "Preparing plan…" : pending ? "Retry exact task request" : "Prepare task plan"}</button>
     </>}

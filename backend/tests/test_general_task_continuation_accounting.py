@@ -20,12 +20,16 @@ from tests.general_task_test_transport import prepare_literal_planner
 pytestmark = pytest.mark.openrouter_legacy
 
 
-async def continuation_fixture(task_runtime, monkeypatch, *, max_calls=2):
+async def continuation_fixture(task_runtime, monkeypatch, *, max_calls=2, legacy_cost=None):
+    # ADR-037 (#1284): new tasks carry no dollar field; ``legacy_cost`` models
+    # a task created by an old client (recorded, never compared).
     creation = request()
+    limits = {"wall_seconds": 600, "max_inference_calls": max_calls}
+    if legacy_cost is not None:
+        limits["max_cost_microusd"] = legacy_cost
     creation = creation.model_copy(update={"input": creation.input.model_copy(update={
         "inference_egress_acknowledged": True,
-        "limits": creation.input.limits.model_copy(update={"wall_seconds": 600,
-            "max_inference_calls": max_calls, "max_cost_microusd": 1000})})})
+        "limits": creation.input.limits.model_copy(update=limits)})})
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime, creation_request=creation)
     owner = WorkBoardOwner(principal_id=current["manifest"]["owner_principal_id"],
         session_id=current["manifest"]["original_root_id"])
@@ -42,8 +46,13 @@ async def continuation_fixture(task_runtime, monkeypatch, *, max_calls=2):
 
 
 @pytest.mark.asyncio
-async def test_manual_group_two_continuations_share_original_clock_and_call_ceiling(task_runtime, monkeypatch, native_admission_lifecycle):
-    sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
+@pytest.mark.parametrize("legacy_cost", [None, 1])
+async def test_manual_group_two_continuations_share_original_clock_and_call_ceiling(task_runtime, monkeypatch, legacy_cost, native_admission_lifecycle):
+    # Design test 13 (#1284), general task: created with no dollar field (or
+    # an old client's tiny recorded amount) it runs to its call ceiling.
+    sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(
+        task_runtime, monkeypatch, legacy_cost=legacy_cost)
+    assert envelope.proposal_group.max_cost_microusd == (legacy_cost or 0)
     assert manifest.native_deadline_at < manifest.original_deadline_at
     for key in ("continuation-one", "continuation-two"):
         async with sessions() as db:
@@ -150,8 +159,12 @@ async def test_corrupted_canonical_reservation_evidence_denies_contact(task_runt
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("liability", ["unknown", "missing_settled_cost", "prior_period_cost"])
-async def test_group_liability_survives_accounting_period_change(task_runtime, monkeypatch, liability, native_admission_lifecycle):
-    sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
+async def test_unpriced_or_large_group_spend_never_blocks_the_next_call(task_runtime, monkeypatch, liability, native_admission_lifecycle):
+    """ADR-037 (#1284): an ``unknown`` (finished, not priced yet) row, a
+    settled row without a price, or spend above an old recorded amount does
+    not block the group's next call; only the call ceiling does."""
+    sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(
+        task_runtime, monkeypatch, legacy_cost=1000)
     async with sessions() as db:
         await planner.continue_plan(db, owner, parent=parent, task=task, attempt=attempt,
             manifest=manifest, envelope=envelope, request_key="original-period-contact")
@@ -174,16 +187,12 @@ async def test_group_liability_survives_accounting_period_change(task_runtime, m
             await dispatcher.jobs._persist_accounting_witness(db, workspace, account, rows)
             await db.commit()
     async with sessions() as db:
-        from src.workflows.general_task_accounting import reserve_entry
-        from src.workflows.inference_accounting import InferenceAccountingError
-        rows = list((await db.execute(select(InferenceCostReservation))).scalars())
-        original_run = await dispatcher.jobs._fetch(db, rows[0].job_id)
-        with pytest.raises(InferenceAccountingError, match="group_unknown|group_cost_limit"):
-            await reserve_entry(db, original_run, rows, {"group": envelope.proposal_group},
-                operation_id="new-period-probe", bound=0, runtime_path="general_task_planner")
-        with pytest.raises(BoardError):
+        result = await planner.continue_plan(db, owner, parent=parent, task=task, attempt=attempt,
+            manifest=manifest, envelope=envelope, request_key="next-call-after-unpriced-spend")
+        assert result.plan is not None and result.group == envelope.proposal_group
+        with pytest.raises(BoardError, match="call_limit"):
             await planner.continue_plan(db, owner, parent=parent, task=task, attempt=attempt,
-                manifest=manifest, envelope=envelope, request_key="new-period-cannot-reset-group")
+                manifest=manifest, envelope=envelope, request_key="beyond-call-ceiling")
         rows = list((await db.execute(select(InferenceCostReservation))).scalars())
-        assert len(rows) == 1 and rows[0].period_id == "2000-01"
-    assert len(transport["contacts"]) == 1
+        assert len(rows) == 2
+    assert len(transport["contacts"]) == 2

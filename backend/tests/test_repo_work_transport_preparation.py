@@ -176,13 +176,11 @@ def test_any_other_body_or_target_is_refused_before_contact(consented, change):
     assert near_tee_egress_reason(call) == CODE
 
 
-def test_real_catalog_prices_need_a_larger_repository_request_bound():
-    """Availability only (#1184): the repository suites price their fixture
-    catalog so a 100 micro-USD bound covers the slot. At NEAR's real
-    Qwen/Qwen3.8-27B prices ($0.04/M in, $1.35/M out) a repository-sized
-    slot (32,768 input, 1,024 output tokens) needs about 2.7k micro-USD per
-    request, so the operator's slot bound, lane ceiling and Task/Goal cost
-    limits must allow that much per repair iteration."""
+def test_real_catalog_prices_never_gate_a_repository_request():
+    """ADR-037 (#1284): at NEAR's real Qwen/Qwen3.8-27B prices a
+    repository-sized slot (32,768 input, 1,024 output tokens) costs about
+    2.7k micro-USD per request. That price is shown, never compared: a slot
+    with a small (or no) stored legacy bound is still available."""
     from src.model_fabric.configuration import NearTeeSlot
     from src.model_fabric.near_tee_catalog import evaluate_catalog, parse_catalog_record
     from tests.test_near_tee_text_slot import catalog_record
@@ -191,5 +189,5 @@ def test_real_catalog_prices_need_a_larger_repository_request_bound():
         return NearTeeSlot(model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=32768, max_output_tokens=1024,
             request_cost_bound_microusd=bound, enabled=False)
     reason, required = evaluate_catalog(facts, slot_name="text", slot=slot(100))
-    assert reason == "near_tee_catalog_cost_bound_too_small" and 2_600 <= required <= 2_800
-    assert evaluate_catalog(facts, slot_name="text", slot=slot(required))[0] is None
+    assert reason is None and 2_600 <= required <= 2_800
+    assert evaluate_catalog(facts, slot_name="text", slot=slot(None))[0] is None

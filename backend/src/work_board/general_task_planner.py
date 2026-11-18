@@ -79,7 +79,6 @@ class GeneralTaskPlanner:
             "original_provenance": original_provenance,
             "max_steps": context.request.limits.max_steps,
             "wall_seconds": context.request.limits.wall_seconds,
-            "max_cost_microusd": context.request.limits.max_cost_microusd,
             "deadline_at": _utc(context.callback.deadline_at).timestamp(),
             "specialist_role": context.request.role}
         return await self.propose(db, owner, task_input, descriptors, group.goal_revision,
@@ -153,13 +152,13 @@ class GeneralTaskPlanner:
             from src.workflows.inference_accounting import _utc
             _specialist = {**_specialist, "max_steps": specialist_context.request.limits.max_steps,
                 "wall_seconds": specialist_context.request.limits.wall_seconds,
-                "max_cost_microusd": specialist_context.request.limits.max_cost_microusd,
                 "deadline_at": _utc(specialist_context.callback.deadline_at).timestamp(),
                 "specialist_role": specialist_context.request.role}
         if not task_input.inference_egress_acknowledged:
             raise BoardError("general_task_planning_consent_required", "Acknowledge intent egress for planning", status_code=422)
-        if task_input.limits.max_inference_calls < 1 or task_input.limits.max_cost_microusd <= 0:
-            raise BoardError("general_task_planning_budget_required", "Planning requires one call and a nonzero monetary ceiling", status_code=422)
+        if task_input.limits.max_inference_calls < 1:
+            # ADR-037 (#1284): planning needs one call; no dollar allowance.
+            raise BoardError("general_task_planning_call_required", "Planning requires at least one inference call", status_code=422)
         if not descriptors:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
         from src.model_fabric.retirement import (NO_ACTIVE_PROVIDER_REASON, inactive_route_label,

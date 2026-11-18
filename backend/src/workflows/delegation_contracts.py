@@ -42,6 +42,7 @@ class DelegateLimits(ClosedTaskModel):
     wall_seconds: int = Field(default=300, ge=1, le=900)
     depth: Literal[1] = 1
     max_outstanding_children: Literal[0] = 0
+    # Recorded legacy amount (ADR-037, #1284): parsed, never compared.
     max_cost_microusd: int = Field(default=0, ge=0)
 
     @field_validator("depth", "max_outstanding_children", mode="before")
@@ -272,7 +273,8 @@ def verify_delegate_request(request, *, parent_task_id, parent_limits,
     active = sum(child["status"] not in _FINISHED for child in children)
     if active >= min(MAX_ACTIVE_CHILDREN, parent_limits.max_outstanding_children):
         _deny("delegation_simultaneous_limit", "Original parent has no free child slot")
-    for field in ("max_steps", "max_inference_calls", "max_cost_microusd"):
+    # ADR-037 (#1284): steps and calls stay bounded; no dollar allocation.
+    for field in ("max_steps", "max_inference_calls"):
         retained = sum(getattr(child.limits, field) for child in retained_requests)
         if retained + getattr(request.limits, field) > getattr(parent_limits, field):
             _deny("delegation_budget_denied", "Child allocation exceeds original retained bounds")

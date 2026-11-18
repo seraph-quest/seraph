@@ -20,10 +20,10 @@ export function AccountingRecoveryLink({ task, owner, metadataConfirmed, onOpen 
           return control.action === "settle" && control.method === "POST" && control.endpoint === "/api/settings/model-fabric/accounting/settle" && control.expected_revision === row.revision;
         });
       }) ?? false;
-      setReceipt({ key, ready, message: ready ? "The owning accounting API advertises settlement for this exact job and goal." : "No settlement control is advertised for this exact job and goal. Cost remains unresolved; inspect the owning receipt." });
-    }).catch(() => { if (!controller.signal.aborted) setReceipt({ key, ready: false, message: "Owning accounting metadata is unavailable or permission is missing. Cost remains unresolved; refresh task detail and restore accounting in Settings." }); });
+      setReceipt({ key, ready, message: ready ? "You can record the charge for this exact job and goal. This is optional." : "No charge can be recorded for this exact job and goal. Its spend is not priced yet; inspect the owning receipt." });
+    }).catch(() => { if (!controller.signal.aborted) setReceipt({ key, ready: false, message: "Spend history is unavailable or permission is missing. Its spend is not priced yet; refresh task detail or open spend history in Settings." }); });
     return () => controller.abort();
   }, [key, metadataConfirmed]);
   const current = receipt?.key === key ? receipt : null;
-  return <><p className="mt-1 text-xs">{current?.message ?? "Accounting controls are not confirmed. Refresh task detail to check the owning ledger."}</p>{current?.ready && metadataConfirmed && onOpen && <button type="button" className="cockpit-feedback-button mt-2" onClick={onOpen}>Open owning cost accounting</button>}</>;
+  return <><p className="mt-1 text-xs">{current?.message ?? "Spend controls are not confirmed. Refresh task detail to check recorded spend."}</p>{current?.ready && metadataConfirmed && onOpen && <button type="button" className="cockpit-feedback-button mt-2" onClick={onOpen}>Record the charge</button>}</>;
 }

@@ -217,7 +217,7 @@ class GoalDiscoveryService:
             capability_id=DISCOVERY_CAPABILITY, capability_version="1",
             goal_owner_principal_id=binding.issuer_principal_id, goal_owner_session_id=binding.issuer_root_id,
             programme_binding=binding, plan_ref=staged.reference, occurrence_day=day,
-            original_job_id=job_id, budget_microusd=binding.cost_ceiling_microusd, no_learning=True)
+            original_job_id=job_id, no_learning=True)
         inputs = {"plan_ref": staged.reference.model_dump(mode="json"), "plan_file_path": staged.file_path,
             "public_brief_ref": brief.reference.model_dump(mode="json"), "public_brief_file_path": brief.file_path, "no_learning": True}
         spec = DurableJobSpec(identity=DurableJobIdentity(job_id=job_id, owner_kind="service",
@@ -225,7 +225,7 @@ class GoalDiscoveryService:
             idempotency_scope="goal-programme-daily", idempotency_key=identifier.hex), inputs=inputs,
             goal_id=goal_id, goal_revision=binding.goal_revision, priority=50, service_id=DISCOVERY_SERVICE,
             resource_claims=("goal-discovery:" + binding.owner_identity_id,), declared_authority=authority.model_dump(mode="json"),
-            deadline_at=deadline, max_attempts=1, budget_microusd=binding.cost_ceiling_microusd,
+            deadline_at=deadline, max_attempts=1,
             composition_binding=composition,
             run_fingerprint=_digest({"inputs": inputs, "authority": authority.model_dump(mode="json")}))
 
@@ -272,7 +272,9 @@ class GoalDiscoveryService:
         limits = {"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
             "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
             "max_source_bytes": 262144, "max_output_bytes": 65536,
-            "cost_limit_microusd": programme.budget.max_inference_microusd}
+            # ADR-037 (#1284): kept for the plan contract shape; no dollar
+            # limit applies to a programme and this value is never compared.
+            "cost_limit_microusd": 0}
         request = {"schema_version": 1, "plan_id": str(identifier), "programme_id": str(UUID(programme.id)),
             "programme_revision": programme.grant_revision, "goal_id": binding.goal_id, "goal_revision": programme.goal_revision,
             "grant_id": programme.id, "grant_revision": programme.grant_revision, "public_brief_digest": programme.brief_digest,

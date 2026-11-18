@@ -52,7 +52,7 @@ async def programme_setup(async_db, monkeypatch):
     clock = [NOW]
     service = GoalProgrammeService(clock=lambda: clock[0])
     await service.start()
-    request = GoalProgrammeRequest(expected_goal_revision=1, public_brief="Track public FastAPI releases", budget={"max_inference_microusd": 1000})
+    request = GoalProgrammeRequest(expected_goal_revision=1, public_brief="Track public FastAPI releases")
     yield service, operator, goal, request, clock
     await service.stop()
 
@@ -60,7 +60,7 @@ async def programme_setup(async_db, monkeypatch):
 async def accept(service, operator, goal, request):
     preview = await service.preview(operator=operator, goal_id=goal.id, request=request)
     accepted = GoalProgrammeAccept(**request.model_dump(), review_digest=preview["review_digest"],
-        public_web_acknowledged=True, local_artifacts_acknowledged=True, inference_ceiling_acknowledged=True)
+        public_web_acknowledged=True, local_artifacts_acknowledged=True)
     return await service.accept(operator=operator, goal_id=goal.id, request=accepted)
 
 
@@ -133,14 +133,22 @@ async def test_identity_revocation_fences_new_contact_and_adoption(programme_set
         await authority(service, goal, programme)
 
 
-async def test_zero_budget_and_missing_policy_configured_blocked(programme_setup, monkeypatch):
+async def test_sent_amount_is_ignored_and_missing_policy_configured_blocked(programme_setup, monkeypatch):
     service, operator, goal, request, _ = programme_setup
-    zero = request.model_copy(update={"budget": request.budget.model_copy(update={"max_inference_microusd": 0})})
-    programme = await accept(service, operator, goal, zero)
-    assert programme["state"] == "blocked"
-    assert programme["reason_code"] == "programme_zero_budget"
-    with pytest.raises(GoalProgrammeError, match="programme_zero_budget"):
-        await authority(service, goal, programme)
+    # ADR-037 (#1284): an old client's amount (even $0) is accepted and
+    # dropped; a new programme has no allowance and is never blocked for money.
+    legacy = GoalProgrammeRequest.model_validate({**request.model_dump(), "budget": {"max_inference_microusd": 0}})
+    preview = await service.preview(operator=operator, goal_id=goal.id, request=legacy)
+    assert preview["acknowledgments_required"] == ["public_web_acknowledged", "local_artifacts_acknowledged"]
+    assert preview["programme"]["budget"] == {"max_outstanding_runs": 1}
+    programme = await service.accept(operator=operator, goal_id=goal.id, request=GoalProgrammeAccept(
+        **legacy.model_dump(), review_digest=preview["review_digest"], public_web_acknowledged=True,
+        local_artifacts_acknowledged=True, inference_ceiling_acknowledged=True))
+    assert programme["state"] == "active" and programme["reason_code"] is None
+    assert "max_inference_microusd" not in programme["budget"]
+    binding = await service.preflight_binding(goal_id=goal.id, programme_id=programme["id"],
+        grant_revision=programme["grant_revision"], capability_id=CAPABILITY_IDS[0])
+    assert binding.cost_ceiling_microusd is None and "cost_ceiling_microusd" not in binding.model_dump(mode="json")
     monkeypatch.setattr("src.guardian.goal_programmes._policy_binding", lambda: (3, "missing", "provider_policy_unavailable"))
     request = request.model_copy(update={"expected_grant_revision": 1})
     blocked = await accept(service, operator, goal, request)
@@ -153,7 +161,7 @@ async def test_exact_review_race_and_unknown_fields(programme_setup, monkeypatch
     preview = await service.preview(operator=operator, goal_id=goal.id, request=request)
     changed = GoalProgrammeAccept(**{**request.model_dump(), "public_brief": "different public content"},
         review_digest=preview["review_digest"], public_web_acknowledged=True,
-        local_artifacts_acknowledged=True, inference_ceiling_acknowledged=True)
+        local_artifacts_acknowledged=True)
     with pytest.raises(GoalProgrammeError, match="programme_review_stale"):
         await service.accept(operator=operator, goal_id=goal.id, request=changed)
     changed.public_brief = request.public_brief
@@ -213,7 +221,7 @@ async def test_real_api_preview_accept_and_controls(programme_setup, app, monkey
         assert "PRIVATE_SECRET_DESCRIPTION" not in preview.text
         accepted = await client.post(f"{base}/accept", json={**request.model_dump(mode="json"),
             "review_digest": preview.json()["review_digest"], "public_web_acknowledged": True,
-            "local_artifacts_acknowledged": True, "inference_ceiling_acknowledged": True})
+            "local_artifacts_acknowledged": True})
         assert accepted.status_code == 200, accepted.text
         programme = accepted.json()
         inspected = await client.get(base)
@@ -391,3 +399,90 @@ def test_programme_policy_binds_the_near_tee_research_route(tmp_path, monkeypatc
     assert near_tee_policy_from_configuration(current, "text") == (current, policy.digest)
     with pytest.raises(PermissionError):
         near_tee_policy_from_configuration(ModelFabricConfiguration(status="ready", egress_revision=3), "text")
+
+
+_REVIEWED_KEYS = ("id", "goal_id", "goal_revision", "grant_revision", "public_brief", "brief_digest", "confirmed_at",
+    "expires_at", "capability_ids", "budget", "cadence", "notification_limits", "artifact_prefix", "owner_identity_id",
+    "issuer_root_id", "issuer_principal_id", "route_epoch", "route_digest", "state", "reason_code")
+
+
+async def _store_legacy_generation(async_db, goal, amount):
+    """Rewrite the accepted generation as a pre-#1284 programme saved with ``amount``."""
+    from src.guardian.goal_programmes import _digest
+    async with async_db() as db:
+        row = await db.get(Goal, goal.id)
+        stored = json.loads(row.goal_programmes_json)
+        raw = stored["generations"][-1]
+        raw["budget"] = {"max_inference_microusd": amount, "max_outstanding_runs": 1}
+        raw["state"], raw["reason_code"] = ("blocked", "programme_zero_budget") if amount == 0 else ("active", None)
+        raw["review_digest"] = _digest({key: raw[key] for key in _REVIEWED_KEYS})
+        row.goal_programmes_json = json.dumps(stored, sort_keys=True, separators=(",", ":"))
+        db.add(row)
+    return raw
+
+
+async def _stored(async_db, goal):
+    async with async_db() as db:
+        return (await db.get(Goal, goal.id)).goal_programmes_json
+
+
+async def test_programme_saved_with_zero_allowance_pauses_once_then_renews(programme_setup, async_db):
+    """Design #1284 test 12 (zero half), section 4.4."""
+    from src.db.models import AuditEvent
+    from src.guardian.goal_programmes import NO_ALLOWANCE_NOTE, NO_ALLOWANCE_REASON
+    service, operator, goal, request, clock = programme_setup
+    await accept(service, operator, goal, request)
+    legacy = await _store_legacy_generation(async_db, goal, 0)
+    await service.stop()
+    restarted = GoalProgrammeService(clock=lambda: clock[0])
+    await restarted.start()
+    once = await _stored(async_db, goal)
+    raw = json.loads(once)["generations"][0]
+    assert (raw["state"], raw["reason_code"]) == ("paused", NO_ALLOWANCE_REASON)
+    # Keyed on the stored value, which is kept with the reviewed digest.
+    assert raw["budget"]["max_inference_microusd"] == 0 and raw["review_digest"] == legacy["review_digest"]
+    inspected = (await restarted.inspect(operator=operator, goal_id=goal.id))["programmes"][0]
+    assert inspected["state"] == "paused" and inspected["recovery"] == NO_ALLOWANCE_NOTE
+    with pytest.raises(GoalProgrammeError, match=NO_ALLOWANCE_REASON):
+        await authority(restarted, goal, raw)
+    # A second start changes nothing (idempotent) and audits nothing new.
+    await restarted.stop()
+    await restarted.start()
+    assert await _stored(async_db, goal) == once
+    async with async_db() as db:
+        audits = (await db.execute(select(AuditEvent).where(AuditEvent.event_type == "goal_programme_paused_no_allowance"))).scalars().all()
+    assert len(audits) == 1
+    # Explicit operator renewal (preview + accept of the same brief) runs.
+    renewed = await accept(restarted, operator, goal, request.model_copy(update={"expected_grant_revision": 1}))
+    assert renewed["state"] == "active" and renewed["grant_revision"] == 2
+    assert "max_inference_microusd" not in renewed["budget"]
+    assert (await authority(restarted, goal, renewed)).id == renewed["id"]
+    with pytest.raises(GoalProgrammeError, match=NO_ALLOWANCE_REASON):
+        await authority(restarted, goal, raw)
+    await restarted.stop()
+
+
+async def test_programme_saved_with_positive_allowance_runs_without_limit(programme_setup, async_db):
+    """Design #1284 test 12 (positive half): no limit, stored digest still verifies."""
+    from src.guardian.goal_programmes import _digest
+    service, operator, goal, request, clock = programme_setup
+    await accept(service, operator, goal, request)
+    legacy = await _store_legacy_generation(async_db, goal, 1000)
+    before = await _stored(async_db, goal)
+    await service.stop()
+    restarted = GoalProgrammeService(clock=lambda: clock[0])
+    await restarted.start()
+    assert await _stored(async_db, goal) == before
+    programme = await authority(restarted, goal, legacy)
+    assert programme.state == "active" and programme.budget.max_inference_microusd == 1000
+    assert programme.review_digest == legacy["review_digest"]
+    raw = programme.model_dump(mode="json")
+    assert _digest({key: json.loads(before)["generations"][0][key] for key in _REVIEWED_KEYS}) == raw["review_digest"]
+    assert raw["budget"] == {"max_inference_microusd": 1000, "max_outstanding_runs": 1}
+    binding = await restarted.preflight_binding(goal_id=goal.id, programme_id=legacy["id"],
+        grant_revision=legacy["grant_revision"], capability_id=CAPABILITY_IDS[0])
+    assert binding.cost_ceiling_microusd == 1000
+    async with async_db() as db:
+        policy = ProgrammePolicySnapshot(3, "route-digest")
+        assert (await restarted.validate_current_binding(db=db, binding=binding, policy=policy)).id == legacy["id"]
+    await restarted.stop()

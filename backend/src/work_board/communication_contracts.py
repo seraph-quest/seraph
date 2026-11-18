@@ -20,7 +20,8 @@ class CommunicationCreate(ClosedTaskModel):
     goal_id: str = Field(min_length=1, max_length=128)
     goal_revision: int = Field(ge=1)
     selection: CommunicationSelection
-    max_cost_microusd: int = Field(ge=0)
+    # Legacy client field (ADR-037, #1284): accepted, recorded, never compared.
+    max_cost_microusd: int = Field(default=0, ge=0)
     wall_seconds: int = Field(default=900, ge=1, le=900)
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
 

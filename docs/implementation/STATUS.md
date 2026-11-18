@@ -34,8 +34,10 @@ capability-pack support is separate from this migration.
 [ADR-030](./decisions/030-bounded-iterative-repository-work.md) (#1009) ships one
 `repository_work` Task per bug or change request, whether the operator supplies the
 plan or accepts a reviewed planner proposal. After selected-source consent, up to
-three manually approved patch iterations run under the original deadline, cost and
-iteration limits with Python pytest or Node 24 npm test/build checks. Each run
+three manually approved patch iterations run under the original deadline, call and
+iteration limits with Python pytest or Node 24 npm test/build checks (no
+original-cost or iteration dollar limit since #1284,
+[ADR-037](./decisions/037-no-local-cost-limits.md)). Each run
 records a local patch artifact and the actual requested command output. A requested
 check that exits non-zero continues into the next bounded iteration without renewing
 those limits. Base drift or a dirty live tree blocks before execution; the live tree
@@ -48,7 +50,7 @@ its logs, never as a check result. Operator Stop then closes it and releases the
 lane. After its original cutoff, the original closes by its own deadline cause: on
 operator Stop, on the next repository admission, or on the dispatcher tick, with
 no live operator session required. Only an unproven process closure stays held:
-a lost or still-running original producer, or an Unknown result or cost.
+a lost or still-running original producer, or an Unknown result.
 Crash/restart recovery for those cases is the tracked follow-up
 [#1063](https://github.com/seraph-quest/seraph/issues/1063). The public Source
 recovery action stays fail-closed (HTTP 503). New admissions record the
@@ -469,7 +471,9 @@ reasons, current typed capabilities and owner-scoped idempotency.
 
 One `WorkBoardTask` and existing `WorkflowRunState` remain the canonical task
 and execution owners. Planning uses the governed interactive text consumer
-`general_task_planner`, explicit egress acknowledgment and cost limits; execution
+`general_task_planner`, explicit egress acknowledgment and call limits (no dollar
+allowance since #1284, [ADR-037](./decisions/037-no-local-cost-limits.md); a
+create request's `max_cost_microusd` is accepted and ignored); execution
 retains current tool permissions, approvals, descriptor revisions, durable
 effects and private artifact readback. Output contracts are checked before
 effects; mediated approval waits require explicit exact continuation of the
@@ -491,7 +495,7 @@ implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-
 extends accepted plans into actual native tool children, dependency readback and
 private final artifacts under the same Root, Goal, original attempt, deadline
 and accepted inference group. Bounded acknowledged continuation shares the
-original call/cost limits; manual zero-cost plans make no model contact.
+original call limits; manual zero-call plans make no model contact.
 Safe pause and same-attempt resume preserve original authority. Paused edits
 replace the full Plan while freezing admitted, started and completed rows,
 without granting a lease or renewing execution. MCP typed discovery binds the
@@ -522,8 +526,8 @@ implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-
 extends an accepted native task with actual specialist Work cards, private
 copied handoffs, durable wait and physically verified child outputs. The original
 group admits at most two active and four retained specialist children, depth
-one, and shares its twelve-call ceiling, explicit cost allowance and original
-deadline. Parent/child navigation is informational; reserved identities do not
+one, and shares its twelve-call ceiling and original deadline (delegation sums
+steps and calls; no dollar allowance since #1284). Parent/child navigation is informational; reserved identities do not
 mean that a child has been claimed or executed. Completion remains no-learning.
 
 An authenticated private child reservation preserves and revalidates the
@@ -582,8 +586,9 @@ The private encrypted five-field plan retains exact source provenance and
 affected-only blockers. Each selected send or owned-event reschedule uses its
 own fresh exact preview, immutable approval, existing native action and
 independent provider readback; validating a subset performs no effects.
-Unknown contacts/costs retain their original liabilities and never trigger
-automatic replay. Read-only RecoveryGoal observation cannot renew an old write.
+Unknown contacts retain their original effect records and never trigger
+automatic replay. Since #1284 there is no source or communication dollar
+allowance; a `max_cost_microusd` in a create request is accepted and ignored. Read-only RecoveryGoal observation cannot renew an old write.
 Recovered selection grants no private-body access; generic Calendar readers
 remain root-only. Stored configuration alone establishes no readiness.
 
@@ -637,7 +642,7 @@ Cordis bridge, authored executable pack, tool registry, queue or authority owner
 
 The exact current signed method/version/digest/pointer revision can construct a
 new triage Task with strict fresh inputs. Explicit promotion uses existing
-durable native execution, fresh jobs/Attempts/deadlines/cost limits and current
+durable native execution, fresh jobs/Attempts/deadlines/call limits and current
 effect approvals. Full independent plan comparison and same-writer pin/body/
 original-event checks fence publication and exact-key replay; a changed method
 or body cannot create another Task under the original key. Family disable selects
@@ -711,15 +716,24 @@ owner recovery, native-writer binding validation and fail-closed corrections;
 external sockets and inference are denied, with zero reservation/spend.
 Executor contact/adoption CAS integration is still required before executor
 activation. macOS execution, provider availability and model usefulness are not
-established by these mechanical checks.
+established by these mechanical checks. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) programmes have no inference
+dollar allowance and new programmes store none; `programme_zero_budget` and
+`programme_allowance_exhausted` are no longer produced. A one-time startup step
+pauses every programme that is not ended and whose stored
+`max_inference_microusd` is exactly 0 (`programme_paused_no_allowance`, note
+"Paused: it had no inference allowance. Resume it to run."), keyed on the
+stored value, not a date; a programme with a positive stored allowance keeps
+running without a limit.
 
 **Finite public Goal discovery: Partial.** The current Python executor for
 [#1004](https://github.com/seraph-quest/seraph/issues/1004) extends the existing
 programme, native job/artifact/accounting and scheduler owners. Its bounded
 operator journey includes fixed search, exact manifest selection, cited local
 brief/readback, first findings and later quiet outcomes, inert checklist proposals
-and explicit `no_learning`. Original deadlines and cumulative programme ceilings
-remain binding across daily/accounting periods.
+and explicit `no_learning`. Original deadlines and occurrence, query, source and
+inference-request counts remain binding across days; generation spend is
+recorded for display only (no programme allowance since #1284).
 Accepted narrower limits and exact whole-output stage references are enforced;
 manifest derivation binds original physical HTTP response readbacks separately
 from artifact digests. Finite search-block causes survive authenticated history
@@ -750,8 +764,7 @@ Optional native delivery uses the existing outbox, recipient-bound opt-in,
 owner-wide one-digest/one-cited-deadline slots and canonical quiet/claim fences;
 ambiguous display consumes the slot without automatic retry. Home distinguishes
 actual run/source/output evidence from the next digest timer and source
-eligibility under the existing UTC cadence, scheduler, finite allowance and
-native holds. Unavailable or blocked eligibility has an explicit reason; it
+eligibility under the existing UTC cadence, scheduler and native holds. Unavailable or blocked eligibility has an explicit reason; it
 does not promise execution. Source freshness is rechecked in the final C1
 publication writer, so expiry after staging cannot publish a Task or bind its
 proposal artifact. Existing private unbound staging retains its size bound/expiry
@@ -784,7 +797,7 @@ the Constitution and ADRs remain the target authority.
 | Operator outcome | Declared behavior and boundary |
 | --- | --- |
 | Return to work and recover interruptions | Stable ownership, separately reviewed continuity recovery, a guided first verified result and task attention controls preserve inspectable history. A fresh login does not restore expired execution grants or unknown-effect authority. |
-| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, budget and recovery state. Verified child outputs gate parent adoption; uncertainty holds capacity or liability instead of triggering blind replay. |
+| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, call-count and recovery state. Verified child outputs gate parent adoption; an uncertain effect is held for reconciliation instead of triggering blind replay. Since #1284 no dollar allowance applies. |
 | Review practical execution | Tested repository publication, finite Python/Node repair profiles, exact-site private reading and literal PDF/CSV comparison produce reviewable native receipts and readback. Host-user execution is not OS isolation; optional Linux sandbox enforcement has its own readiness gate. |
 | Use evidence in the next decision | Source-bound working sets, evidence-conflict invalidation and explicit procedure recommendations recheck current provenance. Learning requires separate review; success alone does not authorize memory change or demonstrate improved decision quality. |
 | Understand and revoke capability authority | Effective grants and coordinated revocation expose current permission. Reviewed local and authored packages bind exact versions, digests, schemas and execution profiles; unavailable isolation, quarantine or changed authority blocks new dispatch. Installation alone is not executable trust. |
@@ -818,9 +831,8 @@ lets the NEAR TEE adapter send only that exact request: any other body or
 target is refused in `prepare_near_tee_call`, before any reservation, and
 again at the precontact guard. The single-shot repair consent pins the same
 exact body and route digests. A repository-sized slot at real NEAR prices
-costs about 2.7k micro-USD per request, so Task/Goal cost limits must allow
-that (availability only; the slot bound is gone since ADR-037, and Task/Goal
-cost limits go in the second #1284 pull request). Every other per-request gate
+costs about 2.7k micro-USD per request; that is spend history only, since
+ADR-037 (#1284) removed the slot bound and the Task/Goal cost limits. Every other per-request gate
 (model echo, `x-no-aliasing`, billing readback) is unchanged; `near_tee_route_unsupported` is no longer produced and stays only
 as a label for Tasks already blocked with it. A NEAR TEE answer that is not adopted (for
 example `near_tee_output_truncated` for a JSON draft cut at the slot's output
@@ -888,11 +900,13 @@ end-to-end encryption claim applies. Local `configured` status means current
 credential, consent and accounting readiness, never provider availability.
 NEAR uses the existing shared deployment ledger and serial inference broker;
 global egress revocation covers both NEAR and OpenRouter. Missing or invalid
-billing retains liability, withholds answer adoption and never replays inference.
-Private output requires current authority and settled-cost readback. The task
+billing never replays inference. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) it records the request as
+"not priced yet" and no longer ends the job in `cost_liability`; a job already
+in that status keeps its reconcile control, and settling is optional and only
+records a charge. Private output requires current authority. The task
 requires human Review; successful execution supplies no automatic approval.
-Unknown cost discards the withheld answer, and debt reconciliation cannot recover
-it or resend inference. Every outcome records `no_learning`.
+Every outcome records `no_learning`.
 Since #1147 PR3b (ADR-035) the route uses the shared NEAR client: every NEAR
 text request, inference and billing readback, also sends
 `x-no-aliasing: true`; the response model echo check is unchanged. The ADR-035
@@ -1157,8 +1171,8 @@ checkpoints each batch, reports the amount spent, can be cancelled, resumes idem
 namespace contents, removes rows of memories that are no longer active, and
 records a verified local readback before success. More than 10,000 canonical
 memories leaves the index incomplete (`near_tee_reindex_over_cap`); it never
-completes. A new Unknown accounting operation during a run ends it as a cost
-liability. No live NEAR call, price,
+completes. A batch NEAR has not priced is recorded as "not priced yet" and the
+run continues; it no longer ends as `cost_liability` (#1284). No live NEAR call, price,
 availability or embedding quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase
@@ -1236,9 +1250,19 @@ ADR-037 a missing charge no longer holds the lease. Scripted local receipts esta
 async/sync/stream ordering and preserve the recorded charge, deadline and
 denied-contact proof, without external inference or provider-availability
 claims. Paid egress requires a retained lifecycle witness outside root
-snapshots; stale or missing continuity still blocks inference on this branch
-while deterministic CPU features remain usable (that block becomes a recorded
-history gap in the second #1284 pull request; do not release between the two).
+snapshots. Since #1284 ledger continuity is display-only: a digest, totals,
+witness or row mismatch no longer blocks inference. The ledger reseals from
+its current rows, appends a `history_gap` entry to the account history, and
+the snapshot reports `history_verified: false`, shown as "Spend history may be
+incomplete since &lt;date&gt;" until the next clean full verification. The background
+verifier reseals instead of latching. The deployment binding and the
+provider-policy record are still verified and still block
+(`provider_policy_continuity_unavailable`, a consent fence); restore and rebind
+report an older spend history (the former "liability regression" refusal) as a
+warning and still carry it. Job status `cost_liability` is no longer produced;
+it stays readable for jobs already in it, whose reconcile control keeps
+working, and settling them is optional. Approval resume no longer compares the
+declared `budget_digest` (column kept; new jobs write null).
 Settings exposes an optional "record the charge" action for one request, marked
 externally unverified, that only records a charge. A new UTC month needs no
 review. Stable profile root binding and witnessed policy epochs prevent

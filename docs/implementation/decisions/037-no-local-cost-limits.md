@@ -5,7 +5,7 @@ title: "ADR-037: No local cost limits; the provider account holds them"
 
 # ADR-037: No local cost limits; the provider account holds them
 
-**Status:** Accepted under [#1284](https://github.com/seraph-quest/seraph/issues/1284), 2026-11-18, effective on the independently reviewed merge to `develop`. It is delivered by two stacked pull requests that are released together. [Development Status](../STATUS.md) owns what each merged slice ships.
+**Status:** Accepted under [#1284](https://github.com/seraph-quest/seraph/issues/1284), 2026-11-18, effective on the independently reviewed merge to `develop`. It is delivered by two stacked pull requests that are released together; both are delivered (see Delivery). [Development Status](../STATUS.md) owns what each merged slice ships.
 
 **Decision class:** Superseding policy. Supersedes the budget, reserve, period and overrun clauses of [ADR-006](./006-openrouter-only-inference-phase.md), [ADR-012](./012-finite-durable-readonly-research.md), [ADR-024](./024-purpose-specific-openrouter-routes.md), [ADR-025](./025-near-https-text-inference.md), [ADR-027](./027-standing-public-goal-programmes.md), [ADR-030](./030-bounded-iterative-repository-work.md) and [ADR-035](./035-near-tee-hosted-inference-only.md), and the per-task and per-programme dollar allowances. Every other clause of those decisions stays in force.
 
@@ -97,15 +97,39 @@ and the field is ignored.
 
 ## Delivery
 
-Two stacked pull requests under #1284, released together:
+Two stacked pull requests under #1284, released together. Both are delivered:
 
 1. The shared lane, Settings and chat: no ceiling, reserve, period review,
    overrun latch or budget state; the request record and spend display; this
    ADR.
-2. Work allowances and a display-only ledger: per-task, communication,
-   repository repair, programme and delegation dollar allowances; the
-   `cost_liability` job status for new work; ledger continuity becomes a
-   recorded "history gap" instead of a block.
+2. Work allowances and a display-only ledger:
+   - Per-task, per-group, specialist, communication-source, repository-repair
+     and delegation dollar allowances are removed; call counts, step limits,
+     deadlines and wall time stay. Create requests accept and ignore dollar
+     fields; stored envelopes are unchanged and still verify.
+   - Standing goal programmes have no inference allowance and new programmes
+     store none. A one-time startup step pauses every programme that is not
+     ended and whose stored `max_inference_microusd` is exactly 0 (reason
+     `programme_paused_no_allowance`, note "Paused: it had no inference
+     allowance. Resume it to run."), keyed on the stored value, not a date.
+     Programmes with a positive stored allowance continue without a limit.
+     `programme_zero_budget` and `programme_allowance_exhausted` are gone.
+   - The `cost_liability` job status is no longer produced. It stays a valid,
+     readable status for jobs already in it; their reconcile/settle control
+     keeps working and settling is optional. Approval resume no longer
+     compares `budget_digest` (the column is kept; new jobs write null).
+   - Ledger continuity is display-only. A digest, totals, witness or row
+     mismatch no longer blocks inference: the ledger reseals from its current
+     content, appends a `history_gap` entry to the account history, and the
+     snapshot reports `history_verified: false` ("Spend history may be
+     incomplete since &lt;date&gt;") until the next clean full verification. The
+     background verifier reseals instead of latching. The deployment binding
+     and provider-policy record verification still block
+     (`provider_policy_continuity_unavailable`). The "liability regression"
+     refusals in restore and rebind become warnings; spend history is still
+     carried. Lane recovery after manual settlement
+     (`reconcile_settled_near_operation`) is deleted because nothing holds the
+     lane.
 
 ## Consequences and risks
 
@@ -118,8 +142,9 @@ Two stacked pull requests under #1284, released together:
 - A retry after a crash in the middle of a call may send the request again and
   be charged twice. Idempotency still prevents double execution of the same
   operation; a retry is a new operation.
-- Ledger continuity still blocks inference after the first pull request and
-  becomes non-blocking only with the second. Do not release between the two.
+- Ledger continuity is display-only, so an edited or rolled-back ledger is
+  reported as a history gap rather than refused. Recorded spend can therefore
+  be incomplete; it is never used to limit anything.
 
 ## Verification
 

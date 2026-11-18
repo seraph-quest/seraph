@@ -43,7 +43,7 @@ Inbox, follow progress on the Work board, and help Seraph learn what helps you.
 | | What you can do |
 | --- | --- |
 | 🎯 **Keep goals in view** | Bring goals, tasks, conversations, and evidence together; inspect progress and recover interrupted work. |
-| 🔎 **Find relevant signals** | Assess changes from public source watches you select. Review cited opportunities in the Inbox, with attention and spending limits. |
+| 🔎 **Find relevant signals** | Assess changes from public source watches you select. Review cited opportunities in the Inbox, with attention limits. |
 | 🛠️ **Turn evidence into work** | Preview and accept bounded research, browser checks, reports, repository repair, and selected document workflows. |
 | 🌱 **Teach it what helps** | Give explicit Helpful / Not helpful feedback, review preference recommendations, and separately adopt or roll back memory changes. |
 | 🧩 **Extend your workspace** | Use skills, MCP adapters, reviewed procedures, and capability packages, plus optional consented desktop context and integrations. |
@@ -143,7 +143,8 @@ defines this direction and its accepted boundaries.
 <summary><strong>Try the current guardian loop</strong></summary>
 
 1. Choose a Goal, select relevant public source watches, and enable a finite
-   guardian policy with attention and spending limits.
+   guardian policy with attention limits (spending limits are set in your NEAR
+   account).
 2. Inspect a cited opportunity when a qualifying change arrives. Low-confidence
    or irrelevant assessments stay quiet.
 3. Preview and accept a supported browser-check or evidence-report plan in Work.

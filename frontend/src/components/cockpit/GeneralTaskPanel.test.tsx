@@ -79,7 +79,8 @@ it("submits ordinary intent without a forged tool plan and opens its persisted i
   const body = JSON.parse(String(vi.mocked(apiFetch).mock.calls[0][1]?.body));
   expect(body.plan).toBeUndefined(); expect(body.accept).toBeUndefined();
   expect(body.input.intent).toBe("Prepare a local note"); expect(body.input.tool_set_digest).toBeUndefined();
-  expect(body.input.limits.max_cost_microusd).toBe(0);
+  expect(body.input.limits).not.toHaveProperty("max_cost_microusd");
+  expect(screen.queryByLabelText(/Inference budget/)).toBeNull();
 });
 
 it("retains one uncertain create request for explicit exact retry, without auto replay", async () => {

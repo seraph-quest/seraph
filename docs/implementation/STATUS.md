@@ -1215,7 +1215,9 @@ marked externally unverified, without restoring job or grant authority. Live
 admission also requires exact review of every changed observed UTC month;
 clock correction conservatively retains future charges. Stable profile root
 binding and witnessed policy epochs prevent fresh-root budget bootstrap and
-archived egress reactivation. Overruns require explicit adequate reserve review
+archived egress reactivation. After a local workspace root move, the stopped
+local stack rebinds with `./manage.sh -e dev local accounting-rebind`
+([#1277](https://github.com/seraph-quest/seraph/issues/1277)). Overruns require explicit adequate reserve review
 bound to already-settled operation sequence/revision. Live
 provider charges and managed Docker mount operation remain unverified until
 separate operator-authorised operational receipts exist.

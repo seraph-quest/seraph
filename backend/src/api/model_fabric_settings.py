@@ -56,6 +56,7 @@ from src.model_fabric.configuration import (
     NEAR_TEE_IMPLEMENTED_SLOTS,
     NEAR_TEE_SLOT_ALLOWLISTS,
     NEAR_TEE_VAULT_KEY,
+    carry_near_tee_consents as _carry_near_tee_consents,
     near_tee_profile_for_slot,
     near_tee_slot_block_reason,
     near_tee_policy_for_runtime,
@@ -662,24 +663,6 @@ def _consented_near_tee_slots(setup, revision):
         return []
     return [slot for slot in (setup.slots or {}).values()
         if slot is not None and slot.enabled and slot.purpose_consent_revision == revision]
-
-
-def _carry_near_tee_consents(setup, persisted, revision):
-    """Carry a current, unchanged slot consent to the final revision; never resurrect."""
-    if setup is None:
-        return None
-    prior_setup = persisted.near_tee
-    slots = {}
-    for name, slot in (setup.slots or {}).items():
-        prior = (prior_setup.slots or {}).get(name) if prior_setup is not None else None
-        if slot is None:
-            slots[name] = None
-            continue
-        unchanged = prior is not None and replace(prior, purpose_consent_revision=None) == replace(slot, purpose_consent_revision=None)
-        current = (prior is not None and prior.enabled and not persisted.egress_revoked
-            and prior.purpose_consent_revision == persisted.egress_revision)
-        slots[name] = replace(slot, purpose_consent_revision=revision if slot.enabled and unchanged and current else None)
-    return replace(setup, slots=slots)
 
 
 async def _put_near_tee(body, persisted):

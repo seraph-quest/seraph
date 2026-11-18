@@ -1,5 +1,6 @@
 import { useEffect, useRef, type FormEvent, type ReactNode, type RefObject } from "react";
 
+import { OpenSettingsButton } from "../chat/OpenSettingsButton";
 import type { ChatMessage } from "../../types";
 
 export interface ConversationActivity {
@@ -124,6 +125,7 @@ export function CockpitConversationDock(props: CockpitConversationDockProps) {
               <span className="cockpit-dock-message-age">{ageLabel(message.timestamp)}</span>
             </div>
             <div className="cockpit-dock-message-body">{message.content}</div>
+            <OpenSettingsButton message={message} className="cockpit-dock-message-action" />
             {message.role === "approval" && onOpenApprovals ? (
               <button
                 type="button"

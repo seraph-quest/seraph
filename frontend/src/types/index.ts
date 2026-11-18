@@ -1,4 +1,5 @@
 import type { ConnectedSource, RelatedSources } from "../lib/connectionSync";
+import type { SettingsSectionId } from "../lib/settingsNavigation";
 export type MessageRole = "user" | "agent" | "step" | "status" | "error" | "proactive" | "approval" | "clarification";
 
 export interface ChatMessage {
@@ -21,6 +22,11 @@ export interface ChatMessage {
   clarificationQuestion?: string;
   clarificationReason?: string;
   clarificationOptions?: string[];
+  /** Route-block errors (#1280): the bounded selector code and recovery action. */
+  code?: string;
+  recoveryAction?: string;
+  /** Settings section the error's "Open Settings" button opens. */
+  settingsSection?: SettingsSectionId;
 }
 
 export interface WSMessage {
@@ -43,6 +49,10 @@ export interface WSResponse {
   required_permissions?: string[];
   question?: string;
   reason?: string;
+  /** Route-block error fields (#1280). */
+  code?: string | null;
+  recovery_action?: string | null;
+  settings_section?: string | null;
   options?: string[];
   urgency?: number;
   intervention_type?: string;

@@ -26,6 +26,7 @@ import hmac
 import json
 import logging
 import secrets
+from types import MappingProxyType
 import threading
 from types import MethodType
 
@@ -271,11 +272,45 @@ async def enter_chat_route() -> tuple[dict, str, bool]:
     return status, "legacy", True
 
 
-def chat_runtime_status_text(loop: str) -> str:
-    """The WS status line names the actual loop and route."""
-    if loop == "cordis":
-        return "Seraph is using the governed OpenRouter chat runtime on the Cordis agent loop (cordis.agent-loop.v1)."
-    return "Seraph is using the governed OpenRouter chat runtime on the legacy agent loop (legacy.smolagents)."
+# Plain names for the NEAR TEE allowlist (#1280); other models show their id tail.
+CHAT_MODEL_NAMES = MappingProxyType({
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": "DeepSeek V4.1 Flash",
+    "z-ai/glm-5.3-flash": "GLM 5.3 Flash",
+    "Qwen/Qwen3.8-27B": "Qwen3.8 27B",
+    "Qwen/Qwen3.6-35B-A3B-FP8": "Qwen3.6 35B A3B",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": "Qwen3 VL 30B A3B",
+})
+_PROVIDER_NAMES = MappingProxyType({"near_tee": "NEAR", "openrouter": "OpenRouter"})
+
+
+def chat_runtime_status_text(route: dict | None) -> str | None:
+    """The chat status line, built from the effective chat route (#1280).
+
+    ``route`` is the ``effective_runtime`` projection of ``/api/runtime/status``.
+    A blocked or unknown route prints nothing: the turn's error explains it.
+    The loop id stays in ``/api/runtime/status.chat_runtime``.
+    """
+    if not isinstance(route, dict) or route.get("mode") == "blocked":
+        return None
+    model = str(route.get("model") or "").strip()
+    provider = str(route.get("provider") or "").strip()
+    if not model or provider in {"", "none"} or route.get("inference_ready") is False:
+        return None
+    name = CHAT_MODEL_NAMES.get(model) or str(route.get("model_label") or "").strip() or model.split("/")[-1]
+    provider_name = _PROVIDER_NAMES.get(provider) or str(route.get("provider_label") or provider)
+    return f"Chat is using {name} via {provider_name}."
+
+
+def current_chat_route() -> dict | None:
+    """The effective chat route, computed locally (no provider contact)."""
+    try:
+        from src.app import _active_chat_runtime_status, _adr035_chat_identity, _effective_runtime_route_status
+
+        runtime = _active_chat_runtime_status()
+        runtime, route = _adr035_chat_identity(runtime, _effective_runtime_route_status(runtime, {}))
+        return route
+    except Exception:
+        return None
 
 
 def chat_runtime_unavailable_message(status: dict) -> str:

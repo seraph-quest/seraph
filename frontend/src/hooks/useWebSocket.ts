@@ -6,6 +6,7 @@ import { useChatStore } from "../stores/chatStore";
 import { detectToolFromStep } from "../lib/toolParser";
 import { getIdleState, getThinkingState } from "../lib/animationStateMachine";
 import { appEventBus } from "../lib/appEventBus";
+import { settingsSectionFrom } from "../lib/settingsNavigation";
 import type { AmbientState, ChatMessage, ConnectionStatus, SessionContinuityState, WSResponse } from "../types";
 
 function makeId(): string {
@@ -134,6 +135,21 @@ export function resolveClarificationSessionId(
   fallbackSessionId: string | null,
 ): string | null {
   return typeof detail?.session_id === "string" ? detail.session_id : fallbackSessionId;
+}
+
+/** A chat error; a route block also carries its code, recovery action and Settings section (#1280). */
+export function buildWsErrorMessage(data: WSResponse, id: string, timestamp: number): ChatMessage {
+  const settingsSection = settingsSectionFrom(data.settings_section);
+  return {
+    id,
+    role: "error",
+    content: data.content,
+    timestamp,
+    sessionId: data.session_id,
+    ...(typeof data.code === "string" ? { code: data.code } : {}),
+    ...(typeof data.recovery_action === "string" ? { recoveryAction: data.recovery_action } : {}),
+    ...(settingsSection ? { settingsSection } : {}),
+  };
 }
 
 export function buildClarificationMessage(
@@ -579,13 +595,7 @@ export function useWebSocket() {
           setAgentBusy(false);
           clearStreamingMessage();
 
-          const errorMsg: ChatMessage = {
-            id: makeId(),
-            role: "error",
-            content: data.content,
-            timestamp: Date.now(),
-            sessionId: data.session_id,
-          };
+          const errorMsg = buildWsErrorMessage(data, makeId(), Date.now());
           addMessage(errorMsg);
         } else if (data.type === "approval_required") {
           clearResponseTimeout();

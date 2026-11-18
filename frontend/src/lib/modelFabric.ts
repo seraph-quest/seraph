@@ -334,6 +334,8 @@ export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_pro
   structured_output_basis?: string | null;
   /** Text slot: "ready" or the reason response_format callers are blocked. */
   structured_output_capability?: string | null;
+  /** Text slot: streaming and tool_use check state, "ready" or a reason such as proof_missing:streaming. */
+  chat_capabilities?: Record<string, string>;
 }
 
 export interface NearTeeEmbeddingReindexJob {
@@ -386,6 +388,8 @@ export interface ModelFabricSettingsStatus {
   schema_version: string;
   status: string;
   error_code: string | null;
+  /** Whether the stored configuration itself could be read ("ready"); absent on older payloads. */
+  configuration_status?: string | null;
   updated_at: string | null;
   profiles: ModelFabricProfileStatus[];
   excluded_profiles: ModelFabricProfileStatus[];
@@ -657,6 +661,12 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
     structured_output_basis: row.structured_output_basis === "catalog" || row.structured_output_basis === "capability_proof"
       ? row.structured_output_basis : null,
     structured_output_capability: text(row.structured_output_capability),
+    chat_capabilities: (() => {
+      const raw = recordOf(row.chat_capabilities);
+      const out: Record<string, string> = {};
+      for (const name of ["streaming", "tool_use"]) if (typeof raw?.[name] === "string") out[name] = raw[name] as string;
+      return out;
+    })(),
   };
 }
 
@@ -922,6 +932,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     schema_version: record.schema_version,
     status: record.status,
     error_code: typeof record.error_code === "string" ? record.error_code : null,
+    configuration_status: typeof record.configuration_status === "string" ? record.configuration_status : null,
     updated_at: typeof record.updated_at === "string" ? record.updated_at : null,
     profiles: Array.isArray(record.profiles)
       ? record.profiles.flatMap((item) => normalizeProfile(item) ?? [])

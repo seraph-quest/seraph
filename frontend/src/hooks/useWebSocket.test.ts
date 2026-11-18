@@ -15,6 +15,7 @@ import {
   ONBOARDING_SKIP_ACK_TIMEOUT_MS,
   useWebSocket,
   buildClarificationMessage,
+  buildWsErrorMessage,
   reconcileStreamedFinalAnswer,
   reduceAssistantDelta,
   resolveClarificationSessionId,
@@ -334,5 +335,20 @@ describe("streamed assistant message reconciliation", () => {
 
     expect(final.reconciled).toBe(false);
     expect(final.messages).toBe(messages);
+  });
+});
+
+describe("route-block error frames (#1280)", () => {
+  it("carries the code, recovery action and a known Settings section onto the chat message", () => {
+    const message = buildWsErrorMessage({ type: "error", content: "Chat is paused until you give your OK. Nothing was sent.",
+      session_id: "s1", step: null, seq: 4, code: "provider_policy_revoked", recovery_action: "give_consent",
+      settings_section: "model" }, "id-1", 1);
+    expect(message).toEqual({ id: "id-1", role: "error", content: "Chat is paused until you give your OK. Nothing was sent.",
+      timestamp: 1, sessionId: "s1", code: "provider_policy_revoked", recoveryAction: "give_consent", settingsSection: "model" });
+  });
+
+  it("drops an unknown section and leaves plain errors unchanged", () => {
+    expect(buildWsErrorMessage({ type: "error", content: "x", session_id: "s1", step: null, seq: 1, settings_section: "elsewhere" }, "id-2", 2))
+      .toEqual({ id: "id-2", role: "error", content: "x", timestamp: 2, sessionId: "s1" });
   });
 });

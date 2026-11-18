@@ -74,15 +74,18 @@ cp env.dev.example .env.dev
 
 Open the **[cockpit](http://127.0.0.1:3001)** or
 [API documentation](http://127.0.0.1:8004/docs). The core starts without a provider
-key. To enable model work, open **Settings → Models & OpenRouter** and configure
-your key, models, allowed upstreams, explicit cloud consent, and a finite budget.
-Text, vision, and embedding have separate controls.
+key. To turn chat on, open **Settings → Model**: the Model card at the top says
+whether chat works and shows the one control that fixes it (a NEAR API key, a
+monthly budget, a model, or your explicit OK that NEAR sees messages as plain
+text). Vision and embedding have separate controls under **Advanced and
+diagnostics** on the same tab.
 
 **Upgrade note:** chat now runs on the Cordis agent loop by default, so chat
 requires the Cordis runtime (Docker images and `./manage.sh -e dev local up`
 already build it). On the first start after upgrading, Seraph moves chat to the
 Cordis loop once; if the runtime is missing, chat shows as blocked with the exact
-fix instead of falling back. Settings → Cordis runtime host can roll chat back to
+fix instead of falling back. Settings → Model → Advanced and diagnostics → Cordis
+runtime host can roll chat back to
 the legacy loop (and cut it over again); a rollback is never undone by a restart.
 
 Goal discovery (programme research) runs through the reviewed Cordis host. It
@@ -102,7 +105,9 @@ Preserve your existing `.env.dev` when returning to an installed workspace.
 
 Local-first means Seraph owns your canonical goals, memory, jobs, artifacts,
 and history. It does not mean inference is offline. Ordinary text, vision,
-and embedding use governed OpenRouter routes. The optional NEAR HTTPS text
+and embedding use NEAR TEE-hosted models (per NEAR's catalog, not verified by
+Seraph) under ADR-035; NEAR receives requests in plaintext and OpenRouter is
+retired. The optional NEAR HTTPS text
 capability is disabled by default, requires separate setup and consent, and
 sends provider-readable plaintext.
 

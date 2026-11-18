@@ -124,6 +124,11 @@ class WSResponse(BaseModel):
     expires_at: float | None = None
     question: str | None = None
     reason: str | None = None
+    # Route-block errors (#1280): the bounded selector code, the recovery
+    # action and the Settings section the chat's "Open Settings" opens.
+    code: str | None = None
+    recovery_action: str | None = None
+    settings_section: str | None = None
     options: list[str] | None = None
     # Phase 3 — Proactive messages
     urgency: int | None = None

@@ -1023,6 +1023,16 @@ describe('RepoRepairInspector literal authenticated Source captures R199', () =>
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it('accepts the zero recorded server bound of a job created since ADR-037 (#1284)', async () => {
+    const { source, props } = capturedRepositoryState(repositorySourceCaptureBytes[0].raw);
+    ((source.repository_stop as Record<string, unknown>).limit_evidence as Record<string, unknown>).original_server_bound_microusd = 0;
+    const fetch = vi.fn().mockResolvedValue(response(source));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...props} />);
+    expect(await screen.findByText(/Stop reason:/)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it.each([
     ['missing stop', (source: Record<string, unknown>) => { delete source.repository_stop; }],
     ['null stop', (source: Record<string, unknown>) => { source.repository_stop = null; }],

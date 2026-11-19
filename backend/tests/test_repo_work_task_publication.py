@@ -746,8 +746,9 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             assert rows[0].contact_started_at is not None
             assert rows[0].actual_cost_microusd is None
             from src.workflows.general_task_accounting import reservation_liability
-            assert rows[0].bound_microusd > 0
-            assert reservation_liability(rows[0]) == rows[0].bound_microusd
+            # ADR-037 (#1284): the record reserves no amount.
+            assert rows[0].bound_microusd == 0
+            assert reservation_liability(rows[0]) == 0
             run = await jobs._fetch(db, root_id)
             held = jobs._repo_repair_reservation_state(run)
             assert held['status'] == 'held'

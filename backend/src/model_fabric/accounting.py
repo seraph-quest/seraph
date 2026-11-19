@@ -235,6 +235,9 @@ class _SettlementContext:
     usage: dict[str, object]
     settlement: dict[str, object] | None = None
     failed: bool = False
+    # The provider callback returned normally (an answer), as opposed to
+    # raising after contact. Only labels the record (#1284); no amount reads it.
+    answered: bool = False
 
 
 _current_settlement: ContextVar[_SettlementContext | None] = ContextVar("inference_settlement_owner", default=None)
@@ -263,7 +266,7 @@ class DurableInferenceBrokerMixin:
             return True
 
         async def settle():
-            row = await self._finish_accounting(handle, payload=context.usage)
+            row = await self._finish_accounting(handle, payload=context.usage, answered=context.answered)
             snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
             matches = [item for item in snapshot.get("operations", ())
                 if item.get("operation_id") == handle.request.operation_id]
@@ -319,7 +322,7 @@ class DurableInferenceBrokerMixin:
         if context.failed:
             return None
         if context.settlement is None:
-            return await self._finish_accounting(context.handle, payload=context.usage)
+            return await self._finish_accounting(context.handle, payload=context.usage, answered=context.answered)
         if context.handle.committed_denial is not None:
             await self._record_denial_quiescence(context.handle)
         return context.settlement
@@ -535,14 +538,17 @@ class DurableInferenceBrokerMixin:
             if proof is not None:
                 await handle.repository.record_provider_denial_quiescence(proof)
 
-    async def _finish_accounting(self, handle, *, payload=None, reason=None):
+    async def _finish_accounting(self, handle, *, payload=None, reason=None, answered=False):
         await self._record_denial_quiescence(handle)
         near = is_near_operation(handle.request.runtime_path, handle.profile_id)
         billing = (_near_billing.get() or {}).get("evidence") if near else None
         billing_kwargs = {"near_billing_evidence": billing} if near else {}
+        # A contacted call that raised is recorded as failed, so an unpriced
+        # record says "no answer" rather than "answered, not priced" (#1284).
         row = await handle.repository.settle_inference_cost(handle.request.operation_id,
             payload=None if near else payload, **billing_kwargs,
-            reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
+            reason=reason or (("provider_account_usage" if answered else "provider_call_failed")
+                if handle.contacted else "blocked_before_contact"))
         adoption_allowed = True
         try:
             adoption_allowed = _policy_for_runtime(handle.request.runtime_path, handle.profile_id)[1] == handle.policy_digest
@@ -571,7 +577,8 @@ class DurableInferenceBrokerMixin:
                 and snapshot.get("accounting_continuity_verified") is True)
         if handle.ephemeral:
             contacted = row["state"] in {"settled", "unknown"}
-            state = ("succeeded" if adoption_allowed else "blocked") if contacted else "blocked"
+            # A call that failed after contact is never reported as succeeded.
+            state = ("succeeded" if adoption_allowed and answered else "blocked") if contacted else "blocked"
             if state == "succeeded":
                 # Actual persisted ledger readback, not a seeded receipt. A
                 # request NEAR has not priced yet reads back as such (#1284).
@@ -589,7 +596,8 @@ class DurableInferenceBrokerMixin:
                     owner=handle.owner, fencing_token=handle.fence)
             await handle.repository.transition_job(handle.job_id, state,
                 owner=handle.owner, fencing_token=handle.fence,
-                reason=row.get("recovery_reason") or (None if adoption_allowed else "inference_result_authority_changed"),
+                reason=row.get("recovery_reason") or ("provider_call_failed" if contacted and not answered
+                    else None if adoption_allowed else "inference_result_authority_changed"),
                 result={"operation_id": handle.request.operation_id, "state": row["state"], "memory_status": "no_learning"},
                 result_summary="Governed inference accounting receipt; no_learning")
         return {**row, "result_adoption_allowed": adoption_allowed}
@@ -618,6 +626,7 @@ class DurableInferenceBrokerMixin:
         async def callback():
             await self._contact_accounting(handle)
             result = await operation()
+            settlement_context.answered = True
             capture_inference_usage(result)
             if isinstance(result, tuple):
                 for item in result:
@@ -671,6 +680,7 @@ class DurableInferenceBrokerMixin:
         def callback():
             _run_awaitable_sync(self._contact_accounting(handle))
             result = operation()
+            settlement_context.answered = True
             capture_inference_usage(result)
             if isinstance(result, tuple):
                 for item in result:
@@ -727,6 +737,7 @@ class DurableInferenceBrokerMixin:
                 capture_inference_usage(item)
                 assert_current_inference_policy()
                 yield item
+            settlement_context.answered = True
 
         try:
             self._restore_order(handle)

@@ -492,6 +492,7 @@ function validateRepositoryStatus(value: unknown, jobId: string): RepositorySour
         || !isSha256Digest(stop.limit_evidence_digest) || evidence.cause !== stop.reason || !timestamps(evidence.original_deadline_at)
         || (evidence.goal_cutoff_at !== null && !timestamps(evidence.goal_cutoff_at))
         || ["original_server_bound_microusd", "root_liability_microusd", "group_liability_microusd", "group_calls", "original_root_max_cost_microusd", "original_group_max_cost_microusd", "original_group_max_calls"].some((key) => !isSafeNonNegativeInteger(evidence[key], Number.MAX_SAFE_INTEGER))
+        // The recorded server bound is 0 on jobs created since ADR-037 (#1284).
         || Number(evidence.original_group_max_calls) > 12
         || (stop.reason === "goal_limit_exhausted" && (evidence.goal_cutoff_at === null || Date.parse(String(evidence.goal_cutoff_at)) !== Date.parse(String(evidence.original_deadline_at))))) return reject();
     } else if (evidence !== null || stop.limit_evidence_digest !== null) return reject();

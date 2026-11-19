@@ -151,7 +151,9 @@ export function validateResearchState(value: unknown, task: string): ResearchSta
     || typeof child.lease_present !== "boolean" || typeof child.attempt_count !== "number" || !Number.isSafeInteger(child.attempt_count)
     || child.attempt_count < 0 || child.attempt_count > 1) throw new Error("Research child readback is incomplete.");
   for (const cost of value.costs) if (!record(cost) || !bounded(cost.operation_id, 256) || !bounded(cost.job_id, 256)
-    || !bounded(cost.state, 64) || !positive(cost.bound_microusd)
+    // A request record carries no reserved amount since ADR-037 (#1284): 0 on
+    // new rows, a recorded legacy value on old ones; never compared.
+    || !bounded(cost.state, 64) || typeof cost.bound_microusd !== "number" || !Number.isSafeInteger(cost.bound_microusd) || cost.bound_microusd < 0
     || (cost.actual_cost_microusd !== null && (typeof cost.actual_cost_microusd !== "number" || !Number.isSafeInteger(cost.actual_cost_microusd) || cost.actual_cost_microusd < 0))
     || typeof cost.contact_started !== "boolean" || (cost.reason !== null && !bounded(cost.reason, 256))) throw new Error("Research cost readback is incomplete.");
   return value as unknown as ResearchState;

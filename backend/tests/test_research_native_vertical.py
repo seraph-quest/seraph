@@ -217,6 +217,23 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 # source file; no canonical hash/receipt is altered to match it.
                 (root/source["file_path"]).write_bytes(b"tampered source after first provider contact")
         controls["after_first_contact"] = change_current_authority
+        if scenario == "cancel_policy_denial":
+            # The provider policy reads as changed exactly at the prefunded
+            # sibling's contact recheck: it is durably denied and never
+            # contacted (ADR-037 keeps consent/policy as the only contact denial).
+            from src.model_fabric import effective_policy
+            original_contact = DurableJobRepository.contact_inference_provider
+            contacts = []
+            async def contact_after_policy_change(self, *args, **kwargs):
+                contacts.append(args)
+                if len(contacts) < 2:
+                    return await original_contact(self, *args, **kwargs)
+                current = effective_policy.current_inference_policy
+                with monkeypatch.context() as changed:
+                    changed.setattr(effective_policy, "current_inference_policy",
+                        lambda *a, **k: (current(*a, **k)[0], "f" * 64))
+                    return await original_contact(self, *args, **kwargs)
+            monkeypatch.setattr(DurableJobRepository, "contact_inference_provider", contact_after_policy_change)
         dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions)
         if scenario == "cancel_active_provider":
             import asyncio
@@ -429,12 +446,35 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     ["research_dossier", "readonly_research_child"])))).all())
                 assert len(rows) == 3
                 completed = [row for row in rows if row.status == "succeeded"]
-                assert not completed
+                if scenario == "cancel_policy_denial":
+                    # The first child answered under an unchanged policy; the
+                    # denial of its sibling does not erase that result.
+                    assert len(completed) == 1 and completed[0].job_kind == "readonly_research_child"
+                    assert completed[0].run_identity == contacted[0]["job_id"]
+                else:
+                    assert not completed
                 assert next(row for row in rows if row.job_kind == "research_dossier").status != "succeeded"
                 board = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
                 assert board.status.value == "blocked"
             (root/"research-negative-accounting-readback.json").write_text(json.dumps({"scenario": scenario,
                 "provider_post_count": len(calls), "snapshot": reopened}, indent=2))
+            if scenario == "cancel_policy_denial":
+                sibling = next(row for row in children if row["contact_started_at"] is None)
+                assert sibling["state"] == "reserved" and sibling["recovery_reason"] == "provider_contact_denied"
+                monkeypatch.setattr(work_board, "dispatcher", dispatcher)
+                original = (await client.get("/api/work-board/tasks/"+task_id+"/research")).json()
+                result = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
+                    json={"expected_revision": original["task_revision"], "idempotency_key": "policy-denial-cancel"})
+                assert result.status_code == 200, result.text
+                assert result.json()["cancellation"]["cancelled"] is True
+                await engine.dispose()
+                settled = await jobs.inference_accounting_snapshot()
+                current_costs = [row for row in settled["operations"] if row["operation_id"].startswith("remote:research:")]
+                assert settled["accounting_continuity_verified"] is True
+                assert next(row for row in current_costs if row["contact_started_at"] is not None)["actual_cost_microusd"] == 2
+                released = next(row for row in current_costs if row["contact_started_at"] is None)
+                assert released["state"] == "released" and released["recovery_reason"] == "cancelled_before_contact"
+                assert len(calls) == 4
             return
         assert receipt["completed"] == 1, detail.json()
         report = await client.get("/api/work-board/tasks/"+task_id+"/research-report")
@@ -479,8 +519,8 @@ async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["cancel_active_provider"])
-async def test_actual_research_cancel_preserves_contacted_debt(accounting_db, real_auth, monkeypatch, scenario):
+@pytest.mark.parametrize("scenario", ["cancel_active_provider", "cancel_policy_denial"])
+async def test_actual_research_cancel_preserves_contacted_debt_and_releases_policy_denial(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
 
 

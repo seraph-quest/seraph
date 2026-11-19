@@ -185,3 +185,25 @@ async def test_repository_repair_without_dollar_fields_runs_to_its_call_ceiling(
         original_root_max_cost_microusd=0, original_group_max_cost_microusd=0,
         original_group_max_calls=2, cause="shared_group_exhausted")
     assert recorded.original_server_bound_microusd == 0
+
+
+@pytest.mark.asyncio
+async def test_iteration_charge_above_the_old_allowance_never_stops_the_repair():
+    """Overspend during a repair (#1284): a group stored with a legacy dollar
+    allowance whose first iteration was charged far above it still has its
+    remaining call, and the stop's member read does not refuse on spend."""
+    from src.workflows.repo_repair import RepoWorkLimits
+    from src.workflows.repo_repair_source import _repository_remaining
+    legacy = _no_dollar_group(2).model_copy(update={"max_cost_microusd": 500})
+    limits = RepoWorkLimits.model_validate({"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.0005})
+    context = {"group": legacy, "run": SimpleNamespace(run_identity="repo-job"), "work": SimpleNamespace(limits=limits)}
+    overspent = _iteration_row(legacy, 1, "settled")
+    overspent.actual_cost_microusd = 10_000
+    assert overspent.actual_cost_microusd > legacy.max_cost_microusd
+    assert await _repository_remaining(_Rows([overspent]), context) == {
+        "remaining_inference_calls": 1, "remaining_cost_microusd": 0}
+    # Only the call ceiling ends it.
+    second = _iteration_row(legacy, 2, "settled")
+    second.actual_cost_microusd = 10_000
+    assert (await _repository_remaining(_Rows([overspent, second]), context,
+        allow_exhausted_readback=True))["remaining_inference_calls"] == 0

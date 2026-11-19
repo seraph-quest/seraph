@@ -230,6 +230,51 @@ async def test_unpriced_answer_is_delivered_and_manual_charge_record_survives_re
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['wrong_revision', 'wrong_job', 'revoked_root', 'current'])
+async def test_recording_a_charge_keeps_job_revision_and_session_checks(actual_billing_journey, case):
+    # Replaces PR 1's lane-recovery boundary test: #1284 part 2 deletes
+    # reconcile_settled_near_operation (nothing holds the lane). The remaining
+    # operator path, recording a charge, still refuses a foreign job, a stale
+    # revision and a revoked session, and never touches the delivered answer,
+    # the job or the provider contact count.
+    from src.auth.service import authenticate_token, revoke_session
+    from config.settings import settings
+    client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
+    controls['missing'] = True
+    task_id, _owner = await create_actual_near_task(client, factory)
+    await drive(dispatcher)
+    task, run, row = await state(factory, task_id)
+    assert task.status is WorkBoardStatus.review and run.status == 'succeeded' and row.state == 'unknown'
+    job_id, revision = run.run_identity, row.revision
+    if case == 'wrong_job':
+        job_id = 'foreign-native-job'
+    elif case == 'wrong_revision':
+        revision += 1
+    elif case == 'revoked_root':
+        operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+        await revoke_session(operator.session_id)
+    settled = await client.post('/api/settings/model-fabric/accounting/settle', json={
+        'operation_id': row.operation_id, 'job_id': job_id, 'expected_revision': revision,
+        'actual_cost_microusd': 7, 'evidence_digest': hashlib.sha256(b'explicit operator statement').hexdigest(),
+        'idempotency_key': str(uuid4())})
+    expected = {'wrong_revision': (409, 'accounting_settlement_revision_changed'),
+        'wrong_job': (409, 'accounting_job_binding_invalid')}
+    final_task, final_run, final_row = await state(factory, task_id)
+    if case == 'current':
+        assert settled.status_code == 200 and settled.json()['status'] == 'settled', settled.text
+        assert 'lane_recovery' not in settled.json()
+        assert final_row.actual_cost_microusd == 7
+    else:
+        if case in expected:
+            assert (settled.status_code, settled.json()['detail']) == expected[case], settled.text
+        else:
+            assert settled.status_code in {401, 403}, settled.text
+        assert final_row.revision == row.revision and final_row.actual_cost_microusd is None
+    assert final_run.status == 'succeeded' and final_run.revision == run.revision
+    assert controls['calls'].count(('cloud-api.near.ai', '/v1/chat/completions')) == 1
+
+
+@pytest.mark.asyncio
 async def test_disable_after_post_still_settles_original_charge_without_adoption(actual_billing_journey):
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     task_id, _owner = await create_actual_near_task(client, factory)

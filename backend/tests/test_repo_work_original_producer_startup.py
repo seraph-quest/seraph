@@ -355,7 +355,8 @@ async def test_startup_retains_real_unknown_provider_debt_after_registered_itera
         debt = next(row for row in reservations if row.state == "unknown")
         from src.workflows.general_task_accounting import reservation_liability
         assert debt.contact_started_at is not None and debt.actual_cost_microusd is None
-        assert reservation_liability(debt) == debt.bound_microusd > 0
+        # ADR-037 (#1284): the record reserves no amount.
+        assert debt.bound_microusd == 0 and reservation_liability(debt) == 0
     before = await exact_canonical_bytes(factory)
     observed = datetime.now(timezone.utc) + timedelta(days=1)
     assert await jobs.recover_inference_accounting(now=observed) == []

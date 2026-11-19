@@ -62,8 +62,7 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
 
     socket_path, physical_contacts, controls = public_http_fixture
     await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
-        near=scripted_near_gateway(answer_for, uds_socket=socket_path),
-        request_cost_bound_microusd=RESEARCH_REQUEST_BOUND_MICROUSD)
+        near=scripted_near_gateway(answer_for, uds_socket=socket_path))
     original_client = httpx.AsyncClient
 
     class PublicBoundary(httpx.AsyncBaseTransport):
@@ -322,8 +321,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             "uncertainty": ["Literal fixture mechanics only."], "contradictions": [], "no_learning": True})
     socket_path, physical_contacts, literal_source = cited_deadline_http_fixture
     await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
-        near=scripted_near_gateway(answer_for, uds_socket=socket_path),
-        request_cost_bound_microusd=RESEARCH_REQUEST_BOUND_MICROUSD)
+        near=scripted_near_gateway(answer_for, uds_socket=socket_path))
     original_client = httpx.AsyncClient
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):

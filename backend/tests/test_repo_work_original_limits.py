@@ -32,7 +32,7 @@ async def actual_original_limits(accounting_db, monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", ["goal_budget", "goal_revision", "goal_owner", "goal_revoked",
-    "policy_bound_lowered", "inventory_missing_limits", "inventory_digest", "inventory_unknown_field",
+    "policy_revision_changed", "inventory_missing_limits", "inventory_digest", "inventory_unknown_field",
     "inventory_wrong_version", "inventory_mixed_version", "inventory_extra_identity", "inventory_missing_identity"])
 async def test_actual_original_limits_drift_blocks_before_private_read(accounting_db, monkeypatch, repository_admission_signer, drift):
     factory, owner, source, jobs, root_id = await actual_original_limits(accounting_db, monkeypatch)
@@ -46,7 +46,8 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
         inventory = read_repository_inventory(root)
         assert inventory["schema"] == "repository.checkpoint_inventory.v4"
         assert len(inventory["identities"]) == 49
-        assert inventory["original_limits"]["original_server_bound_microusd"] > 0
+        # ADR-037 (#1284): a new job records no server bound.
+        assert inventory["original_limits"]["original_server_bound_microusd"] == 0
         goal = await db.get(Goal, "goal:fixture")
         if drift == "goal_budget":
             budget = json.loads(goal.admission_budget_json)
@@ -78,15 +79,15 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
             record["state_digest"] = _digest(record["payload"])
             root.checkpoint_receipts_json = json.dumps(journal)
         await db.commit()
-    if drift == "policy_bound_lowered":
+    if drift == "policy_revision_changed":
         from src.model_fabric.configuration import read_model_fabric_configuration, write_model_fabric_configuration
         async with configuration_mutation_lock:
             configured = read_model_fabric_configuration()
-            # #1184: the reviewed NEAR TEE text slot's request bound is lowered
-            # in a new consented policy revision.
+            # #1184: the reviewed NEAR TEE text slot moves to a new consented
+            # policy revision. Its digest, not any amount, is the authority
+            # input (ADR-037, #1284).
             revision = configured.egress_revision + 1
-            slot = replace(configured.near_tee.slots["text"], request_cost_bound_microusd=1,
-                purpose_consent_revision=revision)
+            slot = replace(configured.near_tee.slots["text"], purpose_consent_revision=revision)
             write_model_fabric_configuration(replace(configured, near_tee=replace(configured.near_tee,
                 slots={**configured.near_tee.slots, "text": slot}), egress_revision=revision),
                 expected_revision=configured.egress_revision)

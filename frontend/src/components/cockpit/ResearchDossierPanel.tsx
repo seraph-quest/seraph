@@ -128,7 +128,7 @@ export function ResearchDossierPanel({ ownerPrincipalId, ownerSessionId, task, g
       <p className="mt-2 text-sm">{state.status} · {state.phase ?? "terminal or executing"} · original deadline {state.deadline_at}</p>
       <p className="break-all text-xs">Parent {state.parent_id} · attempt {state.attempt_id}</p>
       <ul className="my-2 text-xs">{state.children.map((child) => <li key={child.job_id} className="break-all">{child.job_id}: {child.status}{child.reason ? ` · ${child.reason}` : ""}{child.lease_present ? " · worker lease present" : ""}</li>)}</ul>
-      <ul className="my-2 text-xs">{state.costs.map((cost) => <li key={cost.operation_id}>{cost.state === "unknown" ? "not priced yet" : cost.state} · spent {cost.actual_cost_microusd ?? "not priced yet"}{cost.reason ? ` · ${cost.reason}` : ""}</li>)}</ul>
+      <ul className="my-2 text-xs">{state.costs.map((cost) => <li key={cost.operation_id}>{cost.state === "unknown" ? "finished" : cost.state} · charge {cost.actual_cost_microusd === null ? "not priced yet" : `${cost.actual_cost_microusd} microUSD`}{cost.reason ? ` · ${cost.reason}` : ""}</li>)}</ul>
       <p className="text-xs">{state.recovery_limit}</p>
       <p className="text-xs">Spend that is not priced yet blocks nothing. You can record the charge in Settings → Model Fabric → Spend history.</p>
     </>}
@@ -171,7 +171,7 @@ export function ResearchDossierPanel({ ownerPrincipalId, ownerSessionId, task, g
         </fieldset>)}
         {perspectives.length < 2 && <button type="button" className="cockpit-feedback-button" onClick={() => setPerspectives([...perspectives, { instruction: "", sourceSlots: "0" }])}>Add second perspective</button>}
         <label className="flex gap-2 text-xs"><input type="checkbox" checked={sourceAcknowledged} onChange={(event) => setSourceAcknowledged(event.target.checked)} />I selected these sources and acknowledge quoted source text will go to the separately approved model route.</label>
-        <label className="flex gap-2 text-xs"><input type="checkbox" checked={limitAcknowledged} onChange={(event) => setLimitAcknowledged(event.target.checked)} disabled={limit === null} />I acknowledge the current Goal runtime ceiling {limit ?? "(checking)"} seconds, one synthesis per perspective, existing trusted cost allowance, and retained Unknown or actual overrun liability.</label>
+        <label className="flex gap-2 text-xs"><input type="checkbox" checked={limitAcknowledged} onChange={(event) => setLimitAcknowledged(event.target.checked)} disabled={limit === null} />I acknowledge the current Goal runtime ceiling {limit ?? "(checking)"} seconds and one synthesis per perspective. Spending limits are set in your NEAR account.</label>
       </fieldset>
       {(error || storageError) && <p role="alert" className="my-2 text-xs text-amber-200">{storageError ?? error}</p>}
       {pending && <p className="my-2 text-xs">A retained request is awaiting exact readback. Edits are locked until its receipt is confirmed.</p>}

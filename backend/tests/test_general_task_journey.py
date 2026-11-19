@@ -87,8 +87,7 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
     monkeypatch.setattr(httpx, "AsyncClient", intercepted_client)
     body = {"goal_revision": 1, "idempotency_key": "ordinary-governed-journey",
         "input": {"goal_ref": goal.id, "intent": "Read notes.txt and return its content and SHA-256",
-            "requested_output": read_descriptor.output_schema, "inference_egress_acknowledged": True,
-            "limits": {"max_cost_microusd": 1000}}}
+            "requested_output": read_descriptor.output_schema, "inference_egress_acknowledged": True}}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
         created = await client.post("/api/work-board/general-tasks", json=body)
         assert created.status_code == 200, created.text
@@ -105,7 +104,8 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
         assert proposed.status_code == 200, proposed.text
         assert proposed.json()["plan"] == plan
         assert proposed.json()["accepted"] is False
-        assert proposed.json()["task_input"]["limits"]["max_cost_microusd"] == 1000
+        # ADR-037 (#1284): no dollar limit is needed or stored for a new task.
+        assert proposed.json()["task_input"]["limits"]["max_cost_microusd"] == 0
         async with sessions() as db:
             runs = list((await db.execute(select(WorkflowRunState))).scalars())
             assert len(runs) == 1 and runs[0].job_kind == "model_inference_ephemeral_v1"

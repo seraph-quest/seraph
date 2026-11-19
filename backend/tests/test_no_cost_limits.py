@@ -419,3 +419,19 @@ def test_cockpit_bound_zero_stop_fixture_is_the_backend_evidence_shape():
     assert fixture == {"reason": "deadline_exhausted", "pending": False,
         "limit_evidence": evidence, "limit_evidence_digest": _source_digest(evidence)}
     assert evidence["original_server_bound_microusd"] == 0
+
+
+@pytest.mark.parametrize("evidence, shown", [
+    ([{"kind": "reservation"}, {"kind": "restart_recovery", "state": "unknown"}], "provider_outcome_unknown"),
+    ([{"kind": "reservation"}], "provider_cost_readback_required"),
+])
+def test_rows_recovered_before_the_reason_split_show_an_unknown_outcome(evidence, shown):
+    """A row restart recovery classified before #1284 split the reasons keeps
+    ``provider_cost_readback_required`` on disk; Spend history must not call it
+    "answered, not priced". Only the operator projection changes."""
+    from src.db.models import InferenceCostReservation
+    from src.workflows.inference_accounting import _operation_payload, _operator_operation
+    row = InferenceCostReservation(operation_id="op", job_id="job", owner_id="service:x", state="unknown",
+        recovery_reason="provider_cost_readback_required", revision=1, evidence_json=json.dumps(evidence))
+    assert _operator_operation(row)["recovery_reason"] == shown
+    assert _operation_payload(row)["recovery_reason"] == "provider_cost_readback_required"

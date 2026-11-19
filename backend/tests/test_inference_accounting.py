@@ -147,6 +147,36 @@ async def test_unknown_cost_explicit_revision_settlement(accounting_db):
 
 
 @pytest.mark.asyncio
+async def test_failed_call_after_contact_is_recorded_as_no_answer_not_succeeded(accounting_db):
+    # #1284: an unpriced record from a call that raised after contact says
+    # "no answer"; its ephemeral job is never reported as succeeded. The
+    # failure is declared certain here, so the serial lane (whose uncertain
+    # result hold is unchanged) is free and the next request is answered.
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    async def failing_after_contact():
+        raise RuntimeError("provider connection dropped after the request was sent")
+    with pytest.raises(RuntimeError, match="dropped"):
+        await broker.execute(request("failed-after-contact"), failing_after_contact, uncertain_on_error=False)
+    snapshot = await repository.inference_accounting_snapshot()
+    row = next(item for item in snapshot["operations"] if item["operation_id"] == "failed-after-contact")
+    assert row["state"] == "unknown" and row["contact_started_at"] is not None
+    assert row["recovery_reason"] == "provider_call_failed"
+    assert snapshot["unpriced_requests"] == 1
+    job = await repository.get_job(row["job_id"])
+    assert job["status"] != "succeeded"
+    async def answered():
+        return {"id": "gen-after-failure", "usage": {"cost": "0.000002"}, "choices": [{"message": {"content": "ok"}}]}
+    assert (await broker.execute(request("answered-after-failure"), answered))["choices"][0]["message"]["content"] == "ok"
+    after = await repository.inference_accounting_snapshot()
+    answered_row = next(item for item in after["operations"] if item["operation_id"] == "answered-after-failure")
+    assert answered_row["state"] == "settled" and answered_row["recovery_reason"] is None
+    assert (await repository.get_job(answered_row["job_id"]))["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_old_database_and_settings_cannot_erase_outside_root_witness(accounting_db):
     root, engine, _factory = accounting_db
     setup_configuration()

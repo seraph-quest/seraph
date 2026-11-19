@@ -26,7 +26,7 @@ describe("InferenceAccountingPanel", () => {
 
   it("shows the month total, the unpriced count and where spending limits live", () => {
     render(<InferenceAccountingPanel accounting={accounting} stale={false} onRefresh={vi.fn(async () => {})} />);
-    expect(screen.getByTestId("spend-total")).toHaveTextContent("October 2026: $3.20 spent. 1 request is not priced by NEAR yet.");
+    expect(screen.getByTestId("spend-total")).toHaveTextContent("October 2026: $3.20 spent. 1 request is not priced by NEAR yet (all months).");
     expect(screen.getByText(/Spending limits are set in your NEAR account\./)).toBeInTheDocument();
     expect(screen.queryByText(/blocked/i)).toBeNull();
     expect(screen.queryByText(/ceiling|remaining|reserved/i)).toBeNull();
@@ -62,17 +62,23 @@ describe("InferenceAccountingPanel", () => {
     expect(screen.queryByText(/Paid inference blocked/)).toBeNull();
   });
 
-  it("labels each request priced, not priced yet or not sent", () => {
-    const rows = (["settled", "unknown", "contact_started", "reserved", "released"] as const).map((state, index) => ({
+  it("labels each request priced, answered or failed without a price, in progress or not sent", () => {
+    const shapes = [["settled", null], ["unknown", "provider_cost_readback_required"], ["unknown", "provider_call_failed"],
+      ["unknown", "provider_outcome_unknown"], ["contact_started", null], ["reserved", null], ["released", null]] as const;
+    const rows = shapes.map(([state, reason], index) => ({
       ...accounting.operations[0], operation_id: "op-" + index, job_id: "job-" + index, state, controls: [],
-      actual_cost_microusd: state === "settled" ? 12_340 : null }));
+      recovery_reason: reason, actual_cost_microusd: state === "settled" ? 12_340 : null }));
     render(<InferenceAccountingPanel accounting={{ ...accounting, operations: rows }} stale={false} onRefresh={vi.fn(async () => {})} />);
     const text = screen.getAllByTestId("spend-row").map((row) => row.textContent ?? "");
     expect(text[0]).toContain("chat_agent · priced · $0.01 · month 2026-09");
-    expect(text[1]).toContain("· not priced yet ·");
-    expect(text[2]).toContain("· not priced yet ·");
-    expect(text[3]).toContain("· not sent ·");
-    expect(text[4]).toContain("· not sent ·");
+    expect(text[1]).toContain("· answered, not priced yet ·");
+    // A call that failed, or lost its outcome, after contact is never "not priced yet".
+    expect(text[2]).toContain("· no answer, not priced ·");
+    expect(text[3]).toContain("· outcome unknown, not priced ·");
+    expect(text[4]).toContain("· in progress ·");
+    expect(text[5]).toContain("· not sent ·");
+    expect(text[6]).toContain("· not sent ·");
+    expect(text.slice(2, 5).join(" ")).not.toContain("not priced yet");
     expect(spendStateLabel("settled")).toBe("priced");
   });
 

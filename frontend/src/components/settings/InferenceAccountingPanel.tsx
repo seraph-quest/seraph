@@ -10,10 +10,20 @@ interface Props {
   onRefresh: () => Promise<void>;
 }
 
-/** Plain label for a ledger row (#1284): what the request cost, not what it was allowed. */
-export function spendStateLabel(state: string): string {
+/**
+ * Plain label for a ledger row (#1284): what the request cost, not what it was
+ * allowed. An unpriced row is "not priced yet" only when NEAR answered; a call
+ * that failed or lost its outcome after contact says it has no answer.
+ */
+export function spendStateLabel(state: string, recoveryReason?: string | null): string {
   if (state === "settled") return "priced";
-  if (state === "unknown" || state === "contact_started") return "not priced yet";
+  if (state === "contact_started") return "in progress";
+  if (state === "unknown") {
+    if (recoveryReason === "provider_cost_readback_required") return "answered, not priced yet";
+    // Restart recovery lost the outcome: whether NEAR answered is unknown.
+    if (recoveryReason === "provider_outcome_unknown") return "outcome unknown, not priced";
+    return "no answer, not priced";
+  }
   if (state === "reserved" || state === "released") return "not sent";
   return state.replace(/_/g, " ");
 }
@@ -78,12 +88,12 @@ export function InferenceAccountingPanel({ accounting, stale, onRefresh }: Props
     </div>
     <div className="text-retro-text/50">Spending limits are set in your NEAR account. Seraph only records what each request cost.{stale ? " Retained, stale." : ""}</div>
     {available
-      ? <div className="mt-1" data-testid="spend-total">{monthName(view?.period_id)}: {(view?.spent_microusd ?? 0) > 0 ? `${dollars(view?.spent_microusd ?? 0)} spent.` : "nothing spent."}{unpriced > 0 ? ` ${unpriced} request${unpriced === 1 ? " is" : "s are"} not priced by NEAR yet.` : ""}</div>
+      ? <div className="mt-1" data-testid="spend-total">{monthName(view?.period_id)}: {(view?.spent_microusd ?? 0) > 0 ? `${dollars(view?.spent_microusd ?? 0)} spent.` : "nothing spent."}{unpriced > 0 ? ` ${unpriced} request${unpriced === 1 ? " is" : "s are"} not priced by NEAR yet (all months).` : ""}</div>
       : <div className="mt-1" role="status">Spend this month is not available.</div>}
     {available && view?.history_verified === false && <div role="note" data-testid="spend-history-gap">{historyGapText(view.history_gap_since)}</div>}
     {view?.operations_truncated && <div role="status">Showing the first {view.operations.length} of {view.operation_count} requests.</div>}
     {view?.operations.map((row) => <div key={row.operation_id} className="mt-1 border-t border-retro-text/10 pt-1" data-testid="spend-row">
-      <div>{row.runtime_path} · {spendStateLabel(row.state)}{row.state === "settled" && row.actual_cost_microusd !== null ? ` · ${dollars(row.actual_cost_microusd)}` : ""} · month {row.period_id}</div>
+      <div>{row.runtime_path} · {spendStateLabel(row.state, row.recovery_reason)}{row.state === "settled" && row.actual_cost_microusd !== null ? ` · ${dollars(row.actual_cost_microusd)}` : ""} · month {row.period_id}</div>
       <div className="break-all text-retro-text/40">Job {row.job_id} · owner {row.owner_id}</div>
       {row.controls?.some((entry) => entry.action === "settle") && <button type="button" disabled={stale || saving}
         onClick={() => { setSelected(row.operation_id); setAmount(""); setEvidence(""); setAcknowledged(false); setError(null); }}>Record the charge</button>}

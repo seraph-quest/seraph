@@ -82,8 +82,10 @@ idempotency, reservations and the existing ledger. No fallback between slots,
 models or providers, and no new lane, queue, budget, ledger or Cordis package.
 
 **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the slot's request cost bound. A stored bound is read past
-and dropped on the next save; the ledger keeps one request record per call, with
-no reserved amount.
+and never compared. It is carried across saves while the slot's model is
+unchanged, because it is part of the profile contract the slot's proofs and
+consent are bound to, and is dropped when another model is chosen. The ledger
+keeps one request record per call, with no reserved amount.
 
 ### Request contract and trust disclosure
 

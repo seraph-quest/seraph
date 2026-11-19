@@ -1819,8 +1819,13 @@ and OK, then test; there is no budget step. Since #1284
 overrun, no-budget or budget-used state and asks for no dollar amount. "Chat is
 on" needs both `effective_runtime.inference_ready` and a ready text slot with no
 reason code, and reads "&lt;Model&gt;, hosted by NEAR. $3.20 used this month."
-(with "2 requests are not priced by NEAR yet." when some are unpriced, or
-"Nothing spent this month."). "NEAR not answering" is only this session's last
+(with "2 requests are not priced by NEAR yet (all months)." when some are
+unpriced, or "Nothing spent this month."). The unpriced count covers every
+month, not only this one. Spend history labels an unpriced request "answered,
+not priced yet" only when NEAR answered; a call that failed after contact reads
+"no answer, not priced", one whose outcome restart recovery lost (reason
+`provider_outcome_unknown`, also shown for such rows recovered before #1284)
+reads "outcome unknown, not priced", and one still running "in progress". "NEAR not answering" is only this session's last
 failed required check. The card adds no time logic of its own.
 
 **Allow and turn on chat** is enabled only after the operator ticks "I
@@ -5078,7 +5083,8 @@ for one request (operation/job identity, evidence digest and an idempotency
 key). A manually declared amount stays externally unverified and cannot revive
 a grant, resume a job, or adopt output; nothing waits on it. Settings shows
 this as **Spend history**: the month total, the request list with state
-`priced`, `not priced yet` or `not sent`, and the optional **Record the
+`priced`, a not-priced label (answered, no answer, or outcome unknown), `in
+progress` or `not sent`, and the optional **Record the
 charge** control. Once a history gap is recorded (`history_verified` false; it
 does not return to true) it also says "Spend history may be incomplete since
 &lt;date&gt;", dated from `history_gap_since`; nothing is blocked.

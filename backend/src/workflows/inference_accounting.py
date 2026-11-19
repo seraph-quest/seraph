@@ -167,6 +167,12 @@ def _provider_contact_denied(row: InferenceCostReservation) -> bool:
 
 def _operator_operation(row: InferenceCostReservation) -> dict[str, object]:
     payload = _operation_payload(row)
+    if row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required" and any(
+            isinstance(item, dict) and item.get("kind") == "restart_recovery"
+            for item in json.loads(row.evidence_json or "[]")):
+        # Display only: a row restart recovery classified before #1284 split
+        # the reasons lost its outcome; it is not "answered, not priced".
+        payload["recovery_reason"] = "provider_outcome_unknown"
     payload["controls"] = ([{"action": "settle", "endpoint": "/api/settings/model-fabric/accounting/settle",
         "method": "POST", "expected_revision": row.revision, "operation_id": row.operation_id,
         "job_id": row.job_id, "authority_scope": "deployment_accounting"}]
@@ -421,7 +427,9 @@ class InferenceAccountingRepositoryMixin:
                         # so it is never replayed. No charge is needed to move
                         # on; recording one later is optional (#1284).
                         row.state = "unknown"
-                        row.recovery_reason = "provider_cost_readback_required"
+                        # Contact started and the outcome was lost: no answer
+                        # was recorded, so it is not "answered, not priced".
+                        row.recovery_reason = "provider_outcome_unknown"
                         run.status = "unknown_external_effect"
                     row.revision += 1
                     row.updated_at = observed.replace(tzinfo=None)
@@ -1122,8 +1130,10 @@ class InferenceAccountingRepositoryMixin:
                     row.state = "unknown" if actual is None else "settled"
                     row.actual_cost_microusd = actual
                     row.provider_operation_id = provider_id or row.provider_operation_id
-                    # "Not priced yet" when NEAR reported no charge; nothing waits on it.
-                    row.recovery_reason = "provider_cost_readback_required" if actual is None else None
+                    # "Not priced yet" when NEAR reported no charge; nothing waits
+                    # on it. A call that failed after contact says so (#1284).
+                    row.recovery_reason = (None if actual is not None else "provider_call_failed"
+                        if reason == "provider_call_failed" else "provider_cost_readback_required")
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 history = json.loads(row.evidence_json)
                 audio_run = await self._fetch(db, row.job_id)
@@ -1213,6 +1223,8 @@ class InferenceAccountingRepositoryMixin:
                     "deployment_id": account.deployment_id, "period_id": period,
                     # Settled charges of this UTC month, from the sealed totals.
                     "spent_microusd": totals["settled_by_period"].get(period, 0),
+                    # Unpriced (``unknown``) requests over all months; the UI
+                    # labels it so (#1284).
                     "unpriced_requests": totals.get("open_rows_by_state", {}).get("unknown", 0),
                     "operation_count": totals["row_count"], "operations_truncated": totals["row_count"] > 128,
                     "operations": [_operator_operation(row) for row in listed],

@@ -18,6 +18,12 @@ export function spendStateLabel(state: string): string {
   return state.replace(/_/g, " ");
 }
 
+/** The note shown once a ledger mismatch was resealed from the rows present (#1284). */
+export function historyGapText(since: string | null | undefined): string {
+  const date = typeof since === "string" && /^\d{4}-\d{2}-\d{2}/.test(since) && Number.isFinite(Date.parse(since)) ? since.slice(0, 10) : null;
+  return date ? `Spend history may be incomplete since ${date}.` : "Spend history may be incomplete.";
+}
+
 /**
  * Spend history (#1284). Seraph keeps no spending limit; NEAR's account does.
  * This only shows what was spent and lets the operator record a charge NEAR
@@ -74,6 +80,7 @@ export function InferenceAccountingPanel({ accounting, stale, onRefresh }: Props
     {available
       ? <div className="mt-1" data-testid="spend-total">{monthName(view?.period_id)}: {(view?.spent_microusd ?? 0) > 0 ? `${dollars(view?.spent_microusd ?? 0)} spent.` : "nothing spent."}{unpriced > 0 ? ` ${unpriced} request${unpriced === 1 ? " is" : "s are"} not priced by NEAR yet.` : ""}</div>
       : <div className="mt-1" role="status">Spend this month is not available.</div>}
+    {available && view?.history_verified === false && <div role="note" data-testid="spend-history-gap">{historyGapText(view.history_gap_since)}</div>}
     {view?.operations_truncated && <div role="status">Showing the first {view.operations.length} of {view.operation_count} requests.</div>}
     {view?.operations.map((row) => <div key={row.operation_id} className="mt-1 border-t border-retro-text/10 pt-1" data-testid="spend-row">
       <div>{row.runtime_path} · {spendStateLabel(row.state)}{row.state === "settled" && row.actual_cost_microusd !== null ? ` · ${dollars(row.actual_cost_microusd)}` : ""} · month {row.period_id}</div>

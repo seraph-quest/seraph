@@ -91,7 +91,7 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
                 if existing_count != len(candidates):
                     raise InferenceAccountingError("research_group_partial_reservation")
                 from src.workflows.inference_accounting import _RESEAL_PENDING_KEY
-                if db.info.pop(_RESEAL_PENDING_KEY, None):
+                if db.info.get(_RESEAL_PENDING_KEY):
                     await jobs._persist_accounting_witness(db, workspace, account, rows)
                 return [_operation_payload(item[3]) for item in candidates]
             created = []

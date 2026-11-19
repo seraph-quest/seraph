@@ -529,12 +529,15 @@ async def _limit_evidence(db, context, *, reason):
     group, work = context["group"], context["work"]
     cutoff, goal_cutoff = _as_utc(context["run"].deadline_at), source._repository_goal_cutoff(limits, group)
     now, bound = _utc_now(), limits["original_server_bound_microusd"]
+    recorded_stop = source._repository_record(context["run"], STOP_ID)
     causes = {
         "deadline_exhausted": now >= cutoff,
         "goal_limit_exhausted": now >= goal_cutoff and cutoff == goal_cutoff,
-        # Never chosen since #1284; only a stop recorded before the upgrade
-        # with this cause still completes under its recorded evidence.
-        "cost_exhausted": reason == "cost_exhausted",
+        # Never chosen since #1284, and never proven by asking for it: only a
+        # stop intent recorded before the upgrade with this cause still
+        # completes under its recorded evidence.
+        "cost_exhausted": reason == "cost_exhausted" and recorded_stop is not None
+            and recorded_stop.get("stop_reason") == "cost_exhausted",
         "shared_group_exhausted": len(members) >= group.max_inference_calls
             or now >= group.original_deadline_at,
     }

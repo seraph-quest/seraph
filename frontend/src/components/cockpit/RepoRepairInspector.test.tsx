@@ -6,6 +6,7 @@ import nodePendingApi from "./__fixtures__/node-repair-pending-api.json";
 // Actual authenticated recovery GETs; only host binary paths are normalized.
 // Original DTOs and the exact-field correlation stay in private test evidence.
 import nodeCleanupApi from "./__fixtures__/node-repair-cleanup-api.json";
+import boundZeroStop from "../../test/fixtures/repository-stop-bound-zero.json";
 
 function response(payload: unknown, ok = true, status = ok ? 200 : 409) {
   return { ok, status, json: async () => payload } as unknown as Response;
@@ -1011,6 +1012,26 @@ describe('RepoRepairInspector literal authenticated Source captures R199', () =>
       expect(openApprovals).not.toHaveBeenCalled();
     }
     expect(fetch.mock.calls.every((call) => !call[1]?.method || call[1].method === 'GET')).toBe(true);
+  });
+
+  it('renders a new automatic stop whose recorded legacy server bound is 0 (#1284)', async () => {
+    // The R199 terminal capture with its stop replaced by the backend-serialized
+    // bound-0 evidence a stop records since #1284 (pinned by the backend test).
+    const { source, props } = capturedRepositoryState(repositorySourceCaptureBytes[1].raw);
+    source.status = 'failed';
+    source.recovery_action = 'original_deadline_exhausted';
+    source.repository_stop = structuredClone(boundZeroStop.repository_stop);
+    const evidence = boundZeroStop.repository_stop.limit_evidence;
+    expect(evidence.original_server_bound_microusd).toBe(0);
+    const fetch = vi.fn().mockResolvedValue(response(source));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...props} />);
+    expect(await screen.findByText('Stop reason: deadline_exhausted')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText(`Original cutoff: ${evidence.original_deadline_at}`)).toBeInTheDocument();
+    expect(screen.getByText('Recorded Root spend: 0 microusd')).toBeInTheDocument();
+    expect(screen.getByText('Original repository stop recorded.')).toBeInTheDocument();
+    expectNoRepositoryEffects();
   });
 
   it.each([401, 403])('renders the actual authenticated capture rejection %s without controls', async (status) => {

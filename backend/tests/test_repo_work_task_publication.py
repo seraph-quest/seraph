@@ -753,6 +753,15 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == (
             None if unknown_model_cost else actual_model_cost_microusd)
         assert rows[0].job_id == root_id and rows[0].bound_microusd == 0
+    if unknown_model_cost:
+        # An unpriced call is finished, never replayable: a second consent for
+        # the same iteration is refused and the provider is not contacted again.
+        from src.workflows.job_runtime import DurableJobLeaseError
+        with pytest.raises((RepoRepairError, DurableJobLeaseError)):
+            await grant_repository_iteration_consent(service.repository_source_service, jobs,
+                job_id=root_id, owner=owner, request=request.model_copy(update={'idempotency_key': 'second-consent'}),
+                general_task_service=service, principal=operator.principal)
+        assert len(contacted) == 1
     if stop_at == 'contacted_wait':
         from src.workflows.repo_repair_stop import stop_repository_root
         stopped = await stop_repository_root(service.repository_source_service, jobs,

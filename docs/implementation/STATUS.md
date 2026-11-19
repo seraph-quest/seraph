@@ -1245,24 +1245,35 @@ are sealed at schema version 2 on first start; an older build refuses them, so
 rollback needs a database from before the upgrade. The existing remote broker remains the sole serial executor. Paid
 execution on revisions containing the reviewed
 [#1031](https://github.com/seraph-quest/seraph/issues/1031) repair includes durable
-settlement and canonical readback before that serial lease can release; since
-ADR-037 a missing charge no longer holds the lease. Scripted local receipts establish the
+settlement and canonical readback before that serial lease is released; since
+ADR-037 neither a missing charge nor a failed settlement write holds the
+lease (the request record stays `contact_started`, so the operation is never
+contacted again and restart recovery classifies it as an unknown effect). Scripted local receipts establish the
 async/sync/stream ordering and preserve the recorded charge, deadline and
 denied-contact proof, without external inference or provider-availability
 claims. Paid egress requires a retained lifecycle witness outside root
 snapshots. Since #1284 ledger continuity is display-only: a digest, totals,
-witness or row mismatch no longer blocks inference. The ledger reseals from
-its current rows, appends a `history_gap` entry to the account history, and
-the snapshot reports `history_verified: false`, shown as "Spend history may be
-incomplete since &lt;date&gt;" until the next clean full verification. The background
+witness or row mismatch no longer blocks inference. The writer reseals the
+ledger from its current rows and appends a `history_gap` entry to the account
+history, sealed by its single final persist (one witness write per
+transaction; a writer that then refuses discards the reseal). The snapshot
+reports `history_verified: false` with `history_gap_since`, shown in Settings
+as "Spend history may be incomplete since &lt;date&gt;"; it does not return to
+`true`. A database behind the witness (a newer witnessed revision or another
+deployment) is never resealed and stays refused until `accounting-reconcile`
+replays the retained checkpoint or the latest ledger is restored, since its
+missing writes may record a started contact. The background
 verifier reseals instead of latching. The deployment binding and the
 provider-policy record are still verified and still block
 (`provider_policy_continuity_unavailable`, a consent fence); restore and rebind
-report an older spend history (the former "liability regression" refusal) as a
-warning and still carry it. Job status `cost_liability` is no longer produced;
+keep their "liability regression" refusals (a target that would drop or roll
+back a request record, or a foreign or newer ledger), because those records
+give at-most-once execution, and still carry spend history. Job status
+`cost_liability` is no longer produced;
 it stays readable for jobs already in it, whose reconcile control keeps
 working, and settling them is optional. Approval resume no longer compares the
-declared `budget_digest` (column kept; new jobs write null).
+declared `budget_digest`; admission still records it (the digest of the
+declared budget, normally none) as part of the idempotency binding.
 Settings exposes an optional "record the charge" action for one request, marked
 externally unverified, that only records a charge. A new UTC month needs no
 review. Stable profile root binding and witnessed policy epochs prevent

@@ -11,7 +11,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tests.test_inference_accounting import accounting_db, request, setup_configuration  # noqa: F401
-from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
+from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker, RemoteInferenceBindingError
 from src.workflows import inference_ledger
 from src.workflows.inference_accounting import InferenceAccountingError
 from src.workflows.job_runtime import DurableJobRepository
@@ -241,6 +242,101 @@ async def test_witness_rollback_reseals_but_database_swap_behind_the_witness_blo
     assert path.read_bytes() == witness_bytes
 
 
+def _revisions(root):
+    """(database account revision, external witness revision)."""
+    database = _sql(root, "SELECT revision FROM inference_accounting_owners")[0][0]
+    return database, read_lifecycle_receipt(ProductionWorkspace(host_root=root))["inference_accounting"]["revision"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_pass_due", [False, True])
+async def test_reseal_followed_by_a_denial_in_the_same_writer_never_blocks_the_next_request(
+        accounting_db, monkeypatch, full_pass_due):
+    """A writer that reseals and then refuses rolls back the reseal with the
+    rest of its transaction: the witness never moves ahead of the database, so
+    the next request still proceeds and reseals for itself (#1284)."""
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    root, _engine, _factory = accounting_db
+    repository, broker = await _ledger(root)
+    _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = ? WHERE operation_id = 'op-a'", "0" * 64)
+    if full_pass_due:
+        inference_ledger.reset_process_state()  # the reseal comes from full verification
+    before = _revisions(root)
+    assert before[0] == before[1]
+    with pytest.raises(InferenceAccountingError, match="accounting_operation_not_found"):
+        await repository.settle_inference_cost("no-such-operation")
+    # Nothing durable moved: no witness advance, no gap, no half-written reseal.
+    assert _revisions(root) == before
+    assert not _history_gaps(root)
+    assert await _admission(broker) == "admitted"
+    database, witness = _revisions(root)
+    assert database == witness and database > before[0]
+    assert len(_history_gaps(root)) == 1
+    _assert_sealed_from_content(root)
+    snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["status"] == "ready" and snapshot["history_verified"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_pass_due", [False, True])
+async def test_a_resealing_writer_writes_the_witness_exactly_once(accounting_db, monkeypatch, full_pass_due):
+    """One witness write per transaction: every write's checkpoint base is the
+    committed database revision, so a crash before commit leaves the witness
+    at most one revision ahead, which checkpoint replay accepts (#1284)."""
+    from src.workflows import inference_accounting
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    root, _engine, _factory = accounting_db
+    repository, broker = await _ledger(root)
+    _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = ? WHERE operation_id = 'op-a'", "0" * 64)
+    if full_pass_due:
+        inference_ledger.reset_process_state()
+    writes = []
+    original = inference_accounting.write_lifecycle_receipt
+
+    def counted(workspace, receipt, **kwargs):
+        checkpoint = read_accounting_checkpoint(workspace)
+        committed = _sql(root, "SELECT revision FROM inference_accounting_owners")[0][0]
+        writes.append((committed, checkpoint["base"]["revision"], receipt["inference_accounting"]["revision"]))
+        return original(workspace, receipt, **kwargs)
+
+    monkeypatch.setattr(inference_accounting, "write_lifecycle_receipt", counted)
+    await broker._prepare_accounting(request("op-x", owner="service:op-x"))
+    assert writes
+    # A hot writer that reseals on open and then changes a row: one write.
+    _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = ? WHERE operation_id = 'op-c'", "0" * 64)
+    if full_pass_due:
+        inference_ledger.reset_process_state()
+    writes.clear()
+
+    async def change_one_row(db, ledger):
+        from src.workflows.inference_accounting import _LEDGER_CONTEXT_KEY
+        workspace, account = db.info[_LEDGER_CONTEXT_KEY]
+        row = await repository._ledger_row(db, ledger, "op-b")
+        row.revision += 1
+        db.add(row)
+        await repository._persist_accounting_witness(db, workspace, account, [row])
+
+    await _scoped(repository, root, change_one_row)
+    assert len(writes) == 1
+    assert all(base == committed and witness == committed + 1 for committed, base, witness in writes), writes
+    assert all(base == committed and witness == committed + 1 for committed, base, witness in writes), writes
+    database, witness = _revisions(root)
+    assert database == witness
+    assert len(_history_gaps(root)) == 2
+    _assert_sealed_from_content(root)
+
+
+def test_history_gap_entries_stay_bounded_and_keep_the_first():
+    from src.workflows.inference_accounting import _HISTORY_GAP_ENTRIES_KEPT, _append_history_gap
+    history = [{"kind": "ledger_created"}]
+    for index in range(3 * _HISTORY_GAP_ENTRIES_KEPT):
+        history = _append_history_gap(history, f"reason-{index}")
+    gaps = [entry for entry in history if entry.get("kind") == "history_gap"]
+    assert history[0] == {"kind": "ledger_created"}
+    assert len(gaps) == _HISTORY_GAP_ENTRIES_KEPT
+    assert gaps[0]["reason"] == "reason-0" and gaps[-1]["reason"] == f"reason-{3 * _HISTORY_GAP_ENTRIES_KEPT - 1}"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["lower_settled_actual", "settled_to_released", "older_period",
                                     "large_charge_actual_lowered", "legacy_bound_raised"])
@@ -431,13 +527,17 @@ async def _scoped(repository, root, call):
     from config.settings import settings
     from pathlib import Path
     from src.db.models import InferenceAccountingOwner
-    from src.workflows.inference_accounting import _continuity_lock
+    from src.workflows.inference_accounting import _RESEAL_PENDING_KEY, _continuity_lock
     async with repository._session() as db:
         await repository._accounting_begin(db)
         account = await db.get(InferenceAccountingOwner, "deployment")
         with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
             ledger = await repository._open_ledger(db, workspace, account)
-            return await call(db, ledger)
+            value = await call(db, ledger)
+            # As every writer does: a reseal is sealed by the final persist.
+            if db.info.get(_RESEAL_PENDING_KEY):
+                await repository._persist_accounting_witness(db, workspace, account)
+            return value
 
 
 def _group_members(original, ordinals, *, group_id=None):
@@ -580,3 +680,44 @@ def test_v1_ledgers_are_skipped_not_recorded_by_the_background_verifier(tmp_path
     connection.commit()
     connection.close()
     assert inference_ledger.verify_offline(database) == ("d", inference_ledger.V1_LEDGER_SKIPPED, 3)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_settlement_write_releases_the_lane_but_never_replays_the_contact(accounting_db, monkeypatch):
+    """With lane recovery gone, a transient settlement failure must not hold the
+    single lane until restart. The request record stays ``contact_started`` (an
+    unknown effect for restart recovery), so the same operation is never
+    reserved or contacted again (at-most-once, #1284)."""
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    root, _engine, _factory = accounting_db
+    repository, broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    original = DurableJobRepository.settle_inference_cost
+    failures = []
+
+    async def failing_once(self, operation_id, **kwargs):
+        if operation_id == "op-held" and not failures:
+            failures.append(operation_id)
+            raise InferenceAccountingError("accounting_continuity_busy")
+        return await original(self, operation_id, **kwargs)
+
+    monkeypatch.setattr(DurableJobRepository, "settle_inference_cost", failing_once)
+    with pytest.raises(GpuAdmissionUncertainError):
+        await broker.execute(request("op-held", owner="service:op-held"), await _charge("0.000001"))
+    assert failures == ["op-held"]
+    held = broker.receipt_for("op-held")
+    assert held.status == "blocked" and held.reason_code == "accounting_settlement_unavailable"
+    assert held.active_operation_id is None
+    assert _sql(root, "SELECT state FROM inference_cost_reservations WHERE operation_id = 'op-held'") == [("contact_started",)]
+    # The next request is admitted on the freed lane.
+    assert await _admission(broker) == "admitted"
+    # The held operation is never contacted a second time.
+    contacts = []
+
+    async def provider():
+        contacts.append(1)
+        return {"usage": {"cost": "0.000001"}}
+
+    with pytest.raises(RemoteInferenceBindingError, match="accounting_admission_blocked"):
+        await broker.execute(request("op-held", owner="service:op-held"), provider)
+    assert contacts == []
+    assert _sql(root, "SELECT state FROM inference_cost_reservations WHERE operation_id = 'op-held'") == [("contact_started",)]

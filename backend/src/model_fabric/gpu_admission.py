@@ -1364,8 +1364,15 @@ class GpuAdmissionBroker(Generic[T]):
         reason_code: str,
         observed_at: float,
     ) -> GpuAdmissionReceipt:
-        """Keep a late callback's lease until its provider result is reconciled."""
-        if self.release_completed_uncertain_callbacks and reason_code != "accounting_settlement_unavailable":
+        """Keep a late callback's lease until its provider result is reconciled.
+
+        A remote broker frees the lane instead, including when the durable
+        settlement write failed: no charge is needed to release it, and the
+        durable request record (still ``contact_started``) keeps the operation
+        from being reserved or contacted again, and is classified as an unknown
+        external effect by restart recovery (at-most-once, ADR-037, #1284).
+        """
+        if self.release_completed_uncertain_callbacks:
             operation.deadline_exceeded = operation.deadline_exceeded or reason_code.startswith("deadline_")
             return self._release_completed_callback_locked(operation, reason_code=reason_code)
         operation.status = "blocked"

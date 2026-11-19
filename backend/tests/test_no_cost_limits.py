@@ -401,3 +401,21 @@ async def test_moved_workspace_without_rebind_still_blocks_as_a_consent_fence(ac
     # The binding guards the provider policy record: a consent fence, not money.
     assert str(denied.value) == "provider_policy_continuity_unavailable"
     del InferenceAccountingError
+
+
+def test_cockpit_bound_zero_stop_fixture_is_the_backend_evidence_shape():
+    """A new automatic repository stop records a 0 legacy server bound. The
+    cockpit fixture for it must be exactly what the backend contract and
+    digest serialize, so the inspector is tested against the real shape."""
+    from src.work_board.contracts import RepositoryNativeLimitEvidenceV1
+    from src.workflows.repo_repair_source import _source_digest
+    fixture = json.loads((REPO_ROOT / "frontend" / "src" / "test" / "fixtures"
+        / "repository-stop-bound-zero.json").read_text())["repository_stop"]
+    evidence = RepositoryNativeLimitEvidenceV1(original_limits_digest=_source_digest({"fixture": "bound-zero"}),
+        original_deadline_at="2026-11-19T10:00:00+00:00", original_server_bound_microusd=0,
+        root_liability_microusd=0, group_liability_microusd=0, group_calls=1,
+        original_root_max_cost_microusd=0, original_group_max_cost_microusd=0, original_group_max_calls=5,
+        goal_cutoff_at=None, cause="deadline_exhausted").model_dump(mode="json")
+    assert fixture == {"reason": "deadline_exhausted", "pending": False,
+        "limit_evidence": evidence, "limit_evidence_digest": _source_digest(evidence)}
+    assert evidence["original_server_bound_microusd"] == 0

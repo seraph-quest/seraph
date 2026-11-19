@@ -117,19 +117,38 @@ Two stacked pull requests under #1284, released together. Both are delivered:
    - The `cost_liability` job status is no longer produced. It stays a valid,
      readable status for jobs already in it; their reconcile/settle control
      keeps working and settling is optional. Approval resume no longer
-     compares `budget_digest` (the column is kept; new jobs write null).
+     compares `budget_digest`. Admission still records one (the digest of the
+     declared budget, normally none) as part of the job's idempotency binding;
+     nothing compares it to spend.
    - Ledger continuity is display-only. A digest, totals, witness or row
-     mismatch no longer blocks inference: the ledger reseals from its current
-     content, appends a `history_gap` entry to the account history, and the
-     snapshot reports `history_verified: false` ("Spend history may be
-     incomplete since &lt;date&gt;") until the next clean full verification. The
-     background verifier reseals instead of latching. The deployment binding
-     and provider-policy record verification still block
-     (`provider_policy_continuity_unavailable`). The "liability regression"
-     refusals in restore and rebind become warnings; spend history is still
-     carried. Lane recovery after manual settlement
-     (`reconcile_settled_near_operation`) is deleted because nothing holds the
-     lane.
+     mismatch no longer blocks inference: the writer reseals the ledger from
+     its current content and appends a `history_gap` entry to the account
+     history. The reseal is sealed by that writer's single final persist, so
+     the external witness is written once per transaction and never ahead of
+     a transaction that rolls back; a writer that then refuses discards the
+     reseal and the next writer reseals again. The snapshot reports
+     `history_verified: false` with `history_gap_since` (the first recorded
+     gap), and Settings shows "Spend history may be incomplete since
+     &lt;date&gt;". This does not return to `true`: a later clean verification
+     does not remove the recorded gap. The background verifier reseals instead
+     of latching. The deployment binding and provider-policy record
+     verification still block (`provider_policy_continuity_unavailable`).
+   - A database behind the external witness (the witness, or the retained
+     checkpoint, names a newer revision or another deployment) is not
+     resealed. Its missing writes may record a started provider contact,
+     which is what keeps an operation from running twice, so every writer
+     refuses with `accounting_continuity_unavailable` until maintenance
+     (`accounting-reconcile`) replays the retained checkpoint for one
+     interrupted commit, or the latest ledger is restored.
+   - Restore and rebind keep their "liability regression" refusals (a target
+     that would drop or roll back a request record, or a foreign or newer
+     ledger). They protect request records and at-most-once execution, not
+     money. Spend history is carried.
+   - Lane recovery after manual settlement (`reconcile_settled_near_operation`)
+     is deleted. A failed settlement write no longer holds the lane either:
+     the lane is released, and the request record stays `contact_started`, so
+     the operation is never reserved or contacted again, and restart recovery
+     classifies it as an unknown external effect.
 
 ## Consequences and risks
 
@@ -142,9 +161,11 @@ Two stacked pull requests under #1284, released together. Both are delivered:
 - A retry after a crash in the middle of a call may send the request again and
   be charged twice. Idempotency still prevents double execution of the same
   operation; a retry is a new operation.
-- Ledger continuity is display-only, so an edited or rolled-back ledger is
-  reported as a history gap rather than refused. Recorded spend can therefore
-  be incomplete; it is never used to limit anything.
+- Ledger continuity is display-only, so an edited ledger, or a witness rolled
+  back behind the database, is reported as a history gap rather than refused.
+  Recorded spend can therefore be incomplete; it is never used to limit
+  anything. A database rolled back behind the witness is still refused until
+  maintenance, because it may be missing a started contact (at-most-once).
 
 ## Verification
 

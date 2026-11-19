@@ -2837,14 +2837,24 @@ external witness, recomputes that root and the account digest, verifies every
 row it reads or changes against its digest before resealing it, and admits only
 against the sealed totals. Since #1284
 ([ADR-037](./decisions/037-no-local-cost-limits.md)) ledger continuity is
-display-only: deleted, inserted or re-sealed rows, totals edits, witness
-rollback and an older database are detected on the next operation, but do not
-block inference. The ledger reseals from the rows present (row digests,
+display-only: deleted, inserted or re-sealed rows, totals edits and a witness
+rolled back behind the database are detected on the next operation, but do not
+block inference. The writer reseals from the rows present (row digests,
 totals and witness), appends a `history_gap` entry (reason and time) to the
 account's settings history and logs a warning; the request then proceeds. The
-accounting snapshot reports `history_verified: false` and **Spend history**
-shows "Spend history may be incomplete since &lt;date&gt;" until the next clean full
-verification. A content-only edit to a row no operation touches is found by full
+reseal is sealed by that writer's single final persist, so the witness is
+written once per transaction and never ahead of a transaction that rolls back;
+a writer that refuses after resealing discards the reseal, and the next writer
+reseals again. At most 16 gap entries are kept (the first and the latest). The
+accounting snapshot reports `history_verified: false` with `history_gap_since`
+(the first gap), and **Spend history** shows "Spend history may be incomplete
+since &lt;date&gt;". It does not return to `true`. A database behind the witness
+(the witness names a newer revision or another deployment, for example an
+older database restored under a newer witness) is never resealed: its missing
+writes may record a started provider contact, so every writer refuses with
+`accounting_continuity_unavailable` until `accounting-reconcile` replays the
+retained checkpoint for one interrupted commit or the latest ledger is
+restored. A content-only edit to a row no operation touches is found by full
 verification. That re-validates every row's evidence, key, content digest and
 the totals, and runs on the first accounting writer of each process, on any
 writer once the last full pass is over 20 minutes old, on the rare writers
@@ -5069,9 +5079,9 @@ key). A manually declared amount stays externally unverified and cannot revive
 a grant, resume a job, or adopt output; nothing waits on it. Settings shows
 this as **Spend history**: the month total, the request list with state
 `priced`, `not priced yet` or `not sent`, and the optional **Record the
-charge** control. While `history_verified` is false (after a recorded history
-gap and until the next clean full verification) it also says "Spend history may
-be incomplete since &lt;date&gt;"; nothing is blocked.
+charge** control. Once a history gap is recorded (`history_verified` false; it
+does not return to true) it also says "Spend history may be incomplete since
+&lt;date&gt;", dated from `history_gap_since`; nothing is blocked.
 Deployment-wide egress revocation preserves credentials and cost history;
 re-grant requires an explicit current settings revision.
 
@@ -5110,10 +5120,11 @@ becomes revoked and needs fresh current-revision settings review. The former
 (#1284); `accounting-reconcile` and `accounting-rebind` stay. Managed
 `accounting-rebind --from-root /absolute/prior/root --confirm` fences both roots,
 retains the latest ledger and its spend history, revokes copied provider
-authority, then changes the descriptor binding. Since #1284 a target whose
-recorded spend or request history is older than the source's (the former
-"liability regression" refusal) is reported as a warning in restore and rebind,
-not refused; the spend history is still carried. Every ledger-linked job must
+authority, then changes the descriptor binding. Restore and rebind still
+refuse a target that would drop or roll back a request record, or that holds a
+foreign or newer ledger (the "liability regression" refusals): since #1284
+those records protect at-most-once execution, not money. Spend history is
+carried. Every ledger-linked job must
 match the source's immutable invocation and authority bindings. Existing and
 missing target rows receive source evidence in a blocked state with no lease
 and a revision/fence newer than both generations; conflicting or missing source

@@ -2583,7 +2583,7 @@ async def test_restart_recovery_keeps_unknown_effect_and_legacy_cost_liability_o
             "outcome": "absent",
         },
     )
-    assert resolved["status"] not in {"unknown_external_effect", "cost_liability", "queued", "running"}
+    assert resolved["status"] == "failed"
 
     # A legacy job already in ``cost_liability`` stays readable and out of retry.
     legacy_job = await durable_job_repository.admit_job(

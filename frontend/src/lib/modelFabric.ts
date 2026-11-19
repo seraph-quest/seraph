@@ -419,7 +419,10 @@ export interface InferenceAccountingStatus {
   spent_microusd?: number;
   /** Requests NEAR has not priced yet (unknown or contact_started). */
   unpriced_requests?: number;
+  /** False once a ledger mismatch was resealed from current content; it does not return to true. */
   history_verified?: boolean;
+  /** When the first resealed mismatch was recorded (ISO timestamp), or null. */
+  history_gap_since?: string | null;
   revision?: number;
   deployment_id?: string;
   ledger_digest?: string;
@@ -439,6 +442,8 @@ export function normalizeInferenceAccounting(value: unknown): InferenceAccountin
     spent_microusd: count(record.spent_microusd),
     unpriced_requests: count(record.unpriced_requests),
     history_verified: record.history_verified === true,
+    history_gap_since: typeof record.history_gap_since === "string" && record.history_gap_since.length <= 64
+      ? record.history_gap_since : null,
     revision: typeof record.revision === "number" ? record.revision : undefined,
     deployment_id: typeof record.deployment_id === "string" ? record.deployment_id : undefined,
     ledger_digest: typeof record.ledger_digest === "string" ? record.ledger_digest : undefined,

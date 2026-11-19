@@ -195,6 +195,12 @@ zero external contact. Existing native accepted/queued/running/succeeded readbac
 feeds existing Work Review/Done human-review transitions, never automatic LLM
 answer-accuracy approval. Unknown native cost_liability retains ledger Unknown
 and projects task blocked with `near_cost_readback_required`, without answer artifact.
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).**
+[ADR-037](./037-no-local-cost-limits.md) supersedes the previous sentence. An answer
+NEAR returned is delivered whether or not its cost is reported; the request
+record stays `unknown` (not priced yet). A task without an answer, for example
+after a timeout or failure once NEAR was contacted, is blocked with
+`near_answer_unavailable`.
 
 Billing source: official nearai/docs commit
 `021296c01f593e9d0521ce7a227247ce0c7f9000`, dated October 5 and read October 7, 2026.

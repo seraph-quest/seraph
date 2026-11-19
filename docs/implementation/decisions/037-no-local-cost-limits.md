@@ -89,10 +89,14 @@ None of these is a cost limit:
 ### Migration
 
 Nothing on disk is rewritten or deleted to drop a limit. Old settings files
-load with their cost fields, which are read past and dropped on the next
-ordinary save, so the stored configuration digest and the operator's consent
-stay current. Old ledger rows, settings history entries and spend totals stay
-as recorded. API requests that still carry a removed dollar field are accepted
+load with their cost fields, which are read past and never compared, so the
+stored configuration digest and the operator's consent stay current. A save
+writes no new amount. A stored amount is written back unchanged unless the
+save replaces the part that holds it: saving the lane or NEAR text drops
+their amounts. A NEAR TEE slot's stored request bound is part of its profile
+contract, so it is carried across saves while the slot's model is unchanged,
+keeping that slot's proofs and consent; choosing another model drops it. Old
+ledger rows, settings history entries and spend totals stay as recorded. API requests that still carry a removed dollar field are accepted
 and the field is ignored.
 
 ## Delivery

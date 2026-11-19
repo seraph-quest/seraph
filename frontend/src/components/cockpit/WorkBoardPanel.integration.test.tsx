@@ -162,7 +162,7 @@ describe("WorkBoardPanel integration", () => {
     expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: /Retry \(new attempt\)/ })).toBeNull();
     expect(screen.getByRole("region", { name: "Private native memory policy" })).toHaveTextContent("no_learning");
-    fireEvent.click(screen.getByRole("button", { name: "Open existing cost settlement" }));
+    fireEvent.click(screen.getByRole("button", { name: "Record the charge" }));
     expect(onOpenAccounting).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/near-text/output"))).toBe(false);
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);

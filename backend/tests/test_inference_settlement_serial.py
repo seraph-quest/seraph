@@ -15,6 +15,7 @@ from tests.test_inference_accounting import accounting_db, request, setup_config
 from src.model_fabric.gpu_admission import GpuAdmissionLeaseError, GpuAdmissionUncertainError
 from src.model_fabric.remote_inference_admission import (
     RemoteInferenceAdmissionBroker,
+    RemoteInferenceBindingError,
     RemoteInferencePriority,
 )
 from src.workflows.job_runtime import DurableJobRepository
@@ -256,7 +257,7 @@ async def test_contacted_failure_is_durable_before_serial_slot_can_change(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["settlement", "readback"])
 @pytest.mark.parametrize("kind", ["async", "sync", "stream"])
-async def test_failed_settlement_or_readback_retains_reconciliation_lease(
+async def test_failed_settlement_or_readback_frees_the_lane_and_never_replays_the_contact(
     accounting_db, monkeypatch, failure, kind,
 ):
     setup_configuration()
@@ -284,27 +285,33 @@ async def test_failed_settlement_or_readback_retains_reconciliation_lease(
     with pytest.raises(GpuAdmissionUncertainError):
         await bounded(run_provider(broker, request("first"), kind, contacts,
             {"usage": {"cost": "0.000007"}}))
+    # ADR-037 (#1284): neither a failed settlement write nor a failed
+    # readback of a committed settlement holds the single lane. The request
+    # record (``contact_started``, or ``settled`` when only the readback
+    # failed) keeps the operation from being reserved or contacted again.
     receipt = broker.receipt_for("first")
     assert receipt.callback_completed is True
     assert receipt.status == "blocked"
-    assert receipt.reconciliation_required is True
-    assert receipt.active_operation_id == "first"
+    assert receipt.reason_code == "accounting_settlement_unavailable"
+    assert receipt.reconciliation_required is False
+    assert receipt.active_operation_id is None
     persisted = await original_snapshot(repository)
     row = persisted["operations"][0]
     assert row["state"] == ("contact_started" if failure == "settlement" else "settled")
     if failure == "readback":
         assert row["actual_cost_microusd"] == 7
     retain_readback(accounting_db, f"{failure}-{kind}", persisted)
-    events = observe_enqueues(broker, monkeypatch, ["sibling"])
-    sibling = asyncio.create_task(run_provider(broker, request("sibling"), "async", contacts,
+    # The freed lane admits the next request.
+    await bounded(run_provider(broker, request("sibling"), "async", contacts,
         {"usage": {"cost": "0.000001"}}))
-    try:
-        await bounded(events["sibling"].wait())
-        assert broker.receipt_for("sibling").active_operation_id == "first"
-        assert contacts == ["first"]
-    finally:
-        sibling.cancel()
-        await asyncio.gather(sibling, return_exceptions=True)
+    assert contacts == ["first", "sibling"]
+    # The failed operation is never contacted a second time.
+    with pytest.raises(RemoteInferenceBindingError, match="accounting_admission_blocked"):
+        await bounded(run_provider(broker, request("first"), kind, contacts,
+            {"usage": {"cost": "0.000007"}}))
+    assert contacts == ["first", "sibling"]
+    final = {item["operation_id"]: item for item in (await original_snapshot(repository))["operations"]}
+    assert final["first"]["state"] == row["state"] and final["first"]["revision"] == row["revision"]
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,9 @@ import { validBuildBinding, type DocumentBuildTaskBinding } from "./documentBuil
 export const GENERAL_TASK_CAPABILITY = "agent.task.v1";
 export interface GeneralTaskLimits {
   max_steps: number; max_inference_calls: number; wall_seconds: number;
-  depth: 0; max_outstanding_children: number; max_cost_microusd: number;
+  depth: 0; max_outstanding_children: number;
+  /** Legacy: read back on older tasks, never sent and never compared. */
+  max_cost_microusd?: number;
 }
 export interface DocumentTaskBinding {
   artifact_ref: string; source_revision: number; metadata_digest: string;
@@ -293,7 +295,7 @@ export function validateGeneralTaskPlan(value: unknown, task: WorkBoardTask): Ge
       || !record(step.input) || Object.keys(step.input).length !== 2 || step.input.build_ref !== binding.build_ref || step.input.spec_digest !== binding.spec_digest
       || !Array.isArray(step.depends_on) || step.depends_on.length !== 0 || value.task_input.intent !== "Build the reviewed local document specification"
       || value.task_input.document_source !== undefined || value.task_input.inference_egress_acknowledged !== false
-      || limits.max_steps !== 1 || limits.max_inference_calls !== 0 || limits.max_cost_microusd !== 0 || limits.max_outstanding_children !== 0
+      || limits.max_steps !== 1 || limits.max_inference_calls !== 0 || limits.max_outstanding_children !== 0
       || typeof limits.wall_seconds !== "number" || limits.wall_seconds > 60) {
       throw new Error("Document builds require their original fixed zero-inference local renderer plan. Refresh Work before reviewing.");
     }

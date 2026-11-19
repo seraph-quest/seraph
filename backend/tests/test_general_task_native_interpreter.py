@@ -109,7 +109,7 @@ async def test_interpreter_governed_continuation_uses_real_result_and_never_egre
     creation = creation.model_copy(update={"plan": PlanSpec(revision=1, steps=[first, second]),
         "input": creation.input.model_copy(update={"inference_egress_acknowledged": True,
             "limits": creation.input.limits.model_copy(update={"wall_seconds": 600,
-                "max_inference_calls": 2 if mode == "restart" else 1, "max_cost_microusd": 1000})})})
+                "max_inference_calls": 2 if mode == "restart" else 1})})})
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime,
         creation_request=creation, registry_override=registry)
     parent_id = current["job"]["job_id"]

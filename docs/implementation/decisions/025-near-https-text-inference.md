@@ -168,8 +168,9 @@ new inference or result adoption. Original deadlines still bound billing.
 **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the reserve, Unknown-liability and overrun clauses of
 this paragraph. An answer is delivered once NEAR returns it, whatever its
 charge; a missing charge records the request as "not priced yet" and holds
-nothing. The `cost_liability` status stops being produced for new work in the
-second #1284 pull request.
+nothing. The `cost_liability` status is no longer produced for new work
+(delivered by the second #1284 pull request); jobs already in it stay readable
+and reconcilable.
 
 The native owner implements `work_board/near_text_native.py`, native registration/dispatcher/parser,
 direct identity/input/authority/fingerprint/readback and authenticated GET

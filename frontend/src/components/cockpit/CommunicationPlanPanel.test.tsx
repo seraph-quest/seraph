@@ -50,7 +50,7 @@ it("retains the identical uncertain create request with no automatic replacement
   });
   const created = vi.fn(); render(<CommunicationPlanPanel {...owner} goals={[goal]} onCreated={created} />);
   fireEvent.change(screen.getByLabelText("Communication Goal"), { target: { value: "goal" } });
-  fireEvent.click(screen.getByText("I reviewed these selected sources, finite cost limit and private preparation."));
+  fireEvent.click(screen.getByText("I reviewed these selected sources and private preparation."));
   fireEvent.click(screen.getByText("Prepare one communication task")); await screen.findByRole("alert");
   expect(apiFetch).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByText("Reconcile exact communication request")); await waitFor(() => expect(created).toHaveBeenCalledTimes(1));
@@ -85,9 +85,12 @@ it("creates only the explicitly selected source subset with the original native 
   render(<CommunicationPlanPanel {...owner} goals={[goal]} onCreated={created} selection={{ reply_inputs: [reply, { ...reply, message_binding_id: "message-two" }], meeting_inputs: [], reschedule_inputs: [] }} />);
   fireEvent.change(screen.getByLabelText("Communication Goal"), { target: { value: "goal" } });
   fireEvent.click(screen.getByLabelText("Reply source message-two"));
-  fireEvent.click(screen.getByText("I reviewed these selected sources, finite cost limit and private preparation."));
+  fireEvent.click(screen.getByText("I reviewed these selected sources and private preparation."));
   fireEvent.click(screen.getByText("Prepare one communication task")); await waitFor(() => expect(created).toHaveBeenCalledTimes(1));
-  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls[0][1]?.body)).selection).toEqual({ reply_inputs: [reply], meeting_inputs: [], reschedule_inputs: [], acknowledge_private_review: true });
+  const sent = JSON.parse(String(vi.mocked(apiFetch).mock.calls[0][1]?.body));
+  expect(sent.selection).toEqual({ reply_inputs: [reply], meeting_inputs: [], reschedule_inputs: [], acknowledge_private_review: true });
+  expect(sent).not.toHaveProperty("max_cost_microusd");
+  expect(screen.queryByText(/cost \(microusd\)/i)).toBeNull();
 });
 it("discards the private plan at its original task cutoff", async () => {
   vi.mocked(apiFetch).mockResolvedValue(response(wire));

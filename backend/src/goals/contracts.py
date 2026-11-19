@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 
 class CriterionVerifierKind(str, Enum):
@@ -303,11 +303,23 @@ def stable_candidate_key(
 
 
 class GoalProgrammeBudget(BaseModel):
-    """Finite ceilings; accounting remains owned by the inference broker."""
+    """Finite run ceiling; accounting remains owned by the inference broker.
+
+    ADR-037 (#1284): ``max_inference_microusd`` is a legacy stored amount. It
+    is parsed so stored programmes and their review digests stay valid, and is
+    never compared. New programmes carry no amount (the key is omitted).
+    """
 
     model_config = ConfigDict(extra="forbid")
-    max_inference_microusd: int = Field(strict=True, ge=0)
+    max_inference_microusd: int | None = Field(default=None, strict=True, ge=0)
     max_outstanding_runs: Literal[1] = 1
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_amount(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("max_inference_microusd") is None:
+            data.pop("max_inference_microusd", None)
+        return data
 
 
 class GoalProgrammeNotifications(BaseModel):
@@ -323,7 +335,7 @@ class GoalProgrammeRequest(BaseModel):
     expected_grant_revision: int = Field(default=0, strict=True, ge=0)
     public_brief: str = Field(min_length=1, max_length=2_000)
     duration_days: int = Field(default=7, strict=True, ge=1, le=7)
-    budget: GoalProgrammeBudget
+    budget: GoalProgrammeBudget = Field(default_factory=GoalProgrammeBudget)
     cadence: Literal["daily"] = "daily"
     notification_limits: GoalProgrammeNotifications = Field(default_factory=GoalProgrammeNotifications)
 
@@ -335,14 +347,24 @@ class GoalProgrammeRequest(BaseModel):
             raise ValueError("bounded public brief required")
         return value
 
+    @model_validator(mode="after")
+    def _ignore_legacy_amount(self) -> "GoalProgrammeRequest":
+        # ADR-037 (#1284): an old client may still send an inference amount.
+        # It is accepted and dropped; a new programme has no allowance.
+        if self.budget.max_inference_microusd is not None:
+            self.budget = GoalProgrammeBudget(max_outstanding_runs=self.budget.max_outstanding_runs)
+        return self
+
 
 class GoalProgrammeAccept(GoalProgrammeRequest):
     review_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     public_web_acknowledged: Literal[True]
     local_artifacts_acknowledged: Literal[True]
-    inference_ceiling_acknowledged: Literal[True]
+    # ADR-037 (#1284): there is no inference ceiling to acknowledge. Older
+    # clients still send it; it is accepted and ignored.
+    inference_ceiling_acknowledged: bool | None = None
 
-    @field_validator("public_web_acknowledged", "local_artifacts_acknowledged", "inference_ceiling_acknowledged", mode="before")
+    @field_validator("public_web_acknowledged", "local_artifacts_acknowledged", mode="before")
     @classmethod
     def _literal_acknowledgment(cls, value: Any) -> bool:
         if value is not True:
@@ -415,7 +437,16 @@ class GoalProgrammeAuthorityBinding(BaseModel):
     route_epoch: int = Field(strict=True, ge=1)
     route_digest: str
     expires_at: datetime
-    cost_ceiling_microusd: int = Field(strict=True, ge=0)
+    # ADR-037 (#1284): legacy amount copied from a stored programme so its
+    # binding still compares equal; never compared with spend.
+    cost_ceiling_microusd: int | None = Field(default=None, strict=True, ge=0)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_amount(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("cost_ceiling_microusd") is None:
+            data.pop("cost_ceiling_microusd", None)
+        return data
 
     @classmethod
     def from_programme(cls, programme: GoalProgramme, capability_id: str) -> "GoalProgrammeAuthorityBinding":

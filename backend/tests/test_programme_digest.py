@@ -44,9 +44,9 @@ async def test_source_eligibility_uses_real_scheduler_daily_occurrence_and_nativ
     monkeypatch.setattr(engine, "get_scheduler", lambda: scheduler)
     scheduler.start(paused=True)
     try:
-        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_paused"
+        assert digest.source_schedule(programme, [], now).next_source_reason == "scheduler_paused"
         scheduler.resume()
-        eligible = digest.source_schedule(programme, [], 10, now)
+        eligible = digest.source_schedule(programme, [], now)
         assert eligible.next_source_state == "eligible" and eligible.next_source_eligible_at == now
         completed = {"programme_id": "original", "occurrence_day": "2026-10-09",
             "status": "succeeded", "outstanding_held": False, "external_effect_state": "resolved",
@@ -54,29 +54,30 @@ async def test_source_eligibility_uses_real_scheduler_daily_occurrence_and_nativ
         # Source cadence is UTC even when digest timezone crosses midnight/DST.
         for zone in ("Europe/Warsaw", "Pacific/Kiritimati", "America/New_York"):
             monkeypatch.setattr(digest.settings, "user_timezone", zone)
-            scheduled = digest.source_schedule(programme, [completed], 10, now)
+            scheduled = digest.source_schedule(programme, [completed], now)
             assert scheduled.next_source_state == "scheduled"
             assert scheduled.next_source_eligible_at == datetime(2026, 10, 10, tzinfo=timezone.utc)
         held = {**completed, "programme_id": "prior-generation", "status": "queued", "outstanding_held": True}
-        assert digest.source_schedule(programme, [held], 10, now).next_source_reason == "source_run_in_progress"
+        assert digest.source_schedule(programme, [held], now).next_source_reason == "source_run_in_progress"
         for change in ({"external_effect_state": "unknown"}, {"accounting_liability": True}, {"status": "failed"}):
-            blocked = digest.source_schedule(programme, [{**held, **change}], 10, now)
+            blocked = digest.source_schedule(programme, [{**held, **change}], now)
             assert blocked.next_source_state == "held" and blocked.next_source_eligible_at is None
             assert blocked.next_source_reason == "programme_outstanding_occurrence_requires_recovery"
-        exhausted = digest.source_schedule(programme, [], 0, now)
-        assert exhausted.next_source_reason == "programme_allowance_exhausted" and exhausted.next_source_eligible_at is None
-        expired = digest.source_schedule({**programme, "expires_at": "2026-10-10T00:00:00+00:00"}, [completed], 10, now)
+        # ADR-037 (#1284): a legacy $0 (or used-up) allowance no longer gates a run.
+        legacy = digest.source_schedule({**programme, "budget": {"max_inference_microusd": 0, "max_outstanding_runs": 1}}, [], now)
+        assert legacy.next_source_state == "eligible" and legacy.next_source_eligible_at == now
+        expired = digest.source_schedule({**programme, "expires_at": "2026-10-10T00:00:00+00:00"}, [completed], now)
         assert expired.next_source_reason == "programme_window_expires_before_next_occurrence"
-        assert digest.source_schedule({**programme, "state": "paused"}, [], 10, now).next_source_reason == "programme_inactive"
-        assert digest.source_schedule({**programme, "state": "blocked", "reason_code": "programme_route_changed"}, [], 10, now).next_source_reason == "programme_authority_blocked"
+        assert digest.source_schedule({**programme, "state": "paused"}, [], now).next_source_reason == "programme_inactive"
+        assert digest.source_schedule({**programme, "state": "blocked", "reason_code": "programme_route_changed"}, [], now).next_source_reason == "programme_authority_blocked"
         scheduler.pause_job("goal_public_discovery")
-        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_job_unavailable"
+        assert digest.source_schedule(programme, [], now).next_source_reason == "scheduler_job_unavailable"
         scheduler.remove_job("goal_public_discovery")
-        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_job_unavailable"
+        assert digest.source_schedule(programme, [], now).next_source_reason == "scheduler_job_unavailable"
         monkeypatch.setattr(engine, "get_scheduler", lambda: None)
-        assert digest.source_schedule(programme, [], 10, now).next_source_reason == "scheduler_unavailable"
+        assert digest.source_schedule(programme, [], now).next_source_reason == "scheduler_unavailable"
         monkeypatch.setattr(digest.settings, "scheduler_enabled", False)
-        disabled = digest.source_schedule(programme, [], 10, now)
+        disabled = digest.source_schedule(programme, [], now)
         assert disabled.next_source_state == "unavailable" and disabled.next_source_reason == "scheduler_disabled"
     finally:
         scheduler.shutdown(wait=False)

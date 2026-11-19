@@ -279,8 +279,7 @@ async def test_general_task_planning_blocks_with_retired_reason(accounting_db, m
         descriptor = next(item for item in registry.descriptors() if item.tool_id == "read_file")
         body = {"goal_revision": 1, "idempotency_key": "general-no-provider",
             "input": {"goal_ref": goal.id, "intent": "Read notes.txt and return its content",
-                "requested_output": descriptor.output_schema, "inference_egress_acknowledged": True,
-                "limits": {"max_cost_microusd": 1000}}}
+                "requested_output": descriptor.output_schema, "inference_egress_acknowledged": True}}
         if near is not None:
             # #1159: NEAR TEE serves planning; the plan step reaches NEAR and
             # settles from NEAR billing (contract pinned in the NEAR journeys).
@@ -344,7 +343,7 @@ async def test_repository_work_intent_blocks_with_retired_reason(accounting_db, 
         request = GeneralTaskCreate.model_validate({"goal_revision": 1, "idempotency_key": "repository-no-provider",
             "input": {"goal_ref": goal.id, "intent": "Fix the bug in parser.py so tests pass",
                 "requested_output": descriptor.output_schema, "tool_set_digest": tool_digest,
-                "inference_egress_acknowledged": True, "limits": {"max_cost_microusd": 1000}}})
+                "inference_egress_acknowledged": True}})
         with no_provider_contact():
             with pytest.raises(BoardError) as blocked:
                 async with sessions() as db:

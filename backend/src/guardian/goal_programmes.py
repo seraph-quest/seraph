@@ -13,17 +13,23 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Callable
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from src.auth.service import AuthenticatedOperator, authenticate_principal
 from src.db import engine as database
 from src.db.models import AuditEvent, Goal, OperatorIdentity, OperatorSession
-from src.goals.contracts import GoalProgramme, GoalProgrammeAccept, GoalProgrammeRequest, GoalProgrammeAuthorityBinding
+from src.goals.contracts import (GoalProgramme, GoalProgrammeAccept, GoalProgrammeAuthorityBinding, GoalProgrammeBudget,
+    GoalProgrammeRequest)
 
 CAPABILITY_IDS = ("guardian.goal-discovery.v1", "guardian.query-plan.v1", "guardian.public-search.v1",
                   "source.public-extract.v1", "guardian.prepare-brief.v1")
 SERVICE_ID = "service:guardian-goal-programmes"
 MAX_GENERATIONS = 128
+# ADR-037 (#1284) section 4.4: a programme saved with a $0 inference
+# allowance used to be blocked. It is paused once at startup instead of
+# starting to run on upgrade; the operator renews it to run.
+NO_ALLOWANCE_REASON = "programme_paused_no_allowance"
+NO_ALLOWANCE_NOTE = "Paused: it had no inference allowance. Resume it to run."
 
 
 class GoalProgrammeError(ValueError):
@@ -119,9 +125,11 @@ def _projection(programme: GoalProgramme) -> dict:
     result["recovery"] = {
         "review_due": "Review a new finite programme; old attempts retain their original authority.",
         "paused": "Review a new programme revision before any new run.",
-        "blocked": "Configure the governed route and finite budget, then review a new programme.",
+        "blocked": "Configure the governed route, then review a new programme.",
         "revoked": "Authority is revoked; history and existing liabilities are retained.",
     }.get(programme.state)
+    if programme.state == "paused" and programme.reason_code == NO_ALLOWANCE_REASON:
+        result["recovery"] = NO_ALLOWANCE_NOTE
     return result
 
 
@@ -133,7 +141,45 @@ class GoalProgrammeService:
         self._running = False
 
     async def start(self):
+        await self.pause_no_allowance_programmes()
         self._running = True
+
+    async def pause_no_allowance_programmes(self) -> list[str]:
+        """One-time, idempotent startup step for programmes stored with $0.
+
+        Keyed on the STORED ``budget.max_inference_microusd == 0`` of a
+        generation that has not ended (still ``active``/``blocked`` and not
+        expired). Such a generation moves to the operator-paused state with
+        ``NO_ALLOWANCE_REASON``. Every other stored field, including the
+        legacy amount and the review digest, is kept. A second run finds it
+        paused and changes nothing. It starts, schedules or contacts nothing.
+        """
+        now = _aware(self._clock())
+        paused: list[str] = []
+        async with database.get_session() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            goals = (await db.execute(select(Goal).where(Goal.goal_programmes_json.is_not(None)))).scalars().all()
+            for goal in goals:
+                try:
+                    stored = _load(goal)
+                except GoalProgrammeError:
+                    continue  # Invalid storage stays visible to its readers; never rewritten here.
+                changed = []
+                for raw in stored["generations"]:
+                    if (raw["budget"].get("max_inference_microusd") == 0 and raw["state"] in {"active", "blocked"}
+                            and now < _aware(datetime.fromisoformat(raw["expires_at"]))):
+                        raw["state"], raw["reason_code"] = "paused", NO_ALLOWANCE_REASON
+                        changed.append(raw["id"])
+                if not changed:
+                    continue
+                _save(goal, stored)
+                db.add(goal)
+                for programme_id in changed:
+                    db.add(AuditEvent(actor=SERVICE_ID, event_type="goal_programme_paused_no_allowance",
+                        summary="Programme saved with no inference allowance paused",
+                        details_json=json.dumps({"goal_id": goal.id, "programme_id": programme_id})))
+                paused.extend(changed)
+        return paused
 
     async def stop(self):
         self._running = False
@@ -158,6 +204,8 @@ class GoalProgrammeService:
 
     async def preview(self, *, operator, goal_id: str, request: GoalProgrammeRequest) -> dict:
         self._ready()
+        # Normalised through the model so a sent legacy amount is dropped.
+        request = GoalProgrammeRequest.model_validate(request.model_dump())
         # Resolve policy outside the short DB writer; configuration is
         # physically read from the current policy owner, never under SQL lock.
         epoch, route_digest, blocked = _policy_binding()
@@ -182,13 +230,13 @@ class GoalProgrammeService:
                 "id": programme_id, "goal_id": goal.id, "goal_revision": goal.revision,
                 "grant_revision": grant_revision, "public_brief": request.public_brief, "brief_digest": brief_digest,
                 "confirmed_at": now.isoformat(), "expires_at": (now + timedelta(days=request.duration_days)).isoformat(),
-                "capability_ids": list(CAPABILITY_IDS), "budget": request.budget.model_dump(), "cadence": request.cadence,
+                "capability_ids": list(CAPABILITY_IDS), "budget": GoalProgrammeBudget(max_outstanding_runs=request.budget.max_outstanding_runs).model_dump(), "cadence": request.cadence,
                 "notification_limits": request.notification_limits.model_dump(),
                 "artifact_prefix": f"goal-programmes/{programme_id}/", "owner_identity_id": identity.id,
                 "issuer_root_id": root.id, "issuer_principal_id": root.principal_id,
                 "route_epoch": epoch, "route_digest": route_digest,
-                "state": "blocked" if blocked or request.budget.max_inference_microusd == 0 else "active",
-                "reason_code": "programme_zero_budget" if request.budget.max_inference_microusd == 0 else blocked,
+                "state": "blocked" if blocked else "active",
+                "reason_code": blocked,
             }
             reviewed["review_digest"] = _digest(reviewed)
             programme = GoalProgramme.model_validate(reviewed)
@@ -201,7 +249,7 @@ class GoalProgrammeService:
             _save(goal, stored)
             db.add(goal)
             return {"programme": _projection(programme), "review_digest": programme.review_digest,
-                "acknowledgments_required": ["public_web_acknowledged", "local_artifacts_acknowledged", "inference_ceiling_acknowledged"],
+                "acknowledgments_required": ["public_web_acknowledged", "local_artifacts_acknowledged"],
                 "public_only": True, "preview_only": True, "paused_programme_ids": paused_ids}
 
     async def accept(self, *, operator, goal_id: str, request: GoalProgrammeAccept) -> dict:
@@ -220,7 +268,11 @@ class GoalProgrammeService:
             programme = GoalProgramme.model_validate(preview["programme"])
             requested = GoalProgrammeRequest.model_validate(request.model_dump(exclude={"review_digest",
                 "public_web_acknowledged", "local_artifacts_acknowledged", "inference_ceiling_acknowledged"}))
-            if (requested.model_dump(mode="json") != preview["request"] or request.review_digest != programme.review_digest
+            # A preview staged before #1284 carries a legacy amount (and maybe
+            # the retired $0 block) in its reviewed digest: review it again.
+            if (requested.model_dump(mode="json") != preview["request"]
+                    or programme.budget.max_inference_microusd is not None
+                    or request.review_digest != programme.review_digest
                     or programme.issuer_root_id != root.id or programme.owner_identity_id != identity.id):
                 raise GoalProgrammeError("programme_review_stale")
             if goal.revision != programme.goal_revision or stored["revision"] != request.expected_grant_revision:
@@ -393,8 +445,6 @@ class GoalProgrammeService:
             return blocked
         if epoch != programme.route_epoch or digest != programme.route_digest:
             return "programme_route_changed"
-        if programme.budget.max_inference_microusd == 0:
-            return "programme_zero_budget"
         return None
 
 

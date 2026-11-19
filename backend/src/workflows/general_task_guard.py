@@ -319,8 +319,8 @@ def _reserve_native_capacity(parent, manifest, binding=None, *, envelope=None, s
         identities += [(identity,None) for identity in partial_checkpoint_ids(parent.run_identity,manifest.attempt_id)]
     group = envelope.proposal_group if envelope is not None else None
     trace_reachable = (envelope is None or (envelope.task_input.inference_egress_acknowledged
-        and envelope.task_input.limits.max_inference_calls > 0 and envelope.task_input.limits.max_cost_microusd > 0
-        and group is not None and group.max_inference_calls > 0 and group.max_cost_microusd > 0
+        and envelope.task_input.limits.max_inference_calls > 0
+        and group is not None and group.max_inference_calls > 0
         and (service is None or service.planner is not None)))
     if trace_reachable:
         identities.append(("general:continuation-budget:" + _digest([manifest.creation_digest, manifest.group_id]), None))

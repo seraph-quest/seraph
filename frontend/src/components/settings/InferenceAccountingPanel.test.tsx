@@ -32,6 +32,24 @@ describe("InferenceAccountingPanel", () => {
     expect(screen.queryByText(/ceiling|remaining|reserved/i)).toBeNull();
   });
 
+  it("says spend history may be incomplete once a mismatch was resealed", () => {
+    const resealed = normalizeInferenceAccounting({ ...accounting, history_verified: false,
+      history_gap_since: "2026-11-19T08:30:00.123456+00:00" });
+    expect(resealed?.history_gap_since).toBe("2026-11-19T08:30:00.123456+00:00");
+    render(<InferenceAccountingPanel accounting={resealed} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.getByTestId("spend-history-gap")).toHaveTextContent("Spend history may be incomplete since 2026-11-19.");
+    expect(screen.queryByText(/blocked/i)).toBeNull();
+  });
+
+  it("shows no gap note for verified history or an unreadable ledger", () => {
+    const { unmount } = render(<InferenceAccountingPanel accounting={accounting} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.queryByTestId("spend-history-gap")).toBeNull();
+    unmount();
+    render(<InferenceAccountingPanel accounting={{ ...accounting, status: "unavailable", history_verified: false }}
+      stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.queryByTestId("spend-history-gap")).toBeNull();
+  });
+
   it("says nothing was spent in a month without charges", () => {
     render(<InferenceAccountingPanel accounting={{ ...accounting, spent_microusd: 0, unpriced_requests: 0, operations: [] }}
       stale={false} onRefresh={vi.fn(async () => {})} />);
@@ -56,7 +74,7 @@ describe("InferenceAccountingPanel", () => {
     expect(text[1]).toContain("· answered, not priced yet ·");
     // A call that failed, or lost its outcome, after contact is never "not priced yet".
     expect(text[2]).toContain("· no answer, not priced ·");
-    expect(text[3]).toContain("· no answer, not priced ·");
+    expect(text[3]).toContain("· outcome unknown, not priced ·");
     expect(text[4]).toContain("· in progress ·");
     expect(text[5]).toContain("· not sent ·");
     expect(text[6]).toContain("· not sent ·");

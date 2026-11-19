@@ -12,7 +12,7 @@ const goal: GoalInfo = { id: "goal-1", parent_id: null, path: "goal-1", level: "
 const programme: GoalProgramme = { schema_version: "GoalProgramme.v1", id: "programme-1", goal_id: goal.id,
   goal_revision: 4, grant_revision: 3, public_brief: "Public release updates", brief_digest: "a".repeat(64),
   expires_at: "2026-10-15T12:00:00Z", confirmed_at: "2026-10-08T12:00:00Z", capability_ids: ["goal.public-discovery.v1"],
-  budget: { max_inference_microusd: 1000, max_outstanding_runs: 1 }, cadence: "daily", notification_limits: { per_day: 0 },
+  budget: { max_outstanding_runs: 1 }, cadence: "daily", notification_limits: { per_day: 0 },
   state: "active", reason_code: null, recovery: null, artifact_prefix: "goal-programmes/goal-1/3/",
   issuer_root_id: "root-old", route_epoch: 2, route_digest: "b".repeat(64), review_digest: "c".repeat(64) };
 const response = (payload: unknown, status = 200) => ({ ok: status < 400, status, json: async () => payload });
@@ -23,14 +23,13 @@ function renderEditor() { return render(<GoalForm goal={goal} onClose={vi.fn()} 
 async function preview() {
   await waitFor(() => expect(screen.getByRole("button", { name: "Preview finite public programme" })).toBeEnabled());
   fireEvent.change(screen.getByLabelText("Public brief"), { target: { value: programme.public_brief } });
-  fireEvent.change(screen.getByLabelText("Inference ceiling (micro USD)"), { target: { value: "1000" } });
   fireEvent.click(screen.getByRole("button", { name: "Preview finite public programme" }));
   await screen.findByLabelText("Exact programme review");
 }
 function acknowledge() {
   fireEvent.click(screen.getByLabelText("I reviewed this exact public brief and public-web search/read"));
   fireEvent.click(screen.getByLabelText("I reviewed this exact local artifact prefix"));
-  fireEvent.click(screen.getByLabelText("I reviewed this finite inference ceiling and expiry"));
+  fireEvent.click(screen.getByLabelText("I reviewed this daily schedule and expiry"));
 }
 describe("Goal programme cockpit journey", () => {
   beforeEach(() => {
@@ -167,7 +166,9 @@ describe("Goal programme cockpit journey", () => {
     const previewCall = fetchMock.mock.calls.find(([url]) => url.endsWith("/preview"))!;
     const body = JSON.parse(previewCall[1].body);
     expect(body).toEqual({ expected_goal_revision: 4, expected_grant_revision: 2, public_brief: programme.public_brief,
-      duration_days: 7, budget: { max_inference_microusd: 1000, max_outstanding_runs: 1 }, cadence: "daily", notification_limits: { per_day: 0 } });
+      duration_days: 7, budget: { max_outstanding_runs: 1 }, cadence: "daily", notification_limits: { per_day: 0 } });
+    expect(body.budget).not.toHaveProperty("max_inference_microusd");
+    expect(screen.queryByLabelText(/Inference ceiling/)).toBeNull();
     const acceptCall = fetchMock.mock.calls.find(([url]) => url.endsWith("/accept"))!;
     expect(JSON.parse(acceptCall[1].body)).toEqual({ ...body, review_digest: programme.review_digest,
       public_web_acknowledged: true, local_artifacts_acknowledged: true, inference_ceiling_acknowledged: true });
@@ -206,16 +207,49 @@ describe("Goal programme cockpit journey", () => {
     expect(screen.getByRole("button", { name: "Preview finite public programme" })).toBeDisabled();
     expect(screen.getByText(/Save and reopen your changed priority/)).toBeInTheDocument();
   });
-  it("rejects duration overflow and noninteger budget without server contact", async () => {
+  it("rejects duration and notification overflow without server contact", async () => {
     renderEditor(); await waitFor(() => expect(screen.getByRole("button", { name: "Preview finite public programme" })).toBeEnabled());
     fireEvent.change(screen.getByLabelText("Public brief"), { target: { value: "Public" } });
     fireEvent.change(screen.getByLabelText("Programme duration (days)"), { target: { value: "8" } });
     fireEvent.click(screen.getByRole("button", { name: "Preview finite public programme" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("1–7 days");
     fireEvent.change(screen.getByLabelText("Programme duration (days)"), { target: { value: "7" } });
-    fireEvent.change(screen.getByLabelText("Inference ceiling (micro USD)"), { target: { value: "1.5" } });
+    fireEvent.change(screen.getByLabelText("Programme notifications per day"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "Preview finite public programme" }));
     expect(fetchMock.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
+  it("accepts a legacy programme that still carries a dollar allowance without displaying it", async () => {
+    stored = [{ ...programme, budget: { max_inference_microusd: 1000, max_outstanding_runs: 1 } }];
+    renderEditor();
+    const row = await screen.findByLabelText("Programme programme-1");
+    expect(row).not.toHaveTextContent("1000");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+  it("shows the zero-allowance paused note and resumes by reviewing the same public brief", async () => {
+    stored = [{ ...programme, id: "zero", state: "paused", reason_code: "programme_paused_no_allowance",
+      recovery: "Review a new programme revision before any new run.", budget: { max_inference_microusd: 0, max_outstanding_runs: 1 } }];
+    previewed = { ...programme, grant_revision: 3 };
+    renderEditor();
+    const row = await screen.findByLabelText("Programme zero");
+    expect(within(row).getByRole("status")).toHaveTextContent("Paused: it had no inference allowance. Resume it to run.");
+    expect(row).not.toHaveTextContent("programme_paused_no_allowance");
+    await waitFor(() => expect(within(row).getByRole("button", { name: "Resume programme 3" })).toBeEnabled());
+    fireEvent.click(within(row).getByRole("button", { name: "Resume programme 3" }));
+    expect(screen.getByLabelText("Public brief")).toHaveValue(programme.public_brief);
+    expect(screen.getByText(/Resuming programme 3/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Preview finite public programme" }));
+    await screen.findByLabelText("Exact programme review");
+    acknowledge();
+    fireEvent.click(screen.getByRole("button", { name: "Accept reviewed finite programme" }));
+    await screen.findByLabelText("Programme programme-1");
+    const body = JSON.parse(fetchMock.mock.calls.find(([url]) => url.endsWith("/preview"))![1].body);
+    expect(body.public_brief).toBe(programme.public_brief);
+    expect(body.budget).toEqual({ max_outstanding_runs: 1 });
+  });
+  it("offers Resume only for paused programmes", async () => {
+    stored = [programme];
+    renderEditor(); await screen.findByLabelText("Programme programme-1");
+    expect(screen.queryByRole("button", { name: /Resume programme/ })).toBeNull();
   });
   it("shows configured blocked recovery and retained history for all terminal states", async () => {
     stored = ["blocked", "paused", "revoked", "review_due"].map((state, index) => ({ ...programme, id: `p-${state}`, grant_revision: index + 1,

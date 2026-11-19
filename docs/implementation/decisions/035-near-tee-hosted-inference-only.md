@@ -255,9 +255,9 @@ iterative source callback (`repo_repair_source`) and the single-shot
   Goal cost limits must allow that much per repair iteration. This affects
   availability only, not the gates above.
 
-**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) the slot bound and lane ceiling no longer exist, and Task and
-Goal cost limits go in the second #1284 pull request; the per-request cost
-above is then spend history only.
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) the slot bound, lane ceiling and Task and Goal cost limits no
+longer exist (the last delivered by the second #1284 pull request); the
+per-request cost above is spend history only.
 
 ### Capability proofs kept
 
@@ -309,7 +309,7 @@ second remains for the request itself. A missing charge records the request as
 "not priced yet"; the lease is released when the provider callback has
 finished, and the answer is adopted on the policy and owner checks alone. One
 unpriced NEAR request blocks nothing. Settlement only records a charge.
-near_text's withhold-on-Unknown rule and its `cost_liability` status end with
+near_text's withhold-on-Unknown rule and its `cost_liability` status ended with
 the second #1284 pull request.
 
 ### Lane configuration

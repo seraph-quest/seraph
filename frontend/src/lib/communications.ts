@@ -9,7 +9,7 @@ export interface CommunicationSelection {
 }
 export interface CommunicationCreate {
   goal_id: string; goal_revision: number; selection: CommunicationSelection;
-  max_cost_microusd: number; wall_seconds: number; idempotency_key: string;
+  wall_seconds: number; idempotency_key: string;
 }
 export interface ExactCommunicationApproval { operation_id: string; exact_preview_digest: string; approval_id: string; expires_at: number }
 export async function createCommunicationTask(body: CommunicationCreate, ownerPrincipalId: string, ownerSessionId: string, signal: AbortSignal): Promise<WorkBoardTask> {

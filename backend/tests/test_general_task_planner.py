@@ -98,8 +98,8 @@ def test_reviewed_method_projection_excludes_private_parameters_and_memory_bindi
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changes,reason", [
     ({"inference_egress_acknowledged": False}, "general_task_planning_consent_required"),
-    ({"limits": TaskLimits(max_cost_microusd=0)}, "general_task_planning_budget_required"),
-    ({"limits": TaskLimits(max_cost_microusd=500, max_inference_calls=0)}, "general_task_planning_budget_required"),
+    # ADR-037 (#1284): planning needs one call, never a dollar allowance.
+    ({"limits": TaskLimits(max_inference_calls=0)}, "general_task_planning_call_required"),
 ])
 async def test_missing_authority_denies_before_policy_and_contact(changes, reason):
     with pytest.raises(BoardError) as error:

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createGuardianUuid } from "../../lib/guardianInbox";
-import { programmeApi } from "../quest/goalProgrammeApi";
+import { programmeApi, PROGRAMME_PAUSED_NO_ALLOWANCE, PROGRAMME_PAUSED_NO_ALLOWANCE_NOTE } from "../quest/goalProgrammeApi";
 import { isProgrammeDigestSnapshot, programmeDigestRequest, type ProgrammeDigestSnapshot, type ProgrammeFinding, type ProgrammeStatus } from "./programmeDigestApi";
 
 interface Props {
@@ -113,14 +113,14 @@ function ProgrammeDigestOwned({ ownerKey, summaryOnly = false, active = true, on
     {!ownerKey ? <p>Programme owner unavailable. Review Goals.</p> : <button type="button" disabled={busy} onClick={() => void load()}>Refresh programmes</button>}
     {!snapshot ? <p>{busy ? "Loading programme receipts…" : "Programme receipts unavailable."}</p> : <>
       {snapshot.programmes.length === 0 ? <p>No reviewed public programmes.</p> : snapshot.programmes.map((p) => <div className="cockpit-outcome-note" key={p.id}>
-        <strong>{p.state}</strong>{p.reason_code ? ` · ${p.reason_code}` : ""}
+        <strong>{p.state}</strong>{p.reason_code && p.reason_code !== PROGRAMME_PAUSED_NO_ALLOWANCE ? ` · ${p.reason_code}` : ""}
+        {p.reason_code === PROGRAMME_PAUSED_NO_ALLOWANCE ? <div role="status">{PROGRAMME_PAUSED_NO_ALLOWANCE_NOTE}</div> : null}
         {p.current_run_status ? <div>Current source work · {p.current_run_status} · admitted {time(p.current_admitted_at)}{["accepted", "queued"].includes(p.current_run_status) ? " · awaiting execution" : ""}</div> : null}
         <div>Last completed source run · {time(p.last_run)} · sources checked {p.sources_checked}</div>
         <div>output · {p.output ?? "No output recorded"}</div>
         {p.next_digest_at ? <div>Next digest · {time(p.next_digest_at)}</div> : null}
         <div>Next source eligibility · {p.next_source_state}{p.next_source_eligible_at ? ` · ${time(p.next_source_eligible_at)}` : ""}{p.next_source_reason ? ` · ${p.next_source_reason.replace(/_/g, " ")}` : ""}</div>
         <div className="text-xs">Source execution depends on scheduler admission and current authority.</div>
-        <div>remaining finite allowance · {p.remaining_allowance_microusd === null ? "Unavailable" : `${p.remaining_allowance_microusd} microUSD`}</div>
         {p.recovery ? <div>Passive recovery · {p.recovery}</div> : null}
         <button type="button" disabled={busy || !confirmed || p.state !== "active"} onClick={() => void pause(p)}>Pause programme</button>
         {onOpenGoals ? <button type="button" onClick={onOpenGoals}>Review programme in Goals</button> : null}

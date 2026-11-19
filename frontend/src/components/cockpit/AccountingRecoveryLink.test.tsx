@@ -16,7 +16,7 @@ function receipt(value: unknown, ok = true) { return { ok, status: ok ? 200 : 50
 it("reads one exact job and opens only existing accounting without constructing settlement", async () => {
   const open = vi.fn(); fetchMock.mockResolvedValue(receipt({ operations: [operation] }));
   render(<AccountingRecoveryLink task={task} owner={owner} metadataConfirmed onOpen={open} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Open owning cost accounting" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Record the charge" }));
   expect(open).toHaveBeenCalledOnce(); expect(fetchMock).toHaveBeenCalledOnce();
   expect(fetchMock.mock.calls[0][0]).toContain("/api/settings/model-fabric/accounting?job_id=job");
   expect(fetchMock.mock.calls[0][1].method).toBeUndefined();
@@ -28,7 +28,7 @@ it.each([
 ])("withholds accounting for a spliced or unadvertised row %j", async (change) => {
   fetchMock.mockResolvedValue(receipt({ operations: [{ ...operation, ...change }] }));
   render(<AccountingRecoveryLink task={task} owner={owner} metadataConfirmed onOpen={vi.fn()} />);
-  await screen.findByText(/No settlement control is advertised/);
+  await screen.findByText(/No charge can be recorded/);
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
 
@@ -37,7 +37,7 @@ it("retains a confirmed receipt on partial metadata but removes its control", as
   const props = { task, owner, onOpen: vi.fn() };
   const view = render(<AccountingRecoveryLink {...props} metadataConfirmed />);
   await screen.findByRole("button"); view.rerender(<AccountingRecoveryLink {...props} metadataConfirmed={false} />);
-  expect(screen.getByText(/owning accounting API advertises/)).toBeInTheDocument();
+  expect(screen.getByText(/You can record the charge/)).toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument(); expect(fetchMock).toHaveBeenCalledOnce();
 });
 
@@ -47,6 +47,6 @@ it("discards a late previous-root response and keeps failed metadata visibly blo
   const view = render(<AccountingRecoveryLink task={task} owner={owner} metadataConfirmed onOpen={vi.fn()} />);
   view.rerender(<AccountingRecoveryLink task={task} owner={{ ...owner, sessionId: "new-root" }} metadataConfirmed onOpen={vi.fn()} />);
   finish(receipt({ operations: [operation] }));
-  await screen.findByText(/metadata is unavailable or permission is missing/);
+  await screen.findByText(/Spend history is unavailable or permission is missing/);
   await waitFor(() => expect(screen.queryByRole("button")).not.toBeInTheDocument());
 });

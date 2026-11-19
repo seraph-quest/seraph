@@ -176,11 +176,11 @@ def test_any_other_body_or_target_is_refused_before_contact(consented, change):
     assert near_tee_egress_reason(call) == CODE
 
 
-def test_real_catalog_prices_are_display_only_for_a_repository_slot():
-    """At NEAR's real Qwen/Qwen3.8-27B prices ($0.04/M in, $1.35/M out) a
-    repository-sized slot (32,768 input, 1,024 output tokens) costs about 2.7k
-    micro-USD per request. Since ADR-037 (#1284) that figure is display only:
-    a stored legacy slot bound below it never fails the catalog check."""
+def test_real_catalog_prices_never_gate_a_repository_request():
+    """ADR-037 (#1284): at NEAR's real Qwen/Qwen3.8-27B prices a
+    repository-sized slot (32,768 input, 1,024 output tokens) costs about
+    2.7k micro-USD per request. That price is shown, never compared: a slot
+    with a small (or no) stored legacy bound is still available."""
     from src.model_fabric.configuration import NearTeeSlot
     from src.model_fabric.near_tee_catalog import evaluate_catalog, parse_catalog_record
     from tests.test_near_tee_text_slot import catalog_record
@@ -190,4 +190,4 @@ def test_real_catalog_prices_are_display_only_for_a_repository_slot():
             request_cost_bound_microusd=bound, enabled=False)
     reason, required = evaluate_catalog(facts, slot_name="text", slot=slot(100))
     assert reason is None and 2_600 <= required <= 2_800
-    assert evaluate_catalog(facts, slot_name="text", slot=slot(required))[0] is None
+    assert evaluate_catalog(facts, slot_name="text", slot=slot(None))[0] is None

@@ -4,7 +4,7 @@ embedding namespace (ADR-035, PR3d).
 Never automatic. An authenticated settings action starts one finite run with
 an explicit memory-egress consent and an item bound (no spend cap, #1284). The run is one durable job
 in the existing workflow job ledger (admit -> queue -> claim -> per-batch
-checkpoint/heartbeat -> succeeded / blocked / cost_liability / cancelled);
+checkpoint/heartbeat -> succeeded / blocked / unknown_external_effect / cancelled);
 every batch is an ordinary ``memory_embedding`` request through the shared
 broker at that route's background priority (below chat), with its own
 request record and best-effort NEAR billing readback inside the lease. There
@@ -578,13 +578,6 @@ async def wait_for_reindex(job_id: str) -> None:
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
-async def _unknown_embedding_operations() -> set[str]:
-    from src.workflows.job_runtime import durable_job_repository
-    snapshot = await durable_job_repository.inference_accounting_snapshot()
-    return {str(row.get("operation_id")) for row in snapshot.get("operations", [])
-        if row.get("runtime_path") == "memory_embedding" and row.get("state") == "unknown"}
-
-
 async def _finish(job_id, owner, fence, status, *, reason=None, summary, result):
     from src.workflows.job_runtime import durable_job_repository
     current = await durable_job_repository.get_job(job_id)
@@ -637,16 +630,14 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
             await durable_job_repository.heartbeat_job(job_id, owner=owner, fencing_token=fence,
                 lease_seconds=LEASE_SECONDS)
             await asyncio.sleep(0)
-            unknown_before = await _unknown_embedding_operations()
             try:
                 vectors, cost, used = await asyncio.to_thread(embed_batch_near_tee, [item[1] for item in batch],
                     principal=principal)
             except EmbeddingError as exc:
                 progress["spent_microusd"] += int(getattr(exc, "cost_microusd", None) or 0)
-                # The accounting ledger, not the error text, decides: a new
-                # Unknown memory_embedding operation is a cost liability.
-                new_unknown = (await _unknown_embedding_operations()) - unknown_before
-                status = "cost_liability" if new_unknown or exc.reason_code in UNKNOWN_REASONS else "blocked"
+                # An uncertain call outcome is never replayed; a request NEAR
+                # has not priced yet is not a liability (#1284).
+                status = "unknown_external_effect" if exc.reason_code in UNKNOWN_REASONS else "blocked"
                 await _finish(job_id, owner, fence, status, reason=exc.reason_code,
                     summary="Re-index stopped: " + exc.reason_code, result={**result, **progress})
                 return

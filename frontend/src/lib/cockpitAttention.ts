@@ -54,14 +54,16 @@ export function buildCockpitAttention(
     const readOnly = task.ownership_access === "recovered_read_only";
     if (!id || !owner || (!readOnly && (task.owner_principal_id !== owner.principalId || task.owner_session_id !== owner.sessionId))) continue;
     const approval = readOnly ? undefined : snapshot.approvals.slice(0, 10).find((candidate) => taskApprovalMatches(task, candidate, owner));
-    const unknown = task.block_kind === "unknown_effect" || task.block_kind === "cost_liability";
+    const unknown = task.block_kind === "unknown_effect";
+    // Legacy status: new work never enters it. Recording the charge is optional.
+    const unpriced = task.block_kind === "cost_liability";
     const stale = task.readback_status === "stale" || task.verification_status === "stale" || task.block_kind === "review_expired";
-    if (!approval && !unknown && !stale && !["blocked", "failed"].includes(String(task.status))) continue;
+    if (!approval && !unknown && !unpriced && !stale && !["blocked", "failed"].includes(String(task.status))) continue;
     const metadataConfirmed = resources.work === "ready" && (!approval || resources.approvals === "ready");
     entries.set(`task:${id}`, {
       id: `task:${id}`, kind: "task", taskId: id, approvalId: approval ? text(approval.id) ?? undefined : undefined,
       title: text(task.title) ?? "Untitled task",
-      reason: readOnly ? "Recovered history · read only" : approval ? "Current attempt needs your approval" : unknown ? "Effect or cost is unknown · reconcile before retrying" : text(task.block_reason) ?? (stale ? "Verification or review is stale" : `Task is ${String(task.status)}`),
+      reason: readOnly ? "Recovered history · read only" : approval ? "Current attempt needs your approval" : unknown ? "Effect is unknown · reconcile before retrying" : unpriced ? "Spend not priced yet · you can record the charge" : text(task.block_reason) ?? (stale ? "Verification or review is stale" : `Task is ${String(task.status)}`),
       updatedAt: text(task.updated_at), goalId: text(task.goal_id), threadId: text(task.origin_thread_id),
       recoveryAction: readOnly || !metadataConfirmed ? null : text(task.recovery_action), readOnly, metadataConfirmed,
       priority: readOnly ? 5 : approval ? 0 : unknown ? 1 : task.status === "blocked" ? 2 : task.status === "failed" ? 3 : 4,

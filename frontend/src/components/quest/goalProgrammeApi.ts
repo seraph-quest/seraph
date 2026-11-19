@@ -6,7 +6,7 @@ export interface ProgrammeRequest {
   expected_grant_revision: number;
   public_brief: string;
   duration_days: number;
-  budget: { max_inference_microusd: number; max_outstanding_runs: 1 };
+  budget: { max_outstanding_runs: 1 };
   cadence: "daily";
   notification_limits: { per_day: number };
 }
@@ -21,7 +21,8 @@ export interface GoalProgramme {
   expires_at: string;
   confirmed_at: string;
   capability_ids: string[];
-  budget: ProgrammeRequest["budget"];
+  /** Legacy programmes may still carry max_inference_microusd; it is never compared. */
+  budget: ProgrammeRequest["budget"] & { max_inference_microusd?: number | null };
   cadence: "daily";
   notification_limits: ProgrammeRequest["notification_limits"];
   state: "active" | "blocked" | "paused" | "revoked" | "review_due";
@@ -138,12 +139,15 @@ export function isGoalProgramme(value: unknown): value is GoalProgramme {
     && typeof item.confirmed_at === "string" && Number.isFinite(Date.parse(item.confirmed_at))
     && Array.isArray(item.capability_ids) && item.capability_ids.length > 0 && item.capability_ids.every((id) => typeof id === "string")
     && item.cadence === "daily" && item.budget?.max_outstanding_runs === 1
-    && Number.isSafeInteger(item.budget.max_inference_microusd) && item.budget.max_inference_microusd >= 0
+    && (item.budget.max_inference_microusd == null || (Number.isSafeInteger(item.budget.max_inference_microusd) && item.budget.max_inference_microusd >= 0))
     && Number.isSafeInteger(item.notification_limits?.per_day) && item.notification_limits!.per_day >= 0 && item.notification_limits!.per_day <= 2
     && ["active", "blocked", "paused", "revoked", "review_due"].includes(item.state ?? "")
     && (item.reason_code === null || typeof item.reason_code === "string")
     && (item.recovery === null || typeof item.recovery === "string");
 }
+/** Programmes saved with a $0 allowance before #1284 are paused with this reason. */
+export const PROGRAMME_PAUSED_NO_ALLOWANCE = "programme_paused_no_allowance";
+export const PROGRAMME_PAUSED_NO_ALLOWANCE_NOTE = "Paused: it had no inference allowance. Resume it to run.";
 export class ProgrammeError extends Error {
   constructor(public code: string) { super(code); }
 }

@@ -318,8 +318,7 @@ async def test_charged_parent_consumes_two_distinct_specialists_after_restart(ta
             assert [item["role"] for item in entries].count("specialist") == 2
             assert all(item["group"] == original_group for item in entries)
             assert all(row.state == "settled" and row.actual_cost_microusd == 0 for row in rows)
-            # Request records carry no amount since #1284.
-            assert all(row.bound_microusd == 0 for row in rows)
+            assert all(row.bound_microusd == 0 for row in rows)  # no amount since #1284
             plan = await service.plan(db, owner, task_id)
             assert plan["native_execution"]["phase"] == "complete"
         before = len(transport["contacts"])

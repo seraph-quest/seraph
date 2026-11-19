@@ -4075,7 +4075,7 @@ function WorkBoardPanel({
                               <div>Fixed steps: {routinePackagePreview.runbook.procedure.steps.map((step) => step.id).join(" → ")}</div>
                               <div>Workflow SHA-256: {routinePackagePreview.runbook.bindings.workflow_sha256}</div>
                               <div>Authority: {routinePackagePreview.manifest.authority.tools.length} tools · {routinePackagePreview.manifest.authority.filesystem.length} filesystem paths · network {routinePackagePreview.manifest.authority.network ? "enabled" : "disabled"} · {routinePackagePreview.manifest.authority.secrets.length} secrets</div>
-                              <div>Limits: {routinePackagePreview.manifest.resources.max_runtime_seconds}s · {routinePackagePreview.manifest.resources.max_artifact_bytes} artifact bytes · ${routinePackagePreview.manifest.resources.max_inference_cost_microusd / 1_000_000} inference budget</div>
+                              <div>Limits: {routinePackagePreview.manifest.resources.max_runtime_seconds}s · {routinePackagePreview.manifest.resources.max_artifact_bytes} artifact bytes · {routinePackagePreview.manifest.resources.max_inference_cost_microusd === 0 ? "no model inference" : "model inference allowed"}</div>
                               <div>Package state: {routinePackagePreview.status}{routinePackagePreview.review_id ? ` · review ${routinePackagePreview.review_id}` : ""}</div>
                             </div>
                             {routinePackageApproval && (

@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { GoalInfo } from "../../types";
-import { displayReason, isGoalProgramme, isDiscoveryRun, isResearchPlanning, isResearchRuntime, ProgrammeError, programmeApi } from "./goalProgrammeApi";
+import { displayReason, isGoalProgramme, PROGRAMME_PAUSED_NO_ALLOWANCE, PROGRAMME_PAUSED_NO_ALLOWANCE_NOTE, isDiscoveryRun, isResearchPlanning, isResearchRuntime, ProgrammeError, programmeApi } from "./goalProgrammeApi";
 import type { GoalProgramme, ProgrammePreview, ProgrammeRequest, DiscoveryRun, ResearchPlanning, ResearchRuntime } from "./goalProgrammeApi";
 
 export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgrammeId }: { goal: GoalInfo; goalDraftChanged?: boolean; focusProgrammeId?: string | null }) {
   const [brief, setBrief] = useState("");
   const [days, setDays] = useState("7");
-  const [ceiling, setCeiling] = useState("0");
   const [notifications, setNotifications] = useState("0");
   const [programmes, setProgrammes] = useState<GoalProgramme[]>([]);
   const [grantRevision, setGrantRevision] = useState<number | null>(null);
@@ -19,9 +18,10 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
   const [runs, setRuns] = useState<DiscoveryRun[]>([]);
   const [research, setResearch] = useState<{ runtime: ResearchRuntime | null; planning: ResearchPlanning[] }>({ runtime: null, planning: [] });
   const [discoveryBrief, setDiscoveryBrief] = useState<string | null>(null);
+  const [resumeNotice, setResumeNotice] = useState<string | null>(null);
   const mounted = useRef(false);
   const currentDraft = useRef("");
-  const signature = JSON.stringify([brief, days, ceiling, notifications, goal.revision, goalDraftChanged]);
+  const signature = JSON.stringify([brief, days, notifications, goal.revision, goalDraftChanged]);
   currentDraft.current = signature;
   const load = async (signal?: AbortSignal) => {
     const result = await programmeApi<{ goal_id: string; grant_revision: number; programmes: GoalProgramme[] }>(goal.id, "", undefined, signal);
@@ -43,13 +43,13 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
   useEffect(() => { setReview(null); setAcks([false, false, false]); }, [signature]);
   const canConfigure = goal.ownership_access !== "recovered_read_only" && !goalDraftChanged && Number.isInteger(goal.revision) && (goal.revision ?? 0) > 0 && grantRevision !== null && !busy;
   const preview = async () => {
-    const duration = Number(days), amount = Number(ceiling), cap = Number(notifications);
+    const duration = Number(days), cap = Number(notifications);
     if (!brief.trim() || brief.trim().length > 2000 || !Number.isInteger(duration) || duration < 1 || duration > 7
-      || !Number.isSafeInteger(amount) || amount < 0 || !Number.isInteger(cap) || cap < 0 || cap > 2) {
-      setError("Supply a public brief, 1–7 days, a finite nonnegative integer inference ceiling, and 0–2 notifications per day."); return;
+      || !Number.isInteger(cap) || cap < 0 || cap > 2) {
+      setError("Supply a public brief, 1–7 days, and 0–2 notifications per day."); return;
     }
     const request: ProgrammeRequest = { expected_goal_revision: goal.revision!, expected_grant_revision: grantRevision!,
-      public_brief: brief.trim(), duration_days: duration, budget: { max_inference_microusd: amount, max_outstanding_runs: 1 },
+      public_brief: brief.trim(), duration_days: duration, budget: { max_outstanding_runs: 1 },
       cadence: "daily", notification_limits: { per_day: cap } };
     const submitted = signature;
     setBusy(true); setError(""); setReview(null); setAcks([false, false, false]);
@@ -59,7 +59,6 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
       if (result.public_only !== true || result.preview_only !== true || !isGoalProgramme(result.programme) || result.programme.goal_id !== goal.id
         || result.programme.goal_revision !== goal.revision || result.programme.public_brief !== request.public_brief
         || result.programme.grant_revision !== request.expected_grant_revision + 1
-        || result.programme.budget.max_inference_microusd !== request.budget.max_inference_microusd
         || result.programme.notification_limits.per_day !== request.notification_limits.per_day
         || Date.parse(result.programme.expires_at) - Date.parse(result.programme.confirmed_at) !== request.duration_days * 86400000
         || result.review_digest !== result.programme.review_digest) throw new Error("Programme review binding mismatch. Reload and review again.");
@@ -89,6 +88,12 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
         setRecovery({ programme, action }); setRecoverAck(false);
       } else { setError(err instanceof Error ? err.message : "Programme control failed."); setRecovery(null); setRecoverAck(false); }
     } finally { if (mounted.current) setBusy(false); }
+  };
+  // Resuming reviews a fresh grant for the same public brief; the backend
+  // pauses nothing else because the brief is unchanged.
+  const resume = (programme: GoalProgramme) => {
+    setBrief(programme.public_brief); setError("");
+    setResumeNotice(`Resuming programme ${programme.grant_revision}: its public brief is loaded. Preview and accept to run it again.`);
   };
   const inspectDiscovery = async () => {
     setBusy(true); setError(""); setDiscoveryBrief(null);
@@ -123,31 +128,35 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
     <div className="cockpit-card-title">Public goal programme</div>
     <p>Enter a separate public brief locally. Your private priority title and description are never copied into this review. No query, URL or output path is required.</p>
     <p>Daily cadence · one outstanding run · maximum seven days. Logout and a new login do not renew the grant. Changing the public brief and clicking Preview immediately pauses previous programmes. Abandoning this review will not resume them. An unchanged-brief renewal pauses its predecessor on acceptance.</p>
-    <p>The reviewed public brief can produce one bounded daily discovery brief. The inference ceiling covers the whole generation. A zero ceiling, unavailable governed route or unresolved previous occurrence blocks new work. No learning or external mutation is performed.</p>
+    <p>The reviewed public brief can produce one bounded daily discovery brief. An unavailable governed route or unresolved previous occurrence blocks new work. No learning or external mutation is performed.</p>
+    {resumeNotice && <p role="status">{resumeNotice}</p>}
     {goalDraftChanged && <p role="status">Save and reopen your changed priority before reviewing a programme for its current revision.</p>}
     <label className="block">Public brief<textarea aria-label="Public brief" value={brief} maxLength={2000} onChange={(e) => setBrief(e.target.value)} className="cockpit-input w-full" /></label>
     <label className="block">Programme duration (days)<input aria-label="Programme duration (days)" type="number" min="1" max="7" value={days} onChange={(e) => setDays(e.target.value)} className="cockpit-input" /></label>
-    <label className="block">Inference ceiling (micro USD)<input aria-label="Inference ceiling (micro USD)" type="number" min="0" step="1" value={ceiling} onChange={(e) => setCeiling(e.target.value)} className="cockpit-input" /></label>
     <label className="block">Programme notifications per day<input aria-label="Programme notifications per day" type="number" min="0" max="2" value={notifications} onChange={(e) => setNotifications(e.target.value)} className="cockpit-input" /></label>
     <button type="button" disabled={!canConfigure} onClick={() => void preview()} className="cockpit-action">Preview finite public programme</button>
     {review && <div aria-label="Exact programme review" className="space-y-2">
       {review.preview.paused_programme_ids?.length > 0 && <div role="status">Changed-brief preview paused these previous programmes: {review.preview.paused_programme_ids.join(", ")}. Abandoning review will not resume them.</div>}
       <div>Exact public brief: {review.preview.programme.public_brief}</div>
       <div>Public-web search/read · local artifact prefix: {review.preview.programme.artifact_prefix}</div>
-      <div>Inference ceiling: {review.preview.programme.budget.max_inference_microusd} micro USD · daily · one outstanding run</div>
+      <div>Daily · one outstanding run</div>
       <div>Goal revision {review.preview.programme.goal_revision} · grant revision {review.preview.programme.grant_revision} · expires {review.preview.programme.expires_at}</div>
       <div>Capabilities: {review.preview.programme.capability_ids.join(", ")} · route epoch {review.preview.programme.route_epoch}</div>
       <div>Preview state: {review.preview.programme.state} {review.preview.programme.reason_code} {review.preview.programme.recovery}</div>
-      {["I reviewed this exact public brief and public-web search/read", "I reviewed this exact local artifact prefix", "I reviewed this finite inference ceiling and expiry"].map((label, index) =>
+      {["I reviewed this exact public brief and public-web search/read", "I reviewed this exact local artifact prefix", "I reviewed this daily schedule and expiry"].map((label, index) =>
         <label key={label} className="block"><input type="checkbox" checked={acks[index]} onChange={(e) => setAcks((old) => old.map((value, i) => i === index ? e.target.checked : value))} /> {label}</label>)}
       <button type="button" disabled={!canConfigure || !acks.every(Boolean)} onClick={() => void accept()} className="cockpit-action">Accept reviewed finite programme</button>
     </div>}
     {focusProgrammeId && !programmes.some(programme => programme.id === focusProgrammeId) ? <p role="status">The exact Home programme is unavailable. No other programme was selected.</p> : null}
     {programmes.filter(programme => !focusProgrammeId || programme.id === focusProgrammeId).map((programme) => <article key={programme.id} aria-label={`Programme ${programme.id}`}>
       <div>{programme.state} · goal revision {programme.goal_revision} · grant revision {programme.grant_revision} · expires {programme.expires_at}</div>
-      <div>{programme.public_brief}</div><div>{programme.reason_code} {programme.recovery}</div>
+      <div>{programme.public_brief}</div>
+      {programme.reason_code === PROGRAMME_PAUSED_NO_ALLOWANCE
+        ? <div role="status">{PROGRAMME_PAUSED_NO_ALLOWANCE_NOTE}</div>
+        : <div>{programme.reason_code} {programme.recovery}</div>}
       <div>History and existing liabilities remain retained.</div>
       <button type="button" disabled={goal.ownership_access === "recovered_read_only" || busy || programme.state === "revoked" || programme.state === "paused"} onClick={() => void control(programme, "pause")} className="cockpit-action">Pause programme {programme.grant_revision}</button>
+      {programme.state === "paused" && <button type="button" disabled={!canConfigure} onClick={() => resume(programme)} className="cockpit-action">Resume programme {programme.grant_revision}</button>}
       <button type="button" disabled={goal.ownership_access === "recovered_read_only" || busy || programme.state === "revoked"} onClick={() => void control(programme, "revoke")} className="cockpit-action">Revoke programme {programme.grant_revision}</button>
     </article>)}
     <button type="button" disabled={busy} onClick={() => void inspectDiscovery()} className="cockpit-action">Inspect discovery runs</button>

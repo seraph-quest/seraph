@@ -24,6 +24,9 @@ from src.work_board.contracts import (TaskProposalGroupV1,
 
 _SEAL = object()
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+# A request record whose provider call has finished: settled, or ``unknown``
+# (finished, not priced yet; ADR-037, #1284).
+_FINISHED_REQUEST_STATES = frozenset({"settled", "unknown"})
 _task_publication = ContextVar("repository_task_publication", default=None)
 _startup_fence = ContextVar("repository_startup_fence", default=None)
 _UNCERTAINTY_COLUMNS = frozenset({"status", "failure_reason", "finished_at", "lease_owner",
@@ -1346,7 +1349,7 @@ async def _recheck_repository_sql(db, context, *, allow_stop_cleanup=False):
 async def _repository_remaining(db, context, *, allow_exhausted_readback=False):
     from sqlalchemy import select
     from src.db.models import InferenceCostReservation
-    from src.workflows.general_task_accounting import entry_for, reservation_liability
+    from src.workflows.general_task_accounting import entry_for
     from src.workflows.inference_accounting import InferenceAccountingError
     rows = list((await db.execute(select(InferenceCostReservation))).scalars())
     members = []
@@ -1362,14 +1365,14 @@ async def _repository_remaining(db, context, *, allow_exhausted_readback=False):
             if not entry or entry["role"] != "repository_iteration" or entry["group"] != group.model_dump(mode="json"):
                 raise InferenceAccountingError("repository_original_member_invalid")
             root_members.append(row)
-    if any(row.state == "unknown" for row in members + root_members):
-        raise InferenceAccountingError("repository_original_unknown_liability")
+    # ADR-037 (#1284): an ``unknown`` (finished, not priced yet) record does
+    # not block and no dollar allowance is compared; the call allowance stays.
     calls = group.max_inference_calls - len(members)
-    cost = min(group.max_cost_microusd - sum(map(reservation_liability, members)),
-        context["work"].limits.max_cost_microusd - sum(map(reservation_liability, root_members)))
-    if calls < 0 or cost < 0 or (not allow_exhausted_readback and (calls == 0 or cost == 0)):
-        raise InferenceAccountingError("repository_original_budget_exhausted")
-    return {"remaining_inference_calls": calls, "remaining_cost_microusd": cost}
+    if calls < 0 or (not allow_exhausted_readback and calls == 0):
+        raise InferenceAccountingError("repository_original_call_limit")
+    # ``remaining_cost_microusd`` is a legacy wire key, always 0 and never
+    # displayed; kept until the inspector stops requiring it.
+    return {"remaining_inference_calls": calls, "remaining_cost_microusd": 0}
 
 
 async def prepare_repository_iteration(service, jobs, *, job_id, owner, iteration_index):
@@ -2270,10 +2273,11 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
     patch_digest = _digest_bytes(patch)
     async with jobs._session() as db:
         cost = await db.get(InferenceCostReservation, witness.operation_id)
-        if (cost is None or cost.state != "settled" or cost.contact_started_at is None
-                or cost.payload_digest != prepared["request_body_digest"]
-                or type(cost.actual_cost_microusd) is not int or cost.actual_cost_microusd < 0):
-            raise DurableJobLeaseError("actual original model response accounting is not settled")
+        # ADR-037 (#1284): a finished request record (settled, or ``unknown``
+        # = not priced yet) lets the actual response be used.
+        if (cost is None or cost.state not in _FINISHED_REQUEST_STATES or cost.contact_started_at is None
+                or cost.payload_digest != prepared["request_body_digest"]):
+            raise DurableJobLeaseError("actual original model response accounting is not finished")
     approval_id = "repository-approval:" + ticket.iteration_id
     from src.workflows.repo_repair import (_sandbox_authority_payload,
         _proposal_authority_payload, _authority_digest, _repair_approval_fingerprint)
@@ -2496,7 +2500,7 @@ async def validate_repository_child_wait_witness(db, witness, *, parent, task,
         raise DurableJobLeaseError("actual original adapter callback closure changed")
     rows = list((await db.scalars(select(InferenceCostReservation))).all())
     cost = next((row for row in rows if row.operation_id == response["operation_id"]), None)
-    if (cost is None or cost.state != "settled" or cost.contact_started_at is None
+    if (cost is None or cost.state not in _FINISHED_REQUEST_STATES or cost.contact_started_at is None
             or _source_digest(cost.model_dump(mode="json")) != response["accounting_digest"]):
         raise DurableJobLeaseError("original contacted response accounting changed")
     accounting = RepositoryIterationAccountingWitness(
@@ -3171,8 +3175,8 @@ async def _recheck_recovered_finalizer_rows(db, jobs, state, witness):
     expected_accounting = {key: raw for (model, key), raw in state["rows"].items() if model is InferenceCostReservation}
     if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting} != expected_accounting:
         raise DurableJobLeaseError("recovered finalizer reservation membership changed")
-    if any(row.job_id == bound["job_id"] and row.state != "settled" for row in accounting):
-        raise DurableJobLeaseError("recovered finalizer original liability is unsettled")
+    if any(row.job_id == bound["job_id"] and row.state not in _FINISHED_REQUEST_STATES for row in accounting):
+        raise DurableJobLeaseError("recovered finalizer original request is unfinished")
 
 
 async def verify_recovered_repository_final_writer(jobs, db, run, *, completion_witness, kind, descriptor):
@@ -3923,7 +3927,7 @@ async def validate_repository_child_final_witness(db, witness, *, parent, task, 
             or _source_digest(execution) != witness.final_command_receipt_digest
             or execution["patch_sha256"] != witness.final_patch_digest
             or _source_digest([row.model_dump(mode="json") for row in rows if row.job_id == run.run_identity])
-                != witness.final_accounting_digest or cost is None or cost.state != "settled"
+                != witness.final_accounting_digest or cost is None or cost.state not in _FINISHED_REQUEST_STATES
             or cost.contact_started_at is None):
         raise DurableJobLeaseError("actual original final readback accounting or cleanup changed")
     accounting = RepositoryIterationAccountingWitness(**{**iteration["accounting_binding"], "group": group,
@@ -4682,7 +4686,7 @@ async def _validate_recovered_repository_accounting_source(db, source, witness, 
         if (type(cost) is not InferenceCostReservation
                 or await db.get(InferenceCostReservation, operation_id, populate_existing=True) is not cost
                 or state["rows"].get((InferenceCostReservation, operation_id)) != _canonical(cost.model_dump(mode="json"))
-                or cost.state != "settled" or cost.contact_started_at is None
+                or cost.state not in _FINISHED_REQUEST_STATES or cost.contact_started_at is None
                 or cost.job_fencing_token != run.fencing_token
                 or payload_digest != cost.payload_digest or witness._request_body_digest != cost.payload_digest
                 or type(bound_microusd) is not int or bound_microusd != cost.bound_microusd
@@ -4830,10 +4834,9 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
     existing = [row for row in members if row.operation_id == operation_id]
     if already_reserved != bool(existing) or len(existing) > 1:
         blocked("repository_iteration_reservation_identity_changed")
-    if contacted_wait and (existing[0].state != "settled" or existing[0].contact_started_at is None):
+    if contacted_wait and (existing[0].state not in _FINISHED_REQUEST_STATES or existing[0].contact_started_at is None):
         blocked("repository_contacted_wait_requires_settled_response")
-    from src.workflows.general_task_accounting import reservation_liability, entry_for
-    liability = 0
+    from src.workflows.general_task_accounting import entry_for
     for row in members:
         entry = entry_for(row)
         member_binding = entry.get("repository_binding") if entry else None
@@ -4843,11 +4846,8 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
                 or member_binding.get("repository_job_id") != witness.repository_job_id
                 or member_binding.get("group") != witness.group.model_dump(mode="json")):
             blocked("repository_iteration_reservation_source_changed")
-        if row.state == "unknown":
-            blocked("repository_iteration_unknown")
-        liability += reservation_liability(row)
-    if liability + (0 if already_reserved else bound_microusd) > witness.original_max_cost_microusd:
-        blocked("repository_iteration_original_cost_limit")
+    # ADR-037 (#1284): no dollar allowance is compared and an ``unknown``
+    # (finished, not priced yet) record does not block.
     return witness.projection()
 
 

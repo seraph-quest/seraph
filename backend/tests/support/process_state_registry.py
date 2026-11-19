@@ -88,7 +88,6 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.workflows.delegation_contracts:_EVIDENCE_SOURCES": Entry("container", RESTORE),
     "src.workflows.general_task_guard:_LIVE_NATIVE_JOURNALS": Entry("container", RESTORE),
     "src.workflows.general_task_guard:_STAGED_NATIVE_JOURNALS": Entry("container", RESTORE),
-    "src.workflows.inference_ledger:_latched": Entry("container", RESTORE),
     "src.workflows.inference_ledger:_verified_at": Entry("container", RESTORE),
     "src.workflows.native_software_engineering:_NATIVE_EXECUTIONS": Entry("container", RESTORE),
     "src.workflows.repair_capacity:_QUARANTINED_LANES": Entry("container", RESTORE),

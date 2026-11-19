@@ -40,8 +40,9 @@ def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_micro
         status="ready",
         egress_revision=egress_revision,
         egress_revoked=egress_revoked,
-        inference_lane=(InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd)
-            if ceiling_microusd is not None else None),
+        # No amount by default (#1284). A legacy amount is written only when a
+        # test models an install upgraded from before #1284.
+        inference_lane=InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd) if ceiling_microusd is not None else None,
         near_tee=NearTeeSetup(credential_fingerprint=credential_fingerprint, slots={"text": NearTeeSlot(
             model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=max_input_tokens, max_output_tokens=1024,
             request_cost_bound_microusd=request_cost_bound_microusd, enabled=True,

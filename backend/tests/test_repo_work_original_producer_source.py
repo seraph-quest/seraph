@@ -401,9 +401,9 @@ async def test_original_stop_holds_actual_scope_through_writer_and_revokes(
     monkeypatch.setattr(stop, "_positive_witness", positive)
     try:
         await _actual_source_callback_journey(accounting_db, monkeypatch, True, language,
-            stop_at="cost_exhausted", task_limits=TaskLimits(max_inference_calls=5,
-                max_cost_microusd=500, wall_seconds=900),
-            work_limits={"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.000100},
+            # ADR-037 (#1284): the call ceiling, not a dollar amount, stops it.
+            stop_at="shared_group_exhausted", task_limits=TaskLimits(max_inference_calls=1, wall_seconds=900),
+            work_limits={"max_iterations": 3, "max_total_seconds": 900},
             actual_model_cost_microusd=100)
     except AssertionError:
         pytest.fail("Actual Source Stop denial: " + repr(observed.get("denial")))

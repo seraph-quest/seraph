@@ -35,9 +35,12 @@ def test_review_discriminant_is_closed_and_contains_no_preparation():
 
 async def stopped_original(accounting_db, monkeypatch, *, pending=False, prepared=False):
     from src.workflows import repo_repair_source as source_module
+    from src.work_board.contracts import TaskLimits
+    # ADR-037 (#1284): a zero call allowance (not a dollar amount) stops it.
     factory, owner, service, jobs, binding, _ = await actual_native_source(accounting_db, monkeypatch,
         goal_capacity=2, claim_child=False,
-        work_limits=None if prepared else {"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.0})
+        task_limits=None if prepared else TaskLimits(max_inference_calls=0, wall_seconds=900),
+        work_limits=None if prepared else {"max_iterations": 3, "max_total_seconds": 900})
     operator = await authenticate_session(owner.session_id, touch=False)
     original_validator = source_module.validate_repository_stop_witness
     async def rollback_terminal(*args, **kwargs):
@@ -73,9 +76,9 @@ async def test_actual_no_preparation_stop_has_same_source_and_task_review(accoun
     assert status["source_recovery"] is None  # No producer registration grants no recovery state.
     stop = status["repository_stop"]
     assert set(stop) == {"reason", "pending", "limit_evidence", "limit_evidence_digest"}
-    assert stop["pending"] is pending and stop["reason"] == "cost_exhausted"
+    assert stop["pending"] is pending and stop["reason"] == "shared_group_exhausted"
     assert status["status"] == ("running" if pending else "failed")
-    assert status["recovery_action"] == ("repository_stop_pending" if pending else "original_cost_exhausted")
+    assert status["recovery_action"] == ("repository_stop_pending" if pending else "original_shared_group_exhausted")
     assert status["provider_contacted"] is False and status["patch_proposal"] is None
     review = status["repository_review"]
     assert len(review) == 7 and review["contact_state"] == "not_prepared"

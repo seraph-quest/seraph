@@ -32,7 +32,7 @@ export function NearTextWorkPanel({ ownerPrincipalId, ownerSessionId, task, goal
   const readySetup = loadedScope === scope ? setup : null;
   const goal = goals.find(item => item.id === goalId && nearTextGoalEligible(item, ownerSessionId));
   const eligible = Boolean(owned && task && nearTextOutputEligible(task));
-  const liability = Boolean(task && (task.block_kind === "cost_liability" || task.block_reason?.includes("cost_liability")
+  const answerLost = Boolean(task && (task.block_kind === "cost_liability" || task.block_reason?.includes("cost_liability")
     || (task.status === "blocked" && task.block_reason === "near_answer_unavailable")));
   useEffect(() => {
     const version = ++generation.current;
@@ -103,9 +103,9 @@ export function NearTextWorkPanel({ ownerPrincipalId, ownerSessionId, task, goal
     </>}
     {task && <>
       <div role="status">Work: {task.status} · local readback: {task.readback_status} · no_learning</div>
-      {liability && <div role="alert">The answer is unavailable and cannot be previewed or recovered. Any received answer was discarded. Inspect the original accounting for any remaining debt. Settlement does not resend the question or restore its answer.</div>}
-      {!eligible && !liability && <p className="text-xs">An answer is available only after the original job succeeds, its charge settles and current local readback passes. Human review remains separate.</p>}
-      {onOpenAccounting && (liability || task.status === "blocked") && <button type="button" onClick={onOpenAccounting}>Open existing cost settlement</button>}
+      {answerLost && <div role="alert">The answer is unavailable and cannot be previewed or recovered. Any received answer was discarded. Its spend may not be priced yet; recording the charge is optional and does not resend the question or restore its answer.</div>}
+      {!eligible && !answerLost && <p className="text-xs">An answer is available only after the original job succeeds, its spend is recorded and current local readback passes. Human review remains separate.</p>}
+      {onOpenAccounting && (answerLost || task.status === "blocked") && <button type="button" onClick={onOpenAccounting}>Record the charge</button>}
       <button type="button" disabled={busy || !eligible} onClick={() => void readAnswer()}>Read NEAR answer</button>
       {eligible && output?.scope === scope && <>
         <pre aria-label="Literal NEAR answer" className="whitespace-pre-wrap break-all text-sm">{output.value.text}</pre>

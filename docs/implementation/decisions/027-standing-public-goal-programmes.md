@@ -51,9 +51,12 @@ read scope grant no programme authority. Zero budget or missing governed policy
 retains a configured-but-blocked generation with a recovery reason.
 
 **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the programme inference ceiling and zero-budget blocking.
-A programme saved with a $0 allowance is paused on upgrade, keyed on the stored
-value, and runs after an explicit resume. Missing governed policy still blocks.
-Delivered in the second #1284 pull request.
+A programme not yet ended whose stored `max_inference_microusd` is exactly 0 is
+paused once at startup (`programme_paused_no_allowance`, "Paused: it had no
+inference allowance. Resume it to run."), keyed on the stored value, not a
+date, and runs after an explicit resume. A positive stored allowance is no
+longer enforced and new programmes store none. Missing governed policy still
+blocks. Delivered by the second #1284 pull request.
 
 Preview never grants the proposed new generation execution authority. Saving a
 preview with a changed public brief immediately pauses the previous active or

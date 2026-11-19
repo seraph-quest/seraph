@@ -1323,8 +1323,8 @@ export function RepoRepairInspector({
         <div>Stop reason: {current.repository_stop.reason}</div>
         <div role="status">{current.repository_stop.pending ? `Original reservation remains held. ${physicalCleanupStatus}` : "Original repository stop recorded."}</div>
         {current.repository_stop.limit_evidence && <div>
-          <div>Recorded Root cost: {current.repository_stop.limit_evidence.root_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_root_max_cost_microusd} microusd</div>
-          <div>Recorded group cost: {current.repository_stop.limit_evidence.group_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_group_max_cost_microusd} microusd</div>
+          <div>Recorded Root spend: {current.repository_stop.limit_evidence.root_liability_microusd} microusd</div>
+          <div>Recorded group spend: {current.repository_stop.limit_evidence.group_liability_microusd} microusd</div>
           <div>Recorded group calls: {current.repository_stop.limit_evidence.group_calls} · original limit {current.repository_stop.limit_evidence.original_group_max_calls}</div>
           <div>Original cutoff: {current.repository_stop.limit_evidence.original_deadline_at}</div>
           {current.repository_stop.limit_evidence.goal_cutoff_at && <div>Original Goal cutoff: {current.repository_stop.limit_evidence.goal_cutoff_at}</div>}

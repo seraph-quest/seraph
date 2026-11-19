@@ -206,15 +206,19 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
             base_url="http://127.0.0.1:8004", cookies={mail.settings.operator_auth_cookie_name: issued[0]},
             headers={"Origin": "http://127.0.0.1:3001"})
+        # Design test 13 (#1284): the communication task is created with no
+        # dollar field and runs every selected source up to its call ceiling.
         creation = CommunicationCreate(goal_id=mail.GOAL,
                 goal_revision=1, selection=CommunicationSelection(reply_inputs=[{key: value
                     for key, value in mail._reply_body("communication-source").items() if key != "idempotency_key"}],
                     meeting_inputs=[meeting_input] if include_calendar else [],
                     reschedule_inputs=[calendar_effect["proposal"]] if include_calendar and failure_mode is None else [],
-                    acknowledge_private_review=True), max_cost_microusd=50_000 if include_calendar else 25_000, wall_seconds=120,
+                    acknowledge_private_review=True), wall_seconds=120,
                 idempotency_key="communication-native-mail")
         async with client:
-            response = await client.post("/api/work-board/general-tasks/communications", json=creation.model_dump(mode="json"))
+            body = creation.model_dump(mode="json", exclude={"max_cost_microusd"})
+            assert "max_cost_microusd" not in body
+            response = await client.post("/api/work-board/general-tasks/communications", json=body)
             assert response.status_code == 200, response.text
             task_id = response.json()["task"]["task_id"]
         result = await dispatcher.run_pass()
@@ -228,37 +232,12 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
                 for row in (await db.execute(select(WorkflowRunState))).scalars():
                     print(row.job_kind, row.run_identity, row.root_run_identity, row.parent_job_id,
                         row.parent_fencing_token, row.declared_authority_json)
-        if failure_mode == "unknown":
-            assert result["completed"] == 0
-            assert len(calls) == 1 and len(source_reads) == 1
-            assert calendar_requests == []
-            from src.db.models import InferenceCostReservation
-            from src.work_board.repository import BoardError
-            async with sessions() as db:
-                reservations = list((await db.execute(select(InferenceCostReservation))).scalars())
-                paid = [row for row in reservations if row.runtime_path == "strategist_agent"]
-                assert len(paid) == 1 and paid[0].state == "unknown"
-                assert paid[0].bound_microusd == 0
-                child = (await db.execute(select(WorkflowRunState).where(
-                    WorkflowRunState.job_kind == "general_task_native_tool_v1"))).scalars().one()
-                checkpoint = json.loads(child.checkpoint_context_json)
-                assert checkpoint.get("communication_private_plan") is None
-                record = checkpoint["communication_preparations"]["0"]
-                assert record["producer_closed"] is True and record["phase"] == "unknown"
-                assert record["accounting_liability"] == "held"
-                assert "1" not in checkpoint["communication_preparations"]
-                source_run = (await db.execute(select(WorkflowRunState).where(
-                    WorkflowRunState.run_identity == paid[0].job_id))).scalars().one()
-                from src.work_board.communication_preparation import assert_preparation_run_current
-                with pytest.raises(BoardError) as denied:
-                    await assert_preparation_run_current(db, source_run)
-                assert denied.value.code == "communication_original_producer_unavailable"
-            await dispatcher.run_pass()
-            assert len(calls) == 1 and len(source_reads) == 1
-            return
         assert result["completed"] == 1, (result, diagnostics)
         expected_calls = 2 if include_calendar else 1
-        expected_reads = 1 if failure_mode in {"closed", "revoked_closed"} else 2
+        # ADR-037 (#1284): an ``unknown`` (finished, not priced yet) source
+        # call closes that source like any failed call; the rest of the plan
+        # still runs.
+        expected_reads = 1 if failure_mode in {"closed", "revoked_closed", "unknown"} else 2
         assert len(source_reads) == expected_reads and len(calls) == expected_calls
         async with sessions() as db:
             plan = await read_plan(db, owner, task_id, service=service)
@@ -269,7 +248,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
             assert private_response.json() == {"task_id": task_id,
                 "plan": plan.model_dump(mode="json"), "no_learning": True}
             (workspace / "communication-api-private-receipt.json").write_text(private_response.text)
-        if failure_mode in {"closed", "revoked_closed"}:
+        if failure_mode in {"closed", "revoked_closed", "unknown"}:
             assert plan.reply_drafts == [] and len(plan.meeting_preparations) == 1
             assert len(plan.source_refs) == 1 and len(plan.unresolved_questions) == 1
             assert plan.unresolved_questions[0].source_id == mail.BINDING
@@ -279,6 +258,11 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
                 record = json.loads(child.checkpoint_context_json)["communication_preparations"]["0"]
                 assert record["producer_closed"] is True and record["phase"] == "blocked"
                 assert record["accounting_liability"] == "known"
+                if failure_mode == "unknown":
+                    from src.db.models import InferenceCostReservation
+                    paid = list((await db.execute(select(InferenceCostReservation).where(
+                        InferenceCostReservation.job_id == record["binding"]["source_job_id"]))).scalars())
+                    assert len(paid) == 1 and paid[0].state == "unknown" and paid[0].bound_microusd == 0
                 if failure_mode == "revoked_closed":
                     from src.db.models import MailReadConsent, InferenceCostReservation
                     consent = await db.get(MailReadConsent, mail.CONSENT)

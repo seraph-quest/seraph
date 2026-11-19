@@ -87,21 +87,21 @@ def test_specialist_context_retains_original_group_and_resets_on_exception():
     assert _task_group.get() is None
 
 
-@pytest.mark.parametrize("state,cost,reason", [
-    ("reserved", 30, "specialist_cost_limit"), ("contact_started", 30, "specialist_cost_limit"),
-    ("settled", 30, "specialist_cost_limit"), ("settled", None, "group_unknown"),
-    ("unknown", None, "group_unknown"),
+@pytest.mark.parametrize("state,cost", [
+    ("reserved", 30), ("contact_started", 30), ("settled", 30), ("settled", None), ("unknown", None),
 ])
-def test_specialist_request_caps_preserve_original_liability(state, cost, reason):
+def test_specialist_request_is_capped_by_calls_never_by_spend(state, cost):
+    """ADR-037 (#1284): any recorded or unpriced spend leaves a free call usable."""
     from src.workflows.general_task_accounting import _validate_specialist_limits
     original = group()
     evidence = entry(original)
     canonical = row(original, evidence)
     canonical.state, canonical.bound_microusd, canonical.actual_cost_microusd = state, 30, cost
-    limits = SimpleNamespace(max_inference_calls=2, max_cost_microusd=40)
+    limits = SimpleNamespace(max_inference_calls=2, max_cost_microusd=1)
     before = canonical.evidence_json
-    with pytest.raises(InferenceAccountingError, match=reason):
-        _validate_specialist_limits([canonical], evidence, limits, new_bound=20)
+    _validate_specialist_limits([canonical], evidence, limits, new_call=True)
+    with pytest.raises(InferenceAccountingError, match="specialist_call_limit"):
+        _validate_specialist_limits([canonical, canonical], evidence, limits, new_call=True)
     assert canonical.evidence_json == before and canonical.state == state
 
 
@@ -115,11 +115,10 @@ def test_specialist_sibling_limits_and_released_calls_do_not_mint_new_allowance(
         "delegation_request_digest": "c" * 64, "original_operation_id": "planning:other", "original_job_id": "inference:other"}
     sibling = row(original, foreign_evidence)
     sibling.state, sibling.bound_microusd, sibling.actual_cost_microusd = "reserved", 100, None
-    limits = SimpleNamespace(max_inference_calls=2, max_cost_microusd=20)
-    _validate_specialist_limits([own, sibling], own_evidence, limits, new_bound=20)
+    limits = SimpleNamespace(max_inference_calls=2)
+    _validate_specialist_limits([own, sibling], own_evidence, limits, new_call=True)
     with pytest.raises(InferenceAccountingError, match="specialist_call_limit"):
-        _validate_specialist_limits([own], own_evidence,
-            SimpleNamespace(max_inference_calls=1, max_cost_microusd=20), new_bound=0)
+        _validate_specialist_limits([own], own_evidence, SimpleNamespace(max_inference_calls=1), new_call=True)
     assert original.max_cost_microusd == group().max_cost_microusd
 
 

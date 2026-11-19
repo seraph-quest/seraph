@@ -661,7 +661,7 @@ async def _assert_one_scripted_planner_row(db):
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
         node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
         unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0,
-        goal_capacity=2, create=None):
+        goal_capacity=2, create=None, unpriced_iteration=None):
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
     from src.workflows.repo_repair_source import (prepare_repository_native_source,
@@ -1067,7 +1067,11 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 assert current_child['lease']['owner'] is None and current_child['lease']['expires_at'] is None
         async with factory() as db:
             costs = list((await db.scalars(_repository_cost_rows(planned))).all())
-            assert len(costs) == 3 and all(row.state == 'settled' for row in costs)
+            # ADR-037 (#1284): an iteration NEAR did not price is finished, not
+            # held; it is the only unpriced row and the repair went on.
+            assert len(costs) == 3 and sum(row.state == 'unknown' for row in costs) == (
+                0 if unpriced_iteration is None else 1)
+            assert all(row.state in {'settled', 'unknown'} for row in costs)
             assert len({row.operation_id for row in costs}) == 3
         assert (accounting_db[0] / 'example' / original_path).read_text() == original_bytes
         assert (await jobs.get_job(root_id))['status'] == 'succeeded'

@@ -326,6 +326,26 @@ async def test_a_resealing_writer_writes_the_witness_exactly_once(accounting_db,
     _assert_sealed_from_content(root)
 
 
+@pytest.mark.asyncio
+async def test_a_resealing_writer_that_returns_without_a_write_still_seals_once(accounting_db, monkeypatch):
+    """An idempotent settle of an already-settled row writes nothing of its
+    own. If it resealed, that reseal (and its one gap entry) is sealed by a
+    single persist, never committed unsealed, so repeating it adds no gaps."""
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    root, _engine, _factory = accounting_db
+    repository, broker = await _ledger(root)
+    _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = ? WHERE operation_id = 'op-a'", "0" * 64)
+    for _ in range(3):
+        settled = await repository.settle_inference_cost("op-c")
+        assert settled["state"] == "settled"
+        database, witness = _revisions(root)
+        assert database == witness
+        assert len(_history_gaps(root)) == 1
+        _assert_sealed_from_content(root)
+    assert await _admission(broker) == "admitted"
+    assert len(_history_gaps(root)) == 1
+
+
 def test_history_gap_entries_stay_bounded_and_keep_the_first():
     from src.workflows.inference_accounting import _HISTORY_GAP_ENTRIES_KEPT, _append_history_gap
     history = [{"kind": "ledger_created"}]

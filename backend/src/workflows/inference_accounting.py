@@ -551,9 +551,19 @@ class InferenceAccountingRepositoryMixin:
         if db.info.get(_RESEAL_PENDING_KEY):
             # One gap entry per transaction, however many reads reseal.
             return
-        account.settings_history_json = _json(_append_history_gap(
-            json.loads(account.settings_history_json), str(reason)[:128]))
-        db.info[_RESEAL_PENDING_KEY] = True
+        # The gap entry is written by the sealing persist, not here: a writer
+        # that returns without persisting must not commit account content the
+        # ledger digest does not cover (that would read as a new gap each time).
+        db.info[_RESEAL_PENDING_KEY] = str(reason)[:128] or "ledger_verification_failed"
+
+    async def _seal_pending_reseal(self, db: Any, workspace, account) -> None:
+        """A writer returning without a write still seals a reseal it made.
+
+        Its single persist is then this one: the reseal (row digests, totals,
+        rederived group keys and the gap entry) is never committed unsealed.
+        """
+        if db.info.get(_RESEAL_PENDING_KEY):
+            await self._persist_accounting_witness(db, workspace, account)
 
     async def _reseal_ledger(self, db: Any, reason: str):
         """Escalate a hot writer to the whole ledger and reseal it in session (#1284).
@@ -726,7 +736,11 @@ class InferenceAccountingRepositoryMixin:
         changed set and the totals come from the session (#1086 R3).
         """
         from src.workflows import inference_ledger
-        resealed = bool(db.info.pop(_RESEAL_PENDING_KEY, None))
+        resealed = db.info.pop(_RESEAL_PENDING_KEY, None)
+        if resealed:
+            account.settings_history_json = _json(_append_history_gap(
+                json.loads(account.settings_history_json),
+                resealed if isinstance(resealed, str) else "ledger_verification_failed"))
         base = _witness(account) if account.revision else None
         try:
             changed = await inference_ledger.persist(db, workspace, account)
@@ -1031,6 +1045,8 @@ class InferenceAccountingRepositoryMixin:
                         row.evidence_json = _json(history)
                         db.add(row)
                         await self._persist_accounting_witness(db, workspace, account, [row])
+                    else:
+                        await self._seal_pending_reseal(db, workspace, account)
                     result = _operation_payload(row)
                     if denial:
                         denial_binding = (row.operation_id, row.job_id, row.owner_id,
@@ -1099,12 +1115,14 @@ class InferenceAccountingRepositoryMixin:
                     if repeated is not None:
                         if repeated.get("actual_cost_microusd") != actual or repeated.get("evidence_digest") != evidence_digest:
                             raise InferenceAccountingError("accounting_settlement_conflict")
+                        await self._seal_pending_reseal(db, workspace, account)
                         return _operation_payload(row)
                     if type(expected_revision) is not int or row.revision != expected_revision or not idempotency_key or len(idempotency_key) > 128:
                         raise InferenceAccountingError("accounting_settlement_revision_changed")
                 if row.state in {"settled", "released"}:
                     if row.actual_cost_microusd != actual and actual is not None:
                         raise InferenceAccountingError("accounting_settlement_conflict")
+                    await self._seal_pending_reseal(db, workspace, account)
                     return _operation_payload(row)
                 if _provider_contact_denied(row) and actual is None:
                     # The broker's finally path must read the canonical held
@@ -1120,6 +1138,7 @@ class InferenceAccountingRepositoryMixin:
                         and item.get("job_fence") == row.job_fencing_token and item.get("provider_never_contacted") is True
                         and item.get("callback_completed") is True for item in json.loads(row.evidence_json))
                     if not (closed and terminal_authority and quiesced):
+                        await self._seal_pending_reseal(db, workspace, account)
                         return _operation_payload(row)
                 if row.state == "reserved":
                     # Only callback-never-started cancellation/expiry releases.

@@ -24,20 +24,24 @@ NEAR_TEE_TEXT_MODEL = "Qwen/Qwen3.8-27B"
 _FINGERPRINT = "0123456789ab"
 
 
-def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_microusd: int = 1_000_000,
-        request_cost_bound_microusd: int = 20_000, credential_fingerprint: str | None = _FINGERPRINT,
+def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_microusd: int | None = None,
+        request_cost_bound_microusd: int | None = None, credential_fingerprint: str | None = _FINGERPRINT,
         egress_revoked: bool = False, timeout_seconds: float = 30.0,
         max_input_tokens: int = 8192) -> ModelFabricConfiguration:
     """Persist a ready, consented, enabled NEAR TEE text slot behind the shared lane.
 
-    ``max_input_tokens`` is the slot's context bound; agent turns that carry
-    the full tool inventory need a larger one than single-prompt verticals.
+    The slot carries no amount, as the Model card writes it since ADR-037
+    (#1284). ``ceiling_microusd`` and ``request_cost_bound_microusd`` exist
+    only for the one test that models an install upgraded with stored legacy
+    amounts. ``max_input_tokens`` is the slot's context bound; agent turns that
+    carry the full tool inventory need a larger one than single-prompt verticals.
     """
     configuration = ModelFabricConfiguration(
         status="ready",
         egress_revision=egress_revision,
         egress_revoked=egress_revoked,
-        inference_lane=InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd),
+        inference_lane=(InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd)
+            if ceiling_microusd is not None else None),
         near_tee=NearTeeSetup(credential_fingerprint=credential_fingerprint, slots={"text": NearTeeSlot(
             model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=max_input_tokens, max_output_tokens=1024,
             request_cost_bound_microusd=request_cost_bound_microusd, enabled=True,
@@ -67,8 +71,7 @@ NEAR_TEE_VERTICAL_KEY = "private-intercepted-near-tee-vertical-key"
 NEAR_TEE_TEXT_PROFILE_ID = "near_tee.text"
 
 
-async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_000_000,
-        request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
+async def prepare_near_tee_vertical(monkeypatch, *, capabilities=("text", "structured_output"),
         timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2,
         max_input_tokens: int = 8192,
         proof_age_seconds: float = 1.0, configure_accounting: bool = True):
@@ -82,7 +85,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
       bound to the exact slot profile hash (not produced by any model call),
       checked ``proof_age_seconds`` ago with a 600s advisory ``expires_at``
       (NEAR TEE proofs do not age out, #1178);
-    - the durable accounting ceiling matching the lane.
+    - the durable spend ledger (no amount; ADR-037, #1284).
 
     Returns the installed intercepting ``NearFixture``: it answers only the
     pinned NEAR host and fails the test on any other destination, including
@@ -104,8 +107,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
 
     near = (near or NearFixture()).install(monkeypatch)
     fingerprint = hashlib.sha256(NEAR_TEE_VERTICAL_KEY.encode()).hexdigest()[:12]
-    write_near_tee_text_configuration(ceiling_microusd=ceiling_microusd, max_input_tokens=max_input_tokens,
-        request_cost_bound_microusd=request_cost_bound_microusd, credential_fingerprint=fingerprint,
+    write_near_tee_text_configuration(max_input_tokens=max_input_tokens, credential_fingerprint=fingerprint,
         timeout_seconds=timeout_seconds, egress_revision=egress_revision)
     await vault_repository.store("near_api_key", NEAR_TEE_VERTICAL_KEY)
     configured = read_model_fabric_configuration()
@@ -176,12 +178,8 @@ _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route
 
 # ── Repository repair on the intercepted NEAR TEE slot (#1184) ─────────
 
-# The repository suites keep their original 100 micro-USD request bound and
-# 1000 micro-USD lane ceiling. The intercepted catalog record is priced so
-# that bound covers the slot (input $0.001/M, output $0.01/M); the catalog
-# bound check itself is pinned with real prices in test_near_tee_text_slot.
-REPOSITORY_REQUEST_BOUND_MICROUSD = 100
-REPOSITORY_LANE_CEILING_MICROUSD = 1000
+# The intercepted repository catalog record is priced (input $0.001/M,
+# output $0.01/M); since ADR-037 (#1284) that price is display only.
 REPOSITORY_MAX_INPUT_TOKENS = 32768
 
 
@@ -216,8 +214,7 @@ def repository_near_gateway():
 
 
 async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None, egress_revision: int | None = None,
-        ceiling_microusd: int = REPOSITORY_LANE_CEILING_MICROUSD,
-        request_cost_bound_microusd: int = REPOSITORY_REQUEST_BOUND_MICROUSD, configure_accounting: bool = True):
+        configure_accounting: bool = True):
     """A ready NEAR TEE text slot serving ``strategist_agent``; no inference.
 
     The repository repair iteration (and the planner) runs on it; when the
@@ -225,7 +222,7 @@ async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None,
     Text and
     structured output capability proofs, a fresh broker, the write-only key, a real
     catalog-check receipt and (unless ``configure_accounting`` is False, for
-    contact-free unit stores) the durable accounting ceiling. Returns the
+    contact-free unit stores) the durable spend ledger. Returns the
     installed ``repository_near_gateway`` (OpenRouter and every other host
     fail the test).
     """
@@ -237,14 +234,13 @@ async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None,
         from src.model_fabric.configuration import read_model_fabric_configuration
         egress_revision = max(2, read_model_fabric_configuration().egress_revision + 1)
     return await prepare_near_tee_vertical(monkeypatch, near=gateway, jobs=jobs, egress_revision=egress_revision,
-        ceiling_microusd=ceiling_microusd, request_cost_bound_microusd=request_cost_bound_microusd,
         max_input_tokens=REPOSITORY_MAX_INPUT_TOKENS, configure_accounting=configure_accounting)
 
 
 def install_isolated_broker(monkeypatch):
     """A fresh process-local broker for this test (as test_near_tee_text_slot's
-    ``isolated_broker``): an Unknown NEAR cost keeps its serial lease blocked
-    by design, which must never leak into later tests in the same process."""
+    ``isolated_broker``): broker state (queue, lease, owner counts) must never
+    leak into later tests in the same process."""
     from src import llm_runtime
     from src.api import model_fabric_settings as api
     from src.model_fabric import execution, probe, remote_inference_admission
@@ -261,9 +257,8 @@ def near_completion_requests(near):
 
 # ── Scripted NEAR TEE gateway for research-style verticals (#1180) ─────
 
-# The NEAR TEE slot reserves its catalog-priced bound per request; for the
-# fixture slot (8192 input / 1024 output tokens) the catalog check requires
-# at least 1711 micro-USD. Research programmes fund that reserve.
+# A unit for the research programme allowances that remain until #1284
+# part 2. The NEAR TEE slot itself carries no amount (ADR-037).
 RESEARCH_REQUEST_BOUND_MICROUSD = 2_000
 
 

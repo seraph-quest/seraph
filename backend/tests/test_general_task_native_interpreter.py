@@ -127,7 +127,6 @@ async def test_interpreter_governed_continuation_uses_real_result_and_never_egre
     if mode != "restart":
         from sqlalchemy import select
         from src.db.models import InferenceCostReservation
-        from src.workflows.inference_accounting import InferenceAccountingError
         from src.work_board.general_task_native import current_interpreter
         parent, task, attempt, original, manifest = await current_interpreter(dispatcher.jobs,
             parent_id, owner=owner, fence=fence)
@@ -141,11 +140,8 @@ async def test_interpreter_governed_continuation_uses_real_result_and_never_egre
                 reservation = await db.scalar(select(InferenceCostReservation))
                 reservation.state = "unknown"
                 await db.commit()
-            with pytest.raises(InferenceAccountingError, match="group_unknown"):
-                await service.execute(dispatcher.jobs, job_id=parent_id, owner=owner, fence=fence,
-                    envelope=envelope, principal=principal)
-            assert len(registry.calls) == 1 and len(transport["contacts"]) == 1
-            return
+            # ADR-037 (#1284): an unpriced (``unknown``) call is finished; it
+            # does not block the task, which stops only at its call ceiling.
         outcome = await service.execute(dispatcher.jobs, job_id=parent_id, owner=owner, fence=fence,
             envelope=envelope, principal=principal)
         assert outcome["verified"] and len(registry.calls) == 2 and len(transport["contacts"]) == 1

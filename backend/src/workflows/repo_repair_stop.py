@@ -528,8 +528,10 @@ async def _limit_evidence(db, context, *, reason):
     causes = {
         "deadline_exhausted": now >= cutoff,
         "goal_limit_exhausted": now >= goal_cutoff and cutoff == goal_cutoff,
-        "cost_exhausted": work.limits.max_cost_microusd - root_cost < bound,
-        "shared_group_exhausted": len(members) >= group.max_inference_calls or group.max_cost_microusd - group_cost < bound
+        # ADR-037 (#1284): the recorded server bound is evidence only, never
+        # an authority input; an allowance is exhausted when none is left.
+        "cost_exhausted": work.limits.max_cost_microusd - root_cost <= 0,
+        "shared_group_exhausted": len(members) >= group.max_inference_calls or group.max_cost_microusd - group_cost <= 0
             or now >= group.original_deadline_at,
     }
     if reason is None:

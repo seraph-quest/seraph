@@ -679,7 +679,8 @@ class RepositoryNativeLimitEvidenceV1(ClosedTaskModel):
     schema_version: Literal["repository.native_limit_evidence.v1"] = "repository.native_limit_evidence.v1"
     original_limits_digest: TaskDigest
     original_deadline_at: datetime
-    original_server_bound_microusd: int = Field(gt=0)
+    # Recorded legacy amounts (ADR-037, #1284): parsed, never compared.
+    original_server_bound_microusd: int = Field(ge=0)
     root_liability_microusd: int = Field(ge=0)
     group_liability_microusd: int = Field(ge=0)
     group_calls: int = Field(ge=0)

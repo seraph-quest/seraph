@@ -16,9 +16,9 @@ from tests.cordis_research import needs_cordis, research_host
 import pytest_asyncio
 
 
-# The NEAR TEE vertical still writes a legacy slot bound (upgraded install);
-# generation_ceiling sets a programme allowance below the settled spend, which
-# no longer gates the next generation (#1284).
+# The NEAR TEE slot carries no amount (ADR-037, #1284). generation_ceiling
+# sets a programme allowance just above one request's spend, which no longer
+# gates the next generation (#1284).
 _REQUEST_BOUND = 2_000
 _PROGRAMME_BUDGET = 20_000
 
@@ -212,8 +212,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
     socket_path, physical_contacts, physical_controls = public_http_fixture
     gateway = ModelBoundary()
     gateway.cost_nano = 2_000  # NEAR bills 2 micro-USD per request
-    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",),
-                                    request_cost_bound_microusd=_REQUEST_BOUND)
+    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",))
     original_client = httpx.AsyncClient
     physical_controls["scenario"] = scenario
     class PublicFixtureBoundary(httpx.AsyncBaseTransport):

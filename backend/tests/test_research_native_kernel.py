@@ -45,13 +45,12 @@ async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepa
     """``provider="openrouter"`` only for openrouter_legacy tests that pin the historical route."""
     _root,_engine,factory=accounting_db
     if provider == "near_tee":
-        # ADR-035: research children run on the NEAR TEE text slot (a 100
-        # micro-USD request bound under a 1000 micro-USD lane, as before).
-        configured = write_near_tee_text_configuration(request_cost_bound_microusd=100, ceiling_microusd=1000)
+        # ADR-035: research children run on the NEAR TEE text slot, which
+        # carries no amount (ADR-037, #1284).
+        configured = write_near_tee_text_configuration()
         if reviewed_route:
             # A newer reviewed setup of the same slot (research needs <= 45 s).
-            write_near_tee_text_configuration(request_cost_bound_microusd=100, ceiling_microusd=1000,
-                timeout_seconds=30, egress_revision=configured.egress_revision+1)
+            write_near_tee_text_configuration(timeout_seconds=30, egress_revision=configured.egress_revision+1)
     else:
         from tests.test_inference_accounting import setup_configuration
         configured = setup_configuration()

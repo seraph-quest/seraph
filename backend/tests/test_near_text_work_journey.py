@@ -342,7 +342,8 @@ async def test_expired_contact_finance_recovers_ended_attempt_without_current_gr
             async with factory.accounting_sessions() as db:
                 run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==native_id))
                 row=await db.scalar(select(InferenceCostReservation))
-                assert run.status=='cost_liability' and run.lease_owner is None and run.lease_expires_at is None
+                # #1284: a contacted call with no callback is an uncertain effect, never replayed.
+                assert run.status=='unknown_external_effect' and run.lease_owner is None and run.lease_expires_at is None
                 assert run.fencing_token==2 and run.revision>original_revision
                 assert row.state=='unknown' and row.bound_microusd==0 and row.actual_cost_microusd is None
                 assert row.recovery_reason=='provider_cost_readback_required'

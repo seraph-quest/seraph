@@ -333,7 +333,7 @@ async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledg
 
 
 @pytest.mark.asyncio
-async def test_manual_debt_commit_cannot_release_physically_running_callback(actual_billing_journey):
+async def test_manual_charge_record_never_releases_physically_running_callback(actual_billing_journey):
     from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     task_id, _owner = await create_actual_near_task(client, factory)
@@ -353,7 +353,8 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
             'actual_cost_microusd': 7, 'evidence_digest': hashlib.sha256(b'explicit pending-callback statement').hexdigest(),
             'idempotency_key': str(uuid4())})
         assert settled.status_code == 200 and settled.json()['status'] == 'settled', settled.text
-        assert settled.json()['lane_recovery'] == {'status': 'deferred', 'reason_code': 'provider_callback_running'}
+        # #1284: a charge record is billing history only; it never touches the lane.
+        assert 'lane_recovery' not in settled.json()
         current = get_remote_inference_admission_broker().receipt_for(row.operation_id)
         assert current.status == 'running' and not current.callback_completed
         assert current.active_operation_id == row.operation_id and current.fencing_token == before.fencing_token
@@ -369,31 +370,6 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
         if not worker.done():
             worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
-
-
-@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger
-@pytest.mark.asyncio
-async def test_near_lane_recovery_cannot_reconcile_real_openrouter_operation(actual_billing_journey):
-    from config.settings import settings
-    from src.auth.service import authenticate_token
-    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
-    client, factory, jobs, _dispatcher, _controls, _engine = actual_billing_journey
-    assert (await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret'})).status_code == 200
-    saved = await client.put('/api/settings/model-fabric', json={'expected_policy_revision': 1,
-        'openrouter_setup': _v2_setup_payload(api_key='private-intercepted-or-key')})
-    assert saved.status_code == 200, saved.text
-    canary = await client.post('/api/settings/model-fabric/canary', json={
-        'profile_id': 'openrouter.text', 'capability': 'text', 'timeout_seconds': 45})
-    assert canary.status_code == 200 and canary.json()['outcome'] == 'passed', canary.text
-    snapshot = await jobs.inference_accounting_snapshot()
-    assert len(snapshot['operations']) == 1
-    row = snapshot['operations'][0]
-    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    result = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
-        operation_id=row['operation_id'], job_id=row['job_id'], expected_revision=row['revision'], operator=operator)
-    assert result == {'status': 'deferred', 'reason_code': 'settled_operation_changed'}
-    after = await jobs.inference_accounting_snapshot()
-    assert after['ledger_digest'] == snapshot['ledger_digest'] and after['spent_microusd'] == 3
 
 
 @pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger

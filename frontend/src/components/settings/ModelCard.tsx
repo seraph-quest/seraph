@@ -111,7 +111,7 @@ export function spendLine(accounting: ModelFabricSettingsStatus["inference_accou
   const spent = accounting.spent_microusd ?? 0;
   const unpriced = accounting.unpriced_requests ?? 0;
   const base = spent > 0 ? `${dollars(spent)} used this month.` : "Nothing spent this month.";
-  return unpriced > 0 ? `${base} ${unpriced} request${unpriced === 1 ? " is" : "s are"} not priced by NEAR yet.` : base;
+  return unpriced > 0 ? `${base} ${unpriced} request${unpriced === 1 ? " is" : "s are"} not priced by NEAR yet (all months).` : base;
 }
 
 interface Props {

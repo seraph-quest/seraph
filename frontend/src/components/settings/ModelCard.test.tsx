@@ -338,7 +338,7 @@ describe("Model card", () => {
 
   it("ready reports what was spent this month, with the unpriced count", () => {
     renderCard(settingsOf(raw({ accounting: { spent_microusd: 3_200_000, unpriced_requests: 2 } })), READY);
-    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. $3.20 used this month. 2 requests are not priced by NEAR yet.");
+    expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. $3.20 used this month. 2 requests are not priced by NEAR yet (all months).");
   });
 
   it("ready says nothing was spent, and names one unpriced request in the singular", () => {
@@ -346,7 +346,7 @@ describe("Model card", () => {
     expect(card()).toHaveTextContent("DeepSeek V4.1 Flash, hosted by NEAR. Nothing spent this month.");
     first.unmount();
     renderCard(settingsOf(raw({ accounting: { spent_microusd: 0, unpriced_requests: 1 } })), READY);
-    expect(card()).toHaveTextContent("Nothing spent this month. 1 request is not priced by NEAR yet.");
+    expect(card()).toHaveTextContent("Nothing spent this month. 1 request is not priced by NEAR yet (all months).");
   });
 
   it("ready stays on when spend cannot be read", () => {

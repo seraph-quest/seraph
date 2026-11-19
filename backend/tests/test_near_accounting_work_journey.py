@@ -230,6 +230,48 @@ async def test_unpriced_answer_is_delivered_and_manual_charge_record_survives_re
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['unsettled', 'wrong_revision', 'wrong_job', 'foreign_root', 'revoked_root', 'current'])
+async def test_lane_recovery_keeps_owner_root_and_revision_checks(actual_billing_journey, case):
+    # Reduced from the pre-#1284 negative-boundary test: while
+    # reconcile_settled_near_operation stays live it still refuses a foreign
+    # job, a stale revision, an unpriced row, another Root and a revoked Root,
+    # and never touches the delivered answer or contacts NEAR again.
+    from config.settings import settings
+    from src.auth.service import authenticate_token, revoke_session
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
+    client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
+    controls['missing'] = case == 'unsettled'
+    task_id, _owner = await create_actual_near_task(client, factory)
+    await drive(dispatcher)
+    task, run, row = await state(factory, task_id)
+    assert task.status is WorkBoardStatus.review and run.status == 'succeeded'
+    assert row.state == ('unknown' if case == 'unsettled' else 'settled')
+    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+    job_id, revision = run.run_identity, row.revision
+    if case == 'wrong_job':
+        job_id = 'foreign-native-job'
+    elif case == 'wrong_revision':
+        revision += 1
+    elif case == 'foreign_root':
+        login = await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret', 'start_new_scope': True})
+        assert login.status_code == 200, login.text
+        operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+        assert operator.principal.principal_id != row.owner_id
+    elif case == 'revoked_root':
+        await revoke_session(operator.session_id)
+    result = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
+        operation_id=row.operation_id, job_id=job_id, expected_revision=revision, operator=operator)
+    expected = {'unsettled': 'settled_charge_required', 'wrong_revision': 'settled_operation_changed',
+        'wrong_job': 'settled_operation_unavailable', 'foreign_root': 'original_owner_required',
+        'revoked_root': 'original_root_inactive', 'current': 'broker_reconciliation_unavailable'}
+    assert result == {'status': 'deferred', 'reason_code': expected[case]}
+    final_task, final_run, final_row = await state(factory, task_id)
+    assert final_run.status == 'succeeded' and final_row.revision == row.revision
+    assert final_row.actual_cost_microusd == row.actual_cost_microusd
+    assert controls['calls'].count(('cloud-api.near.ai', '/v1/chat/completions')) == 1
+
+
+@pytest.mark.asyncio
 async def test_disable_after_post_still_settles_original_charge_without_adoption(actual_billing_journey):
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     task_id, _owner = await create_actual_near_task(client, factory)

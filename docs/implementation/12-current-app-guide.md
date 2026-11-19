@@ -1806,8 +1806,11 @@ and OK, then test; there is no budget step. Since #1284
 overrun, no-budget or budget-used state and asks for no dollar amount. "Chat is
 on" needs both `effective_runtime.inference_ready` and a ready text slot with no
 reason code, and reads "&lt;Model&gt;, hosted by NEAR. $3.20 used this month."
-(with "2 requests are not priced by NEAR yet." when some are unpriced, or
-"Nothing spent this month."). "NEAR not answering" is only this session's last
+(with "2 requests are not priced by NEAR yet (all months)." when some are
+unpriced, or "Nothing spent this month."). The unpriced count covers every
+month, not only this one. Spend history labels an unpriced request "answered,
+not priced yet" only when NEAR answered; a call that failed or lost its outcome
+after contact reads "no answer, not priced", and one still running "in progress". "NEAR not answering" is only this session's last
 failed required check. The card adds no time logic of its own.
 
 **Allow and turn on chat** is enabled only after the operator ticks "I

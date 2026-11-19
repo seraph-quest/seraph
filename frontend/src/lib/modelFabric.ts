@@ -417,7 +417,7 @@ export interface InferenceAccountingStatus {
   period_id?: string;
   /** Settled charges in the current UTC month. */
   spent_microusd?: number;
-  /** Requests NEAR has not priced yet (unknown or contact_started). */
+  /** Requests NEAR has not priced yet (``unknown``), counted over all months. */
   unpriced_requests?: number;
   history_verified?: boolean;
   revision?: number;

@@ -345,7 +345,7 @@ async def test_expired_contact_finance_recovers_ended_attempt_without_current_gr
                 assert run.status=='cost_liability' and run.lease_owner is None and run.lease_expires_at is None
                 assert run.fencing_token==2 and run.revision>original_revision
                 assert row.state=='unknown' and row.bound_microusd==0 and row.actual_cost_microusd is None
-                assert row.recovery_reason=='provider_cost_readback_required'
+                assert row.recovery_reason=='provider_outcome_unknown'
                 revision=row.revision;native_revision=run.revision
                 assert not json.loads(run.artifact_receipts_json)
             await restarted.run_pass()

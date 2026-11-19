@@ -24,8 +24,8 @@ NEAR_TEE_TEXT_MODEL = "Qwen/Qwen3.8-27B"
 _FINGERPRINT = "0123456789ab"
 
 
-def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_microusd: int = 1_000_000,
-        request_cost_bound_microusd: int = 20_000, credential_fingerprint: str | None = _FINGERPRINT,
+def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_microusd: int | None = None,
+        request_cost_bound_microusd: int | None = None, credential_fingerprint: str | None = _FINGERPRINT,
         egress_revoked: bool = False, timeout_seconds: float = 30.0,
         max_input_tokens: int = 8192) -> ModelFabricConfiguration:
     """Persist a ready, consented, enabled NEAR TEE text slot behind the shared lane.
@@ -37,7 +37,9 @@ def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_micro
         status="ready",
         egress_revision=egress_revision,
         egress_revoked=egress_revoked,
-        inference_lane=InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd),
+        # No amount by default (#1284). A legacy amount is written only when a
+        # test models an install upgraded from before #1284.
+        inference_lane=InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd) if ceiling_microusd is not None else None,
         near_tee=NearTeeSetup(credential_fingerprint=credential_fingerprint, slots={"text": NearTeeSlot(
             model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=max_input_tokens, max_output_tokens=1024,
             request_cost_bound_microusd=request_cost_bound_microusd, enabled=True,
@@ -67,8 +69,8 @@ NEAR_TEE_VERTICAL_KEY = "private-intercepted-near-tee-vertical-key"
 NEAR_TEE_TEXT_PROFILE_ID = "near_tee.text"
 
 
-async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_000_000,
-        request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
+async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int | None = None,
+        request_cost_bound_microusd: int | None = None, capabilities=("text", "structured_output"),
         timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2,
         max_input_tokens: int = 8192,
         proof_age_seconds: float = 1.0, configure_accounting: bool = True):
@@ -176,12 +178,8 @@ _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route
 
 # ── Repository repair on the intercepted NEAR TEE slot (#1184) ─────────
 
-# The repository suites keep their original 100 micro-USD request bound and
-# 1000 micro-USD lane ceiling. The intercepted catalog record is priced so
-# that bound covers the slot (input $0.001/M, output $0.01/M); the catalog
-# bound check itself is pinned with real prices in test_near_tee_text_slot.
-REPOSITORY_REQUEST_BOUND_MICROUSD = 100
-REPOSITORY_LANE_CEILING_MICROUSD = 1000
+# The intercepted repository catalog record is priced (input $0.001/M,
+# output $0.01/M); since #1284 that price is display only.
 REPOSITORY_MAX_INPUT_TOKENS = 32768
 
 
@@ -216,8 +214,8 @@ def repository_near_gateway():
 
 
 async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None, egress_revision: int | None = None,
-        ceiling_microusd: int = REPOSITORY_LANE_CEILING_MICROUSD,
-        request_cost_bound_microusd: int = REPOSITORY_REQUEST_BOUND_MICROUSD, configure_accounting: bool = True):
+        ceiling_microusd: int | None = None,
+        request_cost_bound_microusd: int | None = None, configure_accounting: bool = True):
     """A ready NEAR TEE text slot serving ``strategist_agent``; no inference.
 
     The repository repair iteration (and the planner) runs on it; when the

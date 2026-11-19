@@ -653,17 +653,18 @@ and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
 the single remote-inference broker (`get_remote_inference_admission_broker()`),
 bound to the job's lease.
 Interactive work keeps its priority over queued background work; cancelling a
-queued request releases its reservation without contact; a lost response after
-contact stays an `unknown` cost liability. By broker design that uncertain
-result keeps the serial slot until it is reconciled, so the next request (Cordis
-or chat) waits instead of risking a double charge. Outbound messages are
+queued request releases its request record without contact; a lost response
+after contact is an uncertain outcome that is never replayed and adopts
+nothing. Since ADR-037 (#1284) the returned callback frees the serial slot at
+once (no charge has to be recorded first), so the next request (Cordis or chat)
+runs. Outbound messages are
 Vault-redacted (fail closed) before JSON encoding, and Cordis inference is capped
 at four concurrent requests per operator (`cordis_inference_capacity`) so a burst
 cannot take the broker's per-owner admission slots chat needs. Routes need a
 declared and proven streaming capability, as chat does. Python returns bounded frames, the sealed
 receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
 and no service returns secrets. A changed attempt, deadline or Root never seals
-output, and unloading the host leaves the job's intent and cost liability for
+output, and unloading the host leaves the job's intent and request record for
 recovery while a re-admission reuses the held job.
 `connections.invokeBoundAdapter` (#1092) admits one governed job for an operation
 from a closed table with closed per-operation arguments, and runs it through the

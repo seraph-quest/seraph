@@ -46,6 +46,16 @@ REMOVED_REASON_CODES = (
     "profile_cost_noncompliant", "profile_cost_source_missing_or_stale", "request_bound_below_overrun",
     "deployment_spend_ceiling_mismatch", "research_accounting_blocked",
     "research_reviewed_allowance_changed", "review_cost_overrun", "minimum_request_bound_microusd",
+    # Part 2: per-task, per-programme and per-job dollar allowances, the
+    # charge-gated lane recovery and the ledger latch.
+    "general_task_group_cost_limit", "general_task_specialist_cost_limit",
+    "general_task_planning_budget_required", "general_task_planning_budget_insufficient",
+    "communication_source_budget_unavailable", "communication_source_budget_changed",
+    "repository_original_budget_exhausted", "repository_iteration_original_cost_limit",
+    "repository_original_unknown_liability", "repository_iteration_unknown",
+    "programme_zero_budget", "programme_allowance_exhausted", "programme_generation_cost_budget_exhausted",
+    "near_tee_reindex_budget_exhausted", "near_tee_reindex_budget_below_request_reserve",
+    "near_tee_reindex_budget_exceeds_lane_ceiling", "reconcile_settled_near_operation", "latched_reason",
 )
 
 
@@ -332,3 +342,62 @@ def test_new_settings_carry_no_amounts_and_need_no_lane():
     assert near_tee_slot_block_reason(reloaded, "text") is None
     controls = near_tee_profile_for_slot("text", reloaded.near_tee.slots["text"]).options["_seraph_near_tee"]
     assert "request_cost_bound_microusd" not in controls
+
+
+@pytest.mark.asyncio
+async def test_tampered_ledger_row_records_a_history_gap_and_the_request_still_runs(accounting_db):
+    """Design test 11 (#1284 part 2): ledger continuity is display only."""
+    root, _engine, _factory = accounting_db
+    _no_limit_configuration()
+    repository = DurableJobRepository()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    await broker.execute(_request("before-tamper"), _charged("0.000010"))
+    # Edit a sealed row's content behind the ledger's back (as a restored or
+    # hand-edited database would): its stored digest no longer matches.
+    with sqlite3.connect(root / "seraph.db") as db:
+        db.execute("UPDATE inference_cost_reservations SET actual_cost_microusd=999 WHERE operation_id='before-tamper'")
+        db.commit()
+    from src.workflows import inference_ledger
+    inference_ledger.reset_process_state()
+    result = await broker.execute(_request("after-tamper"), _charged("0.000002"))
+    assert result["choices"][0]["message"]["content"] == "answer"
+    snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["status"] == "ready"
+    assert snapshot["history_verified"] is False and snapshot["history_gap_since"]
+    # The reseal keeps what is present: the edited amount is now the history.
+    assert snapshot["spent_microusd"] == 999 + 2
+    with sqlite3.connect(root / "seraph.db") as db:
+        history = json.loads(db.execute("SELECT settings_history_json FROM inference_accounting_owners").fetchone()[0])
+    assert [entry["kind"] for entry in history].count("history_gap") == 1
+    # The resealed ledger verifies cleanly again and stays usable.
+    inference_ledger.reset_process_state()
+    again = await broker.execute(_request("after-reseal"), _charged("0.000001"))
+    assert again["choices"][0]["message"]["content"] == "answer"
+    with sqlite3.connect(root / "seraph.db") as db:
+        history = json.loads(db.execute("SELECT settings_history_json FROM inference_accounting_owners").fetchone()[0])
+    assert [entry["kind"] for entry in history].count("history_gap") == 1
+
+
+@pytest.mark.asyncio
+async def test_moved_workspace_without_rebind_still_blocks_as_a_consent_fence(accounting_db, monkeypatch):
+    """Design test 9: the deployment binding is a consent fence, unchanged."""
+    from src.workflows.inference_accounting import InferenceAccountingError
+    from src.workspace import accounting_witness
+    _no_limit_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+
+    def moved(_workspace):
+        raise accounting_witness.ProductionWorkspaceReconciliationError("accounting_deployment_binding_unavailable")
+    monkeypatch.setattr(accounting_witness, "assert_deployment_binding", moved)
+    calls = []
+
+    async def transport():
+        calls.append("contact")
+        return {"id": "gen-x", "usage": {"cost": "0"}}
+    with pytest.raises(Exception) as denied:
+        await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(_request("moved"), transport)
+    assert calls == []
+    # The binding guards the provider policy record: a consent fence, not money.
+    assert str(denied.value) == "provider_policy_continuity_unavailable"
+    del InferenceAccountingError

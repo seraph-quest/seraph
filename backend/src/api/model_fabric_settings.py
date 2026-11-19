@@ -1230,17 +1230,6 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
         raise HTTPException(status_code=409, detail=exc.code) from exc
     result = {"status": row["state"], "operation": row, "memory_status": "no_learning",
         "authority_scope": "deployment_accounting", "job_authority_changed": False}
-    from src.model_fabric.accounting import near_tee_profile_slot
-    if (row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text"
-            or near_tee_profile_slot(row.get("runtime_path"), row.get("profile_id")) is not None):
-        try:
-            result["lane_recovery"] = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
-                operation_id=row["operation_id"], job_id=row["job_id"],
-                expected_revision=row["revision"], operator=getattr(request.state, "operator", None),
-            )
-        except Exception:
-            # Debt settlement already committed; local lane recovery cannot undo it.
-            result["lane_recovery"] = {"status": "deferred", "reason_code": "lane_recovery_unavailable"}
     return result
 
 

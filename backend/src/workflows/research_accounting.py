@@ -30,7 +30,7 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
         await jobs._accounting_begin(db)
         account, rows = await jobs._accounting_rows(db)
         with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-            jobs._assert_accounting_continuity(workspace, account, rows)
+            jobs._assert_accounting_continuity(workspace, account, rows, db=db)
             parent = await jobs._fetch(db, parent_id)
             jobs._assert_lease(parent, owner=owner, fencing_token=fencing_token)
             if parent.status != "running" or parent.job_kind != PARENT_KIND or _utc(parent.deadline_at) <= now:
@@ -90,6 +90,9 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
             if existing_count:
                 if existing_count != len(candidates):
                     raise InferenceAccountingError("research_group_partial_reservation")
+                from src.workflows.inference_accounting import _RESEAL_PENDING_KEY
+                if db.info.pop(_RESEAL_PENDING_KEY, None):
+                    await jobs._persist_accounting_witness(db, workspace, account, rows)
                 return [_operation_payload(item[3]) for item in candidates]
             created = []
             for child, expected, group_binding, _existing in candidates:

@@ -131,25 +131,61 @@ async def test_digest_at_flush_matches_reloaded_raw_rows_and_writes_are_v2(accou
 
 
 def _assert_immediately_blocked(snapshot_value, admission):
+    """The external witness is ahead of the database: never resealed (#1284)."""
     assert snapshot_value["status"] == "unavailable" and snapshot_value["reason_code"] == "accounting_continuity_unavailable"
     assert "accounting_continuity_unavailable" in admission
+
+
+def _history_gaps(root):
+    history = json.loads(_sql(root, "SELECT settings_history_json FROM inference_accounting_owners")[0][0])
+    return [entry for entry in history if entry.get("kind") == "history_gap"]
+
+
+def _assert_sealed_from_content(root):
+    """The reseal left a ledger whose digests, totals and witness match its rows."""
+    connection = sqlite3.connect(root / "seraph.db")
+    connection.row_factory = sqlite3.Row
+    try:
+        raw = [dict(row) for row in connection.execute("SELECT * FROM inference_cost_reservations")]
+        account = dict(connection.execute("SELECT * FROM inference_accounting_owners").fetchone())
+    finally:
+        connection.close()
+    assert all(row["ledger_row_digest"] == codec.row_digest(row) for row in raw)
+    assert codec.ledger_digest(account, raw) == account["ledger_digest"]
+    assert json.loads(account["ledger_totals_json"]) == codec.ledger_totals(raw)
+    assert read_lifecycle_receipt(ProductionWorkspace(host_root=root))["inference_accounting"] == codec.witness(account)
+    return raw
+
+
+def _assert_resealed_and_proceeds(root, snapshot_value, admission):
+    """ADR-037 (#1284): a mismatch is display-only; it reseals, records a gap and proceeds."""
+    assert snapshot_value["status"] == "ready" and snapshot_value["reason_code"] is None, (snapshot_value["reason_code"], admission)
+    assert snapshot_value["history_verified"] is False and snapshot_value["history_gap_since"]
+    assert admission == "admitted"
+    assert _history_gaps(root) and all(gap["reason"] for gap in _history_gaps(root))
+    return _assert_sealed_from_content(root)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["delete_row", "insert_row", "row_digest_column", "account_totals",
                                     "consistent_row_and_digest", "account_ceiling"])
-async def test_structural_tampering_blocks_the_next_operation(accounting_db, monkeypatch, tamper):
+async def test_structural_tampering_reseals_records_a_history_gap_and_proceeds(accounting_db, monkeypatch, tamper):
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)  # the oracle assumes no tampering
     root, _engine, _factory = accounting_db
     repository, broker = await _ledger(root)
     if tamper == "delete_row":
         _sql(root, "DELETE FROM inference_cost_reservations WHERE operation_id = 'op-a'")
     elif tamper == "insert_row":
-        _sql(root, "INSERT INTO inference_cost_reservations SELECT 'op-forged', deployment_id, job_id, owner_id, goal_id, goal_revision, "
-             "payload_digest, policy_digest, runtime_path, profile_id, period_id, settings_revision, ceiling_microusd, bound_microusd, "
-             "owner_ceiling_microusd, sequence, priority, deadline_at, state, job_fencing_token, contact_started_at, actual_cost_microusd, "
-             "provider_operation_id, evidence_json, group_lookup_key, recovery_reason, revision, created_at, updated_at, ledger_row_digest "
-             "FROM inference_cost_reservations WHERE operation_id = 'op-a'")
+        # A copy of op-a under a new id, by column name (the stored row digest
+        # is copied too, so it no longer matches the row's content).
+        connection = sqlite3.connect(root / "seraph.db")
+        connection.row_factory = sqlite3.Row
+        row = {**dict(connection.execute("SELECT * FROM inference_cost_reservations WHERE operation_id = 'op-a'").fetchone()),
+               "operation_id": "op-forged"}
+        connection.execute(f"INSERT INTO inference_cost_reservations ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
+                           tuple(row.values()))
+        connection.commit()
+        connection.close()
     elif tamper == "row_digest_column":
         _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = ? WHERE operation_id = 'op-a'", "0" * 64)
     elif tamper == "account_totals":
@@ -166,11 +202,20 @@ async def test_structural_tampering_blocks_the_next_operation(accounting_db, mon
         connection.close()
     else:
         _sql(root, "UPDATE inference_accounting_owners SET ceiling_microusd = 1000000")
-    _assert_immediately_blocked(await repository.inference_accounting_snapshot(), await _admission(broker))
+    assert not _history_gaps(root)
+    snapshot = await repository.inference_accounting_snapshot()
+    rows = _assert_resealed_and_proceeds(root, snapshot, await _admission(broker))
+    # The view is rebuilt from the rows present, nothing more.
+    ids = sorted(row["operation_id"] for row in rows)
+    expected = {"delete_row": ["op-b", "op-c", "op-next"], "insert_row": ["op-a", "op-b", "op-c", "op-forged", "op-next"]}
+    assert ids == expected.get(tamper, ["op-a", "op-b", "op-c", "op-next"])
+    # The resealed ledger verifies cleanly from then on.
+    monkeypatch.setattr("config.settings.settings.workspace_dir", str(root))
+    assert (await repository.verify_inference_ledger_in_background())["status"] == "verified"
 
 
 @pytest.mark.asyncio
-async def test_witness_rollback_and_database_swap_block_the_next_operation(accounting_db, monkeypatch):
+async def test_witness_rollback_reseals_but_database_swap_behind_the_witness_blocks(accounting_db, monkeypatch):
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)  # the oracle assumes no tampering
     root, engine, _factory = accounting_db
     repository, broker = await _ledger(root, operations=(("op-a", "0.000020"),))
@@ -184,18 +229,24 @@ async def test_witness_rollback_and_database_swap_block_the_next_operation(accou
     path = lifecycle_receipt_path(workspace)
     current_bytes = path.read_bytes()
     path.write_text(json.dumps(older_receipt, sort_keys=True, separators=(",", ":")))
-    _assert_immediately_blocked(await repository.inference_accounting_snapshot(), await _admission(broker, "op-c"))
-    path.write_bytes(current_bytes)
+    # A witness behind the database is spend history only: reseal and proceed.
+    _assert_resealed_and_proceeds(root, await repository.inference_accounting_snapshot(), await _admission(broker, "op-c"))
+    assert path.read_bytes() != current_bytes
+    # A database behind the witness may be missing a started contact: it
+    # stays blocked until maintenance (at-most-once), and nothing is resealed.
     await engine.dispose()
+    witness_bytes = path.read_bytes()
     shutil.copy2(root.parent / "older.db", root / "seraph.db")
     _assert_immediately_blocked(await repository.inference_accounting_snapshot(), await _admission(broker, "op-d"))
+    assert path.read_bytes() == witness_bytes
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["lower_settled_actual", "settled_to_released", "older_period",
                                     "large_charge_actual_lowered", "legacy_bound_raised"])
-async def test_content_edits_to_untouched_rows_never_change_the_view_and_fail_full_verification(accounting_db, monkeypatch, tamper):
-    """R1: editing history cannot change what is shown, and full verification latches (ADR-006)."""
+async def test_content_edits_to_untouched_rows_never_change_the_view_until_full_verification_reseals(accounting_db, monkeypatch, tamper):
+    """R1: editing history cannot change what is shown until full verification
+    detects it; then the ledger is resealed from content with a recorded gap (#1284)."""
     root, _engine, _factory = accounting_db
     large = tamper in {"large_charge_actual_lowered", "legacy_bound_raised"}
     # 128 fillers keep the tampered row out of the snapshot's re-checked list,
@@ -220,11 +271,13 @@ async def test_content_edits_to_untouched_rows_never_change_the_view_and_fail_fu
         assert during[key] == before[key], key
     assert await _admission(broker, "op-during") == "admitted"
     # Full verification (background verifier, then the in-lock re-check)
-    # detects the edit and latches accounting for this process.
+    # detects the edit and reseals instead of latching.
     monkeypatch.setattr("config.settings.settings.workspace_dir", str(root))
     result = await repository.verify_inference_ledger_in_background()
-    assert result["status"] == "latched", result
-    _assert_immediately_blocked(await repository.inference_accounting_snapshot(), await _admission(broker, "op-after"))
+    assert result["status"] == "resealed", result
+    assert [gap["reason"] for gap in _history_gaps(root)] == [result["reason"]]
+    _assert_resealed_and_proceeds(root, await repository.inference_accounting_snapshot(), await _admission(broker, "op-after"))
+    assert (await repository.verify_inference_ledger_in_background())["status"] == "verified"
 
 
 @pytest.mark.asyncio
@@ -235,12 +288,14 @@ async def test_listed_row_edits_are_caught_by_the_status_read(accounting_db, mon
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
     await broker._prepare_accounting(request("op-open", owner="service:op-open"))
     _sql(root, "UPDATE inference_cost_reservations SET state = 'released' WHERE operation_id = 'op-open'")
-    _assert_immediately_blocked(await repository.inference_accounting_snapshot(), await _admission(broker))
+    snapshot = await repository.inference_accounting_snapshot()
+    rows = _assert_resealed_and_proceeds(root, snapshot, await _admission(broker))
+    assert [row["state"] for row in rows if row["operation_id"] == "op-open"] == ["released"]
 
 
 @pytest.mark.asyncio
 async def test_stale_full_verification_runs_inline_at_admission(accounting_db, monkeypatch):
-    """R7: past 2× the interval, admission verifies in full before admitting."""
+    """R7: past 2× the interval, admission verifies in full (and reseals) before admitting."""
     root, _engine, _factory = accounting_db
     repository, broker = await _ledger(root, operations=(("op-a", "0.000020"),), fillers=128)
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
@@ -248,21 +303,25 @@ async def test_stale_full_verification_runs_inline_at_admission(accounting_db, m
     assert await _admission(broker, "op-fresh") == "admitted"  # within the window: fast path
     clock = inference_ledger.time.monotonic() + inference_ledger._STALE_AFTER_SECONDS + 1
     monkeypatch.setattr(inference_ledger.time, "monotonic", lambda: clock)
-    assert "accounting_continuity_unavailable" in await _admission(broker, "op-stale")
+    assert not _history_gaps(root)
+    assert await _admission(broker, "op-stale") == "admitted"
+    assert [gap["reason"] for gap in _history_gaps(root)] == ["ledger_digest_mismatch"]
+    _assert_sealed_from_content(root)
 
 
 @pytest.mark.asyncio
 async def test_touched_row_is_verified_before_it_is_resealed(accounting_db, monkeypatch):
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)  # the oracle assumes no tampering
-    """R2: a writer never seals tampered content into a fresh digest."""
+    """R2 (#1284): a writer never seals tampered content silently: it reseals
+    the whole ledger from content and records the gap before writing."""
     root, _engine, _factory = accounting_db
     repository, broker = await _ledger(root, operations=())
     handle = await broker._prepare_accounting(request("op-open", owner="service:op-open"))
     _sql(root, "UPDATE inference_cost_reservations SET bound_microusd = 1 WHERE operation_id = 'op-open'")
-    with pytest.raises(Exception, match="accounting_continuity_unavailable"):
-        await broker._contact_accounting(handle)
-    stored = _sql(root, "SELECT ledger_row_digest, bound_microusd FROM inference_cost_reservations")[0]
-    assert stored[1] == 1 and stored[0] != codec.row_digest({**dict(zip(("ledger_row_digest", "bound_microusd"), stored))})
+    await broker._contact_accounting(handle)
+    assert [gap["reason"] for gap in _history_gaps(root)] == ["ledger_row_digest_mismatch"]
+    rows = _assert_sealed_from_content(root)
+    assert [(row["state"], row["bound_microusd"]) for row in rows] == [("contact_started", 1)]
 
 
 @pytest.mark.asyncio
@@ -312,15 +371,16 @@ async def test_v1_ledger_migrates_forward_once_with_an_empty_checkpoint(accounti
 
 
 @pytest.mark.asyncio
-async def test_tampered_v1_ledger_never_migrates(accounting_db):
+async def test_tampered_v1_ledger_reseals_as_v2_with_a_history_gap(accounting_db):
     root, engine, _factory = accounting_db
     repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
     await engine.dispose()
     _sql(root, "UPDATE inference_accounting_owners SET ledger_digest = ?", "0" * 64)
     _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = NULL")
-    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
-        await repository.recover_inference_accounting()
-    assert not codec.is_v2_digest(_sql(root, "SELECT ledger_digest FROM inference_accounting_owners")[0][0])
+    await repository.recover_inference_accounting()
+    assert codec.is_v2_digest(_sql(root, "SELECT ledger_digest FROM inference_accounting_owners")[0][0])
+    assert _history_gaps(root)
+    _assert_sealed_from_content(root)
 
 
 @pytest.mark.asyncio
@@ -332,9 +392,12 @@ async def test_null_row_digests_are_fully_verified_and_backfilled(accounting_db,
     # Restored rows without a stored digest: full verification, then backfill.
     assert await _admission(broker) == "admitted"
     assert _sql(root, "SELECT ledger_row_digest FROM inference_cost_reservations WHERE operation_id = 'op-a'")[0][0] is not None
-    # A NULL on a tampered row is not silently trusted.
+    assert not _history_gaps(root)
+    # A NULL on a tampered row is not silently trusted: it is resealed with a gap.
     _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = NULL, actual_cost_microusd = 0 WHERE operation_id = 'op-a'")
-    assert "accounting_continuity_unavailable" in await _admission(broker, "op-after")
+    assert await _admission(broker, "op-after") == "admitted"
+    assert _history_gaps(root)
+    _assert_sealed_from_content(root)
 
 
 # --- review P2: scoped reads cannot be emptied by editing untouched rows ----
@@ -377,43 +440,93 @@ async def _scoped(repository, root, call):
             return await call(db, ledger)
 
 
+def _group_members(original, ordinals, *, group_id=None):
+    """Seedable rows carrying real, valid group reservation evidence."""
+    from tests.test_inference_group_lookup import reservation
+    members = []
+    for ordinal in ordinals:
+        row = reservation(original, ordinal)
+        members.append({"operation_id": row.operation_id, "job_id": row.job_id, "owner_id": row.owner_id,
+            "goal_id": row.goal_id, "goal_revision": row.goal_revision, "evidence_json": row.evidence_json,
+            "deadline_at": str(row.deadline_at), "group_lookup_key": "g:" + original.group_id})
+    return members
+
+
+async def _group_ids(repository, root, group_id):
+    rows = await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group_id))
+    return sorted(row.operation_id for row in rows)
+
+
 @pytest.mark.asyncio
-async def test_hidden_group_member_is_refused_not_under_counted(accounting_db, monkeypatch):
+async def test_hidden_group_member_is_found_again_not_under_counted(accounting_db, monkeypatch):
+    from tests.test_general_task_specialist_accounting import group as original_group
     root, _engine, _factory = accounting_db
     repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
-    group = "a" * 64
-    evidence = json.dumps([{"kind": "general_task_group_reservation.v1", "group": {"group_id": group}}])
-    _seed_rows(root, [{"operation_id": f"member-{index}", "evidence_json": evidence, "group_lookup_key": "g:" + group}
-                      for index in range(3)])
-    assert len(await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group))) == 3
+    original = original_group()
+    _seed_rows(root, _group_members(original, (1, 2, 3)))
+    members = await _group_ids(repository, root, original.group_id)
+    assert len(members) == 3 and not _history_gaps(root)
     # The lookup key is unhashed: moving a member out of the group's key must
-    # not let the group caps see two rows.
-    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = 'member-0'", "g:" + "b" * 64)
-    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
-        await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group))
+    # not let the group's call cap see two rows. The read reseals (keys
+    # rederived from sealed evidence) and still returns every member (#1284).
+    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = ?", "g:" + "b" * 64, members[0])
+    assert await _group_ids(repository, root, original.group_id) == members
+    assert [gap["reason"] for gap in _history_gaps(root)] == ["ledger_group_count_mismatch"]
+    assert _sql(root, "SELECT group_lookup_key FROM inference_cost_reservations WHERE operation_id = ?", members[0])[0][0] == \
+        "g:" + original.group_id
 
 
 @pytest.mark.asyncio
-async def test_swapped_group_member_is_refused_not_counted_in_its_place(accounting_db, monkeypatch):
+async def test_swapped_group_member_is_not_counted_in_its_place(accounting_db, monkeypatch):
+    from tests.test_general_task_specialist_accounting import group as original_group
     root, _engine, _factory = accounting_db
     repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
-    group, other = "a" * 64, "c" * 64
-    evidence = lambda group_id: json.dumps([{"kind": "general_task_group_reservation.v1", "group": {"group_id": group_id}}])
-    _seed_rows(root, [{"operation_id": f"member-{index}", "evidence_json": evidence(group), "group_lookup_key": "g:" + group}
-                      for index in range(2)] + [{"operation_id": "outsider", "evidence_json": evidence(other),
-                                                 "group_lookup_key": "g:" + other, "bound_microusd": 1}])
-    # Move a member out and a cheap non-member in: the count is unchanged.
-    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = 'member-0'", "g:" + other)
-    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = 'outsider'", "g:" + group)
-    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
-        await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group))
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.general_task_proposal import new_group
+    from tests.test_general_task_planner import descriptor, task_input
+    original = original_group()
+    other = new_group(WorkBoardOwner(principal_id="operator:fixture", session_id="original-root"),
+        task_input(), [descriptor()], goal_revision=1, request_key="other-intent",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10))
+    assert original.group_id != other.group_id
+    outsider = _group_members(other, (9,))
+    _seed_rows(root, _group_members(original, (1, 2)) + outsider)
+    members = await _group_ids(repository, root, original.group_id)
+    # Move a member out and a non-member in: the count is unchanged.
+    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = ?", "g:" + other.group_id, members[0])
+    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = ?",
+         "g:" + original.group_id, outsider[0]["operation_id"])
+    # The read reseals from sealed evidence: the real members, never the outsider.
+    assert await _group_ids(repository, root, original.group_id) == members
+    assert await _group_ids(repository, root, other.group_id) == [outsider[0]["operation_id"]]
+    assert _history_gaps(root)
+
+
+@pytest.mark.asyncio
+async def test_invalid_group_evidence_still_refuses_the_group_read(accounting_db, monkeypatch):
+    """Group evidence guards call counts and lineage, not money: a reseal never accepts invalid evidence."""
+    from tests.test_general_task_specialist_accounting import group as original_group
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    original = original_group()
+    _seed_rows(root, _group_members(original, (1, 2)))
+    members = await _group_ids(repository, root, original.group_id)
+    entries = json.loads(_sql(root, "SELECT evidence_json FROM inference_cost_reservations WHERE operation_id = ?", members[0])[0][0])
+    entries[1]["original_job_id"] = "foreign-original-job"
+    _sql(root, "UPDATE inference_cost_reservations SET evidence_json = ? WHERE operation_id = ?", json.dumps(entries), members[0])
+    witness = read_lifecycle_receipt(ProductionWorkspace(host_root=root))["inference_accounting"]
+    with pytest.raises(InferenceAccountingError, match="general_task_group_evidence_invalid"):
+        await _group_ids(repository, root, original.group_id)
+    # Nothing was resealed over the invalid evidence.
+    assert read_lifecycle_receipt(ProductionWorkspace(host_root=root))["inference_accounting"] == witness
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("column", ["owner_id", "job_id"])
-async def test_hidden_discovery_row_is_refused_not_skipped(accounting_db, monkeypatch, column):
+async def test_hidden_discovery_row_reseals_and_reads_current_content(accounting_db, monkeypatch, column):
     from types import SimpleNamespace
     from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE
     root, _engine, _factory = accounting_db
@@ -427,9 +540,14 @@ async def test_hidden_discovery_row_is_refused_not_skipped(accounting_db, monkey
     value = "service:someone-else" if column == "owner_id" else "job-elsewhere"
     _sql(root, f"UPDATE inference_cost_reservations SET {column} = ? WHERE operation_id = 'remote:goal-discovery:x:0'", value)
     # An owner edit hides the row from the read (sealed count mismatch); a job
-    # edit leaves it read, and its content no longer matches its digest.
-    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
-        await _scoped(repository, root, lambda db, ledger: repository._discovery_rows(db, ledger, run))
+    # edit leaves it read with content that no longer matches its digest.
+    # Either way the ledger is resealed from content and recorded (#1284).
+    found = await _scoped(repository, root, lambda db, ledger: repository._discovery_rows(db, ledger, run))
+    owned = sorted(row.operation_id for row in found if row.owner_id == DISCOVERY_SERVICE)
+    assert owned == (["remote:goal-discovery:x:1"] if column == "owner_id"
+                     else ["remote:goal-discovery:x:0", "remote:goal-discovery:x:1"])
+    assert _history_gaps(root)
+    _assert_sealed_from_content(root)
 
 
 @pytest.mark.asyncio

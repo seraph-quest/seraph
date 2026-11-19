@@ -43,6 +43,8 @@ from src.workspace.production import (
 
 
 ACCOUNTING_LEDGER_UNINITIALIZED = "accounting_ledger_uninitialized"
+_LEDGER_CONTEXT_KEY = "inference_ledger_context"
+_RESEAL_PENDING_KEY = "inference_ledger_reseal_pending"
 
 
 class InferenceAccountingError(RuntimeError):
@@ -255,7 +257,7 @@ class InferenceAccountingRepositoryMixin:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
+                self._assert_accounting_continuity(workspace, account, rows, db=db)
                 row = next((item for item in rows if item.operation_id == binding[0]), None)
                 if row is None or not _provider_contact_denied(row) or (
                     row.operation_id, row.job_id, row.owner_id, row.payload_digest,
@@ -277,6 +279,9 @@ class InferenceAccountingRepositoryMixin:
                     row.revision += 1
                     row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.add(row)
+                    db.info.pop(_RESEAL_PENDING_KEY, None)
+                    await self._persist_accounting_witness(db, workspace, account, rows)
+                elif db.info.pop(_RESEAL_PENDING_KEY, None):
                     await self._persist_accounting_witness(db, workspace, account, rows)
                 return _operation_payload(row)
 
@@ -297,7 +302,7 @@ class InferenceAccountingRepositoryMixin:
             if account is None:
                 return []
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
+                self._assert_accounting_continuity(workspace, account, rows, db=db)
                 changed = False
                 for row in rows:
                     if row.job_id in protected:
@@ -393,9 +398,12 @@ class InferenceAccountingRepositoryMixin:
                         row.recovery_reason = "never_contacted_callback_unavailable"
                         run.status = "blocked"
                     else:
+                        # Contacted with no callback: the outcome is unknown,
+                        # so it is never replayed. No charge is needed to move
+                        # on; recording one later is optional (#1284).
                         row.state = "unknown"
                         row.recovery_reason = "provider_cost_readback_required"
-                        run.status = "cost_liability"
+                        run.status = "unknown_external_effect"
                     row.revision += 1
                     row.updated_at = observed.replace(tzinfo=None)
                     if run.job_kind == "audio_transcription_v1":
@@ -445,11 +453,19 @@ class InferenceAccountingRepositoryMixin:
         db.info[inference_ledger._SESSION_KEY] = inference_ledger.full_state(account, rows)
         return account, rows
 
-    def _assert_accounting_continuity(self, workspace, account, rows):
-        """Full verification: every row's evidence, key and content, digest, totals."""
+    def _assert_accounting_continuity(self, workspace, account, rows, db: Any = None):
+        """Full verification: every row's evidence, key and content, digest, totals.
+
+        ADR-037 (#1284): the ledger is spend history only, so a digest, totals,
+        witness or row mismatch never blocks. The session state (already built
+        from every row's content by ``_accounting_rows``) is resealed: the next
+        persist rewrites row digests, totals and the external witness, and a
+        ``history_gap`` entry is appended to the account history. Invalid row
+        evidence (a general-task group binding) still raises: it guards call
+        counts and lineage, not money. The deployment binding is checked by the
+        continuity lock itself and still blocks (a consent fence).
+        """
         from src.workflows import inference_ledger
-        if account is not None and inference_ledger.latched_reason(workspace, account):
-            raise InferenceAccountingError("accounting_continuity_unavailable")
 
         def expected():
             receipt = read_lifecycle_receipt(workspace)
@@ -458,14 +474,82 @@ class InferenceAccountingRepositoryMixin:
         try:
             inference_ledger.verify_full(account, rows, expected)
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            self._mark_history_gap(workspace, account, str(exc) or "ledger_verification_failed", db=db)
+            return
         inference_ledger.record_full_verification(workspace, account)
 
-    async def _open_ledger(self, db: Any, workspace, account):
-        """Verify continuity for one hot writer; full when due (R7) or required."""
-        from src.workflows import inference_ledger
-        if account is None or inference_ledger.latched_reason(workspace, account):
+    @staticmethod
+    def _assert_witness_not_ahead(workspace, account) -> None:
+        """Never reseal over records the database does not have.
+
+        An external witness (or retained checkpoint) newer than the account
+        means a committed-elsewhere write is missing here: a crash between the
+        witness and the commit, or an older database restored under a newer
+        witness. Those writes may record a started provider contact, which is
+        what keeps an operation from running twice, so they stay a block until
+        maintenance replays the checkpoint (at-most-once, not money; #1284).
+        """
+        receipt = read_lifecycle_receipt(workspace) or {}
+        expected = receipt.get("inference_accounting")
+        if isinstance(expected, dict) and (account is None
+                or not isinstance(expected.get("revision"), int) or expected["revision"] > account.revision):
             raise InferenceAccountingError("accounting_continuity_unavailable")
+
+    def _mark_history_gap(self, workspace, account, reason: str, *, db: Any = None) -> None:
+        """Reseal the in-session ledger state from content and record the gap."""
+        import logging
+        from src.workflows import inference_ledger
+        if account is None:
+            return
+        self._assert_witness_not_ahead(workspace, account)
+        logging.getLogger(__name__).warning(
+            "inference spend ledger verification failed (%s); resealing from current content", reason)
+        if db is None:
+            # A reader without a writer transaction proceeds on the content it
+            # read; the next writer reseals and records the gap.
+            return
+        history = json.loads(account.settings_history_json)
+        history.append({"kind": "history_gap", "reason": str(reason)[:128],
+            "recorded_at": datetime.now(timezone.utc).isoformat(), "memory_status": "no_learning"})
+        account.settings_history_json = _json(history)
+        state = db.info.get(inference_ledger._SESSION_KEY)
+        if state is not None:
+            state.backfill = True
+        db.info[_RESEAL_PENDING_KEY] = True
+        inference_ledger.record_full_verification(workspace, account)
+
+    async def _reseal_ledger(self, db: Any, reason: str):
+        """Escalate a hot writer to the whole ledger, reseal it and persist (#1284)."""
+        from src.workflows import inference_ledger
+        from src.workflows.inference_group_lookup import classify_group_lookup
+        from src.workflows.general_task_accounting import entry_for
+        workspace, account = db.info[_LEDGER_CONTEXT_KEY]
+        rows = list((await db.execute(select(InferenceCostReservation))).scalars())
+        # Group evidence guards call counts and lineage, not money: invalid
+        # evidence still refuses, exactly as full verification does.
+        for row in rows:
+            entry_for(row)
+        for row in rows:
+            # The lookup key is an unhashed hint: rederive it from sealed evidence.
+            key = classify_group_lookup(row)
+            if row.group_lookup_key != key:
+                row.group_lookup_key = key
+        state = inference_ledger.full_state(account, rows)
+        db.info[inference_ledger._SESSION_KEY] = state
+        self._mark_history_gap(workspace, account, reason, db=db)
+        await self._persist_accounting_witness(db, workspace, account, rows)
+        db.info.pop(_RESEAL_PENDING_KEY, None)
+        return state
+
+    async def _open_ledger(self, db: Any, workspace, account):
+        """Verify continuity for one hot writer; full when due (R7) or required.
+
+        A failed verification reseals the ledger instead of blocking (#1284).
+        """
+        from src.workflows import inference_ledger
+        if account is None:
+            raise InferenceAccountingError("accounting_continuity_unavailable")
+        db.info[_LEDGER_CONTEXT_KEY] = (workspace, account)
         digests, usable = await inference_ledger.scan_row_digests(db)
         from src.workspace.accounting_witness import is_v2_digest
         if (usable and is_v2_digest(account.ledger_digest) and inference_ledger.totals_current(account)
@@ -475,13 +559,15 @@ class InferenceAccountingRepositoryMixin:
             try:
                 totals = inference_ledger.verify_fast(account, expected, digests)
             except inference_ledger.LedgerVerificationError as exc:
-                raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+                return await self._reseal_ledger(db, str(exc) or "ledger_verification_failed")
             await self._assert_group_keys_present(db)
             state = inference_ledger.LedgerState(digests=digests, totals=totals, full=False)
             db.info[inference_ledger._SESSION_KEY] = state
             return state
         _account, rows = await self._accounting_rows(db)
-        self._assert_accounting_continuity(workspace, account, rows)
+        self._assert_accounting_continuity(workspace, account, rows, db=db)
+        if db.info.pop(_RESEAL_PENDING_KEY, None):
+            await self._persist_accounting_witness(db, workspace, account, rows)
         return db.info[inference_ledger._SESSION_KEY]
 
     async def _ledger_row(self, db: Any, state, operation_id: str):
@@ -491,7 +577,8 @@ class InferenceAccountingRepositoryMixin:
         try:
             inference_ledger.verify_loaded_rows(state, [row])
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            state = await self._reseal_ledger(db, str(exc))
+            inference_ledger.verify_loaded_rows(state, [row])
         return row
 
     async def _ledger_rows(self, db: Any, state, *criteria):
@@ -502,7 +589,8 @@ class InferenceAccountingRepositoryMixin:
         try:
             inference_ledger.verify_loaded_rows(state, rows)
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            state = await self._reseal_ledger(db, str(exc))
+            inference_ledger.verify_loaded_rows(state, rows)
         return rows
 
     async def _group_rows(self, db: Any, state, group_id: str):
@@ -511,23 +599,26 @@ class InferenceAccountingRepositoryMixin:
         Every row's key is a full-verification invariant; a missing or invalid
         key anywhere blocks, as the full-list ``assert_group_lookup`` did.
         """
-        await self._assert_group_keys_present(db)
-        rows = await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
-        # The key is an unhashed hint: a member hidden by editing it on an
-        # untouched row would under-count the group caps. Every returned row is
-        # digest-verified, so requiring its sealed evidence to name this group
-        # and the count to equal the sealed membership makes the read exact
-        # (a non-member swapped in under the key cannot stand in for a member).
+        from src.workflows import inference_ledger
         from src.workspace.accounting_witness import evidence_group_key
-        if any(evidence_group_key(row.evidence_json) != "g:" + group_id for row in rows):
-            raise InferenceAccountingError("accounting_continuity_unavailable")
-        self._require_sealed_count(len(rows), state.totals["rows_by_group"].get("g:" + group_id, 0))
-        return rows
-
-    @staticmethod
-    def _require_sealed_count(observed: int, sealed: int) -> None:
-        if observed != sealed:
-            raise InferenceAccountingError("accounting_continuity_unavailable")
+        await self._assert_group_keys_present(db)
+        for attempt in (0, 1):
+            rows = await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
+            # The key is an unhashed hint: a member hidden by editing it on an
+            # untouched row would under-count the group's call cap. Every
+            # returned row is digest-verified, so requiring its sealed evidence
+            # to name this group and the count to equal the sealed membership
+            # makes the read exact. A disagreement reseals the whole ledger
+            # (keys rederived from evidence, counts from content) and reads
+            # again (#1284) instead of blocking.
+            exact = (all(evidence_group_key(row.evidence_json) == "g:" + group_id for row in rows)
+                and len(rows) == state.totals["rows_by_group"].get("g:" + group_id, 0))
+            if exact:
+                return rows
+            if attempt:
+                raise InferenceAccountingError("general_task_group_lookup_invalid")
+            state = await self._reseal_ledger(db, "ledger_group_count_mismatch")
+            state = db.info[inference_ledger._SESSION_KEY]
 
     async def _discovery_rows(self, db: Any, state, run):
         """Every row ``discovery_generation_budget`` can count or raise on."""
@@ -540,9 +631,15 @@ class InferenceAccountingRepositoryMixin:
             InferenceCostReservation.owner_id == DISCOVERY_SERVICE,
             InferenceCostReservation.job_id.in_(discovery_jobs)))
         # Every programme row is owned by the discovery service; a row hidden
-        # by editing its owner would skip the programme limits.
-        self._require_sealed_count(sum(row.owner_id == DISCOVERY_SERVICE for row in rows),
-            state.totals["rows_by_owner"].get(DISCOVERY_SERVICE, 0))
+        # by editing its owner would skip the programme request limit. A
+        # disagreement with the sealed count reseals and reads again (#1284).
+        if sum(row.owner_id == DISCOVERY_SERVICE for row in rows) != state.totals["rows_by_owner"].get(DISCOVERY_SERVICE, 0):
+            from src.workflows import inference_ledger
+            await self._reseal_ledger(db, "ledger_owner_count_mismatch")
+            state = db.info[inference_ledger._SESSION_KEY]
+            rows = await self._ledger_rows(db, state, or_(
+                InferenceCostReservation.owner_id == DISCOVERY_SERVICE,
+                InferenceCostReservation.job_id.in_(discovery_jobs)))
         return rows
 
     async def _shadow_helper(self, db: Any, call, scoped_rows, *, compare=None) -> None:
@@ -614,14 +711,19 @@ class InferenceAccountingRepositoryMixin:
             account, rows = await self._accounting_rows(db)
             with _continuity_lock(root, initialize=account is None, held_workspace=continuity_workspace) as workspace:
                 if account is not None:
-                    self._assert_accounting_continuity(workspace, account, rows)
+                    self._assert_accounting_continuity(workspace, account, rows, db=db)
+                    if db.info.pop(_RESEAL_PENDING_KEY, None):
+                        await self._persist_accounting_witness(db, workspace, account, rows)
                     return _witness(account)
                 prior = read_lifecycle_receipt(workspace)
-                if rows or (prior and "inference_accounting" in prior):
-                    raise InferenceAccountingError("accounting_continuity_unavailable")
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 # ``ceiling_microusd`` is a retained NOT NULL column; never read.
                 account = InferenceAccountingOwner(ceiling_microusd=0, created_at=now, updated_at=now, revision=0)
+                if rows or (prior and "inference_accounting" in prior):
+                    # Request records (or a witness of them) exist without the
+                    # account: records may be missing, and they are what keeps
+                    # an operation from running twice. Never start over.
+                    raise InferenceAccountingError("accounting_continuity_unavailable")
                 account.settings_history_json = _json([{"kind": "ledger_created", "recorded_at": now.isoformat()}])
                 db.add(account)
                 await db.flush()
@@ -1033,6 +1135,7 @@ class InferenceAccountingRepositoryMixin:
 
     async def _accounting_snapshot(self, period: str, job_id: str | None, *, read_only: bool = False,
                                    continuity_workspace=None) -> dict[str, object] | None:
+        from src.workflows import inference_ledger
         async with self._session() as db:
             await self._accounting_begin(db, read_only=read_only)
             account = await db.get(InferenceAccountingOwner, "deployment")
@@ -1050,10 +1153,21 @@ class InferenceAccountingRepositoryMixin:
                     if read_only:
                         return None
                     raise
+                try:
+                    listed = await self._snapshot_operations(db, ledger, job_id)
+                except InferenceAccountingError:
+                    if read_only:
+                        return None
+                    raise
+                ledger = db.info[inference_ledger._SESSION_KEY]
                 totals = ledger.totals
-                listed = await self._snapshot_operations(db, ledger, job_id)
+                gaps = [entry for entry in json.loads(account.settings_history_json)
+                    if isinstance(entry, dict) and entry.get("kind") == "history_gap"]
                 return {"status": "ready", "reason_code": None,
-                    "accounting_continuity_verified": True, "history_verified": True,
+                    # Display only (#1284): a resealed ledger may be missing
+                    # history; nothing is blocked by it.
+                    "accounting_continuity_verified": True, "history_verified": not gaps,
+                    "history_gap_since": gaps[0].get("recorded_at") if gaps else None,
                     "revision": account.revision, "ledger_digest": account.ledger_digest,
                     "deployment_id": account.deployment_id, "period_id": period,
                     # Settled charges of this UTC month, from the sealed totals.
@@ -1069,7 +1183,8 @@ class InferenceAccountingRepositoryMixin:
         Reads a deferred snapshot with stdlib sqlite3 on a worker thread and
         checks only DB-internal consistency (never the external witness, which
         writers persist before commit). A failure is re-checked with the full
-        in-process verification under the writer lock before latching.
+        in-process verification under the writer lock, which reseals the ledger
+        and records a ``history_gap`` instead of blocking (#1284).
         """
         import asyncio
         from types import SimpleNamespace
@@ -1093,20 +1208,21 @@ class InferenceAccountingRepositoryMixin:
                 await self._accounting_begin(db)
                 account, rows = await self._accounting_rows(db)
                 with _continuity_lock(root) as workspace:
-                    self._assert_accounting_continuity(workspace, account, rows)
+                    self._assert_accounting_continuity(workspace, account, rows, db=db)
+                    if db.info.pop(_RESEAL_PENDING_KEY, None):
+                        await self._persist_accounting_witness(db, workspace, account, rows)
+                        return {"status": "resealed", "reason": failure}
         except InferenceAccountingError as exc:
             if exc.code == "accounting_continuity_busy":
                 return {"status": "deferred", "reason": failure}
-            inference_ledger.latch(*key, failure)
-            return {"status": "latched", "reason": failure}
+            raise
+        del key
         return {"status": "verified_under_lock", "revision": revision}
 
     async def _read_ledger(self, db: Any, workspace, account):
         """Read-only fast verification; anything needing more escalates."""
         from src.workflows import inference_ledger
         from src.workspace.accounting_witness import is_v2_digest
-        if inference_ledger.latched_reason(workspace, account):
-            raise InferenceAccountingError("accounting_continuity_unavailable")
         digests, usable = await inference_ledger.scan_row_digests(db)
         if not usable or not is_v2_digest(account.ledger_digest) or not inference_ledger.totals_current(account):
             raise InferenceAccountingError("accounting_continuity_unavailable")
@@ -1150,7 +1266,11 @@ class InferenceAccountingRepositoryMixin:
         try:
             inference_ledger.verify_loaded_rows(ledger, rows)
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            if _LEDGER_CONTEXT_KEY not in db.info:
+                # A deferred read escalates to the serialized writer read.
+                raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            ledger = await self._reseal_ledger(db, str(exc))
+            inference_ledger.verify_loaded_rows(ledger, rows)
         return rows
 
 

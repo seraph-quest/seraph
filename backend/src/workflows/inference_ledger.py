@@ -50,7 +50,6 @@ _SESSION_KEY = "inference_ledger_state"
 # Process-local verification state per (workspace root, deployment id). A
 # fresh process has no entry, so its first writer always verifies in full.
 _verified_at: dict[tuple[str, str], float] = {}
-_latched: dict[tuple[str, str], str] = {}
 # Test-only: also compute every hot-path decision from the full ledger with
 # the pre-#1086 code and fail on any difference.
 SHADOW_FULL_LEDGER = False
@@ -141,15 +140,6 @@ def _key(workspace, account) -> tuple[str, str]:
     return (str(workspace.host_root), str(account.deployment_id))
 
 
-def latched_reason(workspace, account) -> str | None:
-    return _latched.get(_key(workspace, account))
-
-
-def latch(workspace, account, reason: str) -> None:
-    logger.error("inference accounting ledger verification failed (%s); accounting is blocked until restart", reason)
-    _latched[_key(workspace, account)] = reason
-
-
 def record_full_verification(workspace, account) -> None:
     _verified_at[_key(workspace, account)] = time.monotonic()
 
@@ -161,7 +151,6 @@ def full_verification_due(workspace, account) -> bool:
 
 def reset_process_state() -> None:
     _verified_at.clear()
-    _latched.clear()
 
 
 def row_values(row: InferenceCostReservation) -> dict[str, Any]:

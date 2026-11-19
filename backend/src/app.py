@@ -325,8 +325,6 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         readiness_reasons.append("chat_cloud_egress_not_allowed")
     if not policy.cloud_egress_acknowledged:
         readiness_reasons.append("chat_cloud_consent_missing")
-    if policy.max_cost_microusd is None:
-        readiness_reasons.append("chat_cost_ceiling_missing")
     if set(policy.allowed_provider_kinds) != {"openrouter"}:
         readiness_reasons.append("chat_provider_policy_missing")
     inference_ready = not readiness_reasons
@@ -351,7 +349,6 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
             "active_only": provider_only,
             "cloud_egress": policy.egress_class.value,
             "cloud_consent": bool(policy.cloud_egress_acknowledged),
-            "cost_ceiling_microusd": policy.max_cost_microusd,
         },
         "legacy_local_route_blocked": provider not in {"openrouter"},
     }
@@ -385,18 +382,17 @@ def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, obje
         reasons.append(reason)
     label = tee_hosting_label("text", profile, revision=configured.egress_revision) if not reasons else None
     # Effective lightweight chat cap: the outer REST/WebSocket turn timeout,
-    # the turn's own deadline 2s inside it, and the stream window left after
-    # the 16s billing reserve. A slot timeout above the deadline is refused.
+    # the turn's own deadline 2s inside it, and the stream window inside that
+    # deadline. No billing window is reserved any more (#1284): the billing
+    # lookup is best effort with the time left. A slot timeout above the
+    # deadline is refused.
     from src.agent.direct_chat import direct_chat_context_timeout, direct_chat_turn_timeout
-    from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
     turn_timeout = direct_chat_turn_timeout()
     turn_deadline = max(turn_timeout - 2.0, 0.1)
     chat_cap = {
         "turn_timeout_seconds": turn_timeout,
         "inference_deadline_seconds": direct_chat_context_timeout("chat_agent") if active else turn_deadline,
-        "stream_window_seconds": max(min(float(slot.timeout_seconds),
-            turn_deadline - NEAR_TEE_BILLING_RESERVE_SECONDS), 0.0),
-        "billing_reserve_seconds": NEAR_TEE_BILLING_RESERVE_SECONDS,
+        "stream_window_seconds": max(min(float(slot.timeout_seconds), turn_deadline), 0.0),
     }
     if float(slot.timeout_seconds) > turn_deadline:
         reasons.append("near_tee_slot_timeout_exceeds_chat_turn")
@@ -437,7 +433,6 @@ def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, obje
             "active_only": True,
             "cloud_egress": policy.egress_class.value,
             "cloud_consent": bool(policy.cloud_egress_acknowledged),
-            "cost_ceiling_microusd": policy.max_cost_microusd,
         },
         "legacy_local_route_blocked": True,
     }
@@ -928,7 +923,7 @@ def create_app() -> FastAPI:
     validate_auth_configuration()
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.11.17",
+        version="2026.11.19",
         debug=settings.debug,
         lifespan=lifespan,
     )

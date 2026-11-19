@@ -92,7 +92,6 @@ GPU_RECONCILIATION_ACTION = "reconcile the provider result before releasing the 
 GPU_ACTIVE_DEADLINE_REASON = "deadline_expired_active"
 GPU_CALLBACK_RUNNING_REASON = "provider_callback_still_running"
 GPU_OWNER_CAPACITY_REASON = "owner_capacity_exhausted"
-GPU_OWNER_BUDGET_REASON = "owner_budget_exhausted"
 GPU_OWNER_REVOCATION_REASON = "owner_revoked"
 
 
@@ -130,10 +129,6 @@ class GpuAdmissionOwnerCapacityError(GpuAdmissionCapacityError):
     code = GPU_OWNER_CAPACITY_REASON
 
 
-class GpuAdmissionOwnerBudgetError(GpuAdmissionCapacityError):
-    code = GPU_OWNER_BUDGET_REASON
-
-
 class GpuAdmissionExpiredError(GpuAdmissionError):
     code = "deadline_expired"
 
@@ -167,8 +162,6 @@ class GpuAdmissionRequest:
     runtime_path: str = ""
     session_id: str = ""
     capability_version: str = ""
-    estimated_cost_microusd: int | None = None
-    owner_budget_microusd: int | None = None
     uncertain_on_error: bool | None = None
     # Immutable payload binding for the durable accounting boundary. Model
     # contents remain outside both the broker and the accounting ledger.
@@ -203,11 +196,6 @@ class GpuAdmissionRequest:
             if len(value) > 256:
                 raise ValueError(f"{field_name} must be <= 256 characters")
             object.__setattr__(self, field_name, value)
-        for field_name in ("estimated_cost_microusd", "owner_budget_microusd"):
-            value = getattr(self, field_name)
-            if value is not None and int(value) < 0:
-                raise ValueError(f"{field_name} must be non-negative")
-            object.__setattr__(self, field_name, None if value is None else int(value))
         if self.uncertain_on_error is not None:
             object.__setattr__(self, "uncertain_on_error", bool(self.uncertain_on_error))
 
@@ -245,8 +233,6 @@ class GpuAdmissionRequest:
             runtime_path=str(getattr(context, "runtime_path", "") or ""),
             session_id=str(getattr(context, "session_id", "") or ""),
             capability_version=str(getattr(context, "capability_version", "") or ""),
-            estimated_cost_microusd=getattr(context, "estimated_cost_microusd", None),
-            owner_budget_microusd=getattr(context, "owner_budget_microusd", None),
             uncertain_on_error=(
                 uncertain_on_error
                 if uncertain_on_error is not None
@@ -412,6 +398,12 @@ class GpuAdmissionBroker(Generic[T]):
     serial_gpu = True
     serial_remote_inference = True
     uncertain_on_callback_error = False
+    # A remote provider callback that has returned cannot produce a later
+    # result; its only open question was its charge. Since #1284 Seraph never
+    # holds the lane for a charge, so such a lease is freed once the callback
+    # has finished. A callback that is still running keeps the lane (one in
+    # flight). Local GPU callbacks keep the explicit reconciliation hold.
+    release_completed_uncertain_callbacks = False
 
     def __init__(
         self,
@@ -420,7 +412,6 @@ class GpuAdmissionBroker(Generic[T]):
         clock: Callable[[], float] = time.time,
         history_limit: int = 128,
         max_outstanding_per_owner: int | None = None,
-        max_owner_cost_microusd: int | None = None,
     ) -> None:
         if int(max_queued) < 1:
             raise ValueError("max_queued must be positive")
@@ -428,14 +419,9 @@ class GpuAdmissionBroker(Generic[T]):
             raise ValueError("history_limit must be positive")
         if max_outstanding_per_owner is not None and int(max_outstanding_per_owner) < 1:
             raise ValueError("max_outstanding_per_owner must be positive")
-        if max_owner_cost_microusd is not None and int(max_owner_cost_microusd) < 0:
-            raise ValueError("max_owner_cost_microusd must be non-negative")
         self.max_queued = int(max_queued)
         self.max_outstanding_per_owner = (
             None if max_outstanding_per_owner is None else int(max_outstanding_per_owner)
-        )
-        self.max_owner_cost_microusd = (
-            None if max_owner_cost_microusd is None else int(max_owner_cost_microusd)
         )
         self._clock = clock
         self._history_limit = int(history_limit)
@@ -792,10 +778,6 @@ class GpuAdmissionBroker(Generic[T]):
                     self._cancel_active_task()
                     self._notify_all_locked()
                     return self._receipt_locked(operation)
-                if self.uncertain_on_callback_error and actual_cost_microusd is None:
-                    raise ValueError(
-                        "remote cancellation reconciliation requires actual_cost_microusd"
-                    )
                 return self._reconcile_locked(
                     operation,
                     outcome="cancelled",
@@ -897,7 +879,6 @@ class GpuAdmissionBroker(Generic[T]):
                     "queued": len(self._queue),
                     "available": max(self.max_queued - len(self._queue), 0),
                     "max_outstanding_per_owner": self.max_outstanding_per_owner,
-                    "max_owner_cost_microusd": self.max_owner_cost_microusd,
                     "owners": self._owner_usage_locked(),
                 },
                 "operator_visible": True,
@@ -1337,9 +1318,38 @@ class GpuAdmissionBroker(Generic[T]):
         self,
         operation: _QueuedOperation,
     ) -> GpuAdmissionReceipt:
+        if self.release_completed_uncertain_callbacks:
+            return self._release_completed_callback_locked(
+                operation, reason_code=operation.reason_code or "provider_result_uncertain")
         operation.finished_at = self._observed_at_locked(operation)
         self._cancel_watchdog_locked(operation)
         self._active_task = None
+        self._notify_all_locked()
+        return self._receipt_locked(operation)
+
+    def _release_completed_callback_locked(
+        self,
+        operation: _QueuedOperation,
+        *,
+        reason_code: str,
+    ) -> GpuAdmissionReceipt:
+        """Free the lane for a returned remote callback whose outcome is uncertain.
+
+        The operation keeps its ``blocked`` status and reason, so the caller
+        still sees an uncertain outcome (and adopts nothing), but it holds
+        neither the lane nor its owner's outstanding slot, and no charge has to
+        be supplied to release it (ADR-037, #1284).
+        """
+        operation.status = "blocked"
+        operation.reason_code = reason_code
+        operation.reconciliation_required = False
+        operation.recovery_action = None
+        operation.callback_completed = True
+        self._cancel_watchdog_locked(operation)
+        operation.finished_at = self._observed_at_locked(operation)
+        self._active_operation_id = None
+        self._active_task = None
+        self._last_degraded_reason = reason_code
         self._notify_all_locked()
         return self._receipt_locked(operation)
 
@@ -1354,7 +1364,17 @@ class GpuAdmissionBroker(Generic[T]):
         reason_code: str,
         observed_at: float,
     ) -> GpuAdmissionReceipt:
-        """Keep a late callback's lease until its provider result is reconciled."""
+        """Keep a late callback's lease until its provider result is reconciled.
+
+        A remote broker frees the lane instead, including when the durable
+        settlement write failed: no charge is needed to release it, and the
+        durable request record (still ``contact_started``) keeps the operation
+        from being reserved or contacted again, and is classified as an unknown
+        external effect by restart recovery (at-most-once, ADR-037, #1284).
+        """
+        if self.release_completed_uncertain_callbacks:
+            operation.deadline_exceeded = operation.deadline_exceeded or reason_code.startswith("deadline_")
+            return self._release_completed_callback_locked(operation, reason_code=reason_code)
         operation.status = "blocked"
         operation.reason_code = reason_code
         operation.reconciliation_required = True
@@ -1482,10 +1502,6 @@ class GpuAdmissionBroker(Generic[T]):
                 raise GpuAdmissionLeaseError(
                     "GPU reconciliation is deferred until the provider callback completes",
                     receipt=receipt,
-                )
-            if self.uncertain_on_callback_error and actual_cost_microusd is None:
-                raise ValueError(
-                    "remote reconciliation requires actual_cost_microusd to settle spend liability"
                 )
             return self._reconcile_locked(
                 operation,
@@ -1824,11 +1840,6 @@ class GpuAdmissionBroker(Generic[T]):
                     "GPU operation was rejected at the owner outstanding limit",
                     receipt=receipt,
                 )
-            if operation.reason_code in {GPU_OWNER_BUDGET_REASON, "owner_cost_unknown"}:
-                raise GpuAdmissionOwnerBudgetError(
-                    "GPU operation was rejected at the owner spend limit",
-                    receipt=receipt,
-                )
             raise GpuAdmissionCapacityError("GPU operation was rejected at admission", receipt=receipt)
         if operation.status == "running":
             raise GpuAdmissionIdentityError("GPU operation is already claimed")
@@ -1868,9 +1879,6 @@ class GpuAdmissionBroker(Generic[T]):
             capability_version=operation.request.capability_version,
             owner_outstanding=int(owner_usage.get("outstanding", 0)),
             max_owner_outstanding=self.max_outstanding_per_owner,
-            cost_reserved_microusd=int(owner_usage.get("cost_reserved_microusd", 0)),
-            owner_cost_budget_microusd=self._effective_owner_budget(operation.request),
-            unknown_cost_outstanding=int(owner_usage.get("unknown_cost_outstanding", 0)),
             cancel_requested=operation.cancel_requested,
             reconciliation_required=operation.reconciliation_required,
             recovery_action=operation.recovery_action,
@@ -1879,33 +1887,19 @@ class GpuAdmissionBroker(Generic[T]):
             cost_settled_microusd=operation.cost_settled_microusd,
         )
 
-    def _effective_owner_budget(self, request: GpuAdmissionRequest) -> int | None:
-        """Return the stricter broker/request budget without trusting an increase."""
-        configured = self.max_owner_cost_microusd
-        requested = request.owner_budget_microusd
-        if configured is None:
-            return requested
-        if requested is None:
-            return configured
-        return min(configured, requested)
-
     def _owner_usage_locked(self) -> dict[str, dict[str, int]]:
         """Aggregate only live operations; terminal history never reserves capacity."""
         usage: dict[str, dict[str, int]] = {}
         for operation in self._operations.values():
             if operation.status not in {"queued", "running", "blocked"}:
                 continue
+            if (operation.status == "blocked" and self.release_completed_uncertain_callbacks
+                    and operation.request.operation_id != self._active_operation_id):
+                # A released uncertain remote result holds nothing (#1284).
+                continue
             owner = operation.request.owner_id
-            current = usage.setdefault(
-                owner,
-                {"outstanding": 0, "cost_reserved_microusd": 0, "unknown_cost_outstanding": 0},
-            )
+            current = usage.setdefault(owner, {"outstanding": 0})
             current["outstanding"] += 1
-            estimate = operation.request.estimated_cost_microusd
-            if estimate is None:
-                current["unknown_cost_outstanding"] += 1
-            else:
-                current["cost_reserved_microusd"] += estimate
         return usage
 
     def _receipt_for_missing_lease(

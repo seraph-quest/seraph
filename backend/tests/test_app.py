@@ -172,8 +172,8 @@ async def test_runtime_status_exposes_release_and_model(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == "2026.11.17"
-    assert payload["build_id"] == "SERAPH_PRIME_v2026.11.17"
+    assert payload["version"] == "2026.11.19"
+    assert payload["build_id"] == "SERAPH_PRIME_v2026.11.19"
     # ADR-035 (#1189): OpenRouter is retired and no NEAR TEE slot exists, so
     # no model serves chat; the env default is reported only as the default.
     assert payload["provider"] == "none"

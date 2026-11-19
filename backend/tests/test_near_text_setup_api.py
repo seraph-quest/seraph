@@ -7,7 +7,7 @@ import pytest
 
 from src.model_fabric.configuration import (
     capture_near_text_credential, read_model_fabric_configuration,
-    deployment_spend_ceiling, _configuration_payload,
+    _configuration_payload,
     write_model_fabric_configuration, effective_workload_policy,
 )
 from src.model_fabric.effective_policy import current_near_text_policy, current_inference_policy
@@ -40,9 +40,10 @@ async def test_near_only_bootstrap_and_keyless_readiness(client, model_fabric_wo
     assert result["near_text"]["consent_current"] is True
     assert result["near_text"]["key_present"] is False
     assert result["near_text"]["tee_verified"] is False and result["near_text"]["e2ee"] is False
-    assert result["inference_accounting"]["ceiling_microusd"] == 25000
+    assert "ceiling_microusd" not in result["inference_accounting"]
+    assert "spend_ceiling_microusd" not in result["near_text"]
     configured, digest = current_near_text_policy()
-    assert len(digest) == 64 and deployment_spend_ceiling(configured) == 25000
+    assert len(digest) == 64 and configured.near_text.spend_ceiling_microusd is None
     with pytest.raises(PermissionError):
         current_inference_policy()
 
@@ -140,7 +141,7 @@ async def test_disabled_save_keeps_global_revoke_and_vault(client, model_fabric_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-@pytest.mark.parametrize("tamper", ("mirror", "malformed_near"))
+@pytest.mark.parametrize("tamper", ("tampered_legacy_amount", "malformed_near"))
 @pytest.mark.openrouter_legacy  # ADR-035: pins historical OpenRouter+NEAR coexistence
 async def test_persisted_mismatch_and_malformed_near_degrade_without_widening_or(client, model_fabric_workspace, keyless_openrouter, tamper):
     assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
@@ -148,7 +149,7 @@ async def test_persisted_mismatch_and_malformed_near_degrade_without_widening_or
     assert (await save(client, 3)).status_code == 200
     path = model_fabric_workspace / "model-fabric-settings.json"
     payload = json.loads(path.read_text())
-    if tamper == "mirror":
+    if tamper == "tampered_legacy_amount":
         payload["near_text"]["spend_ceiling_microusd"] = 30000
     else:
         payload["openrouter_setup"]["cloud_egress_acknowledged"] = False
@@ -169,7 +170,7 @@ async def test_persisted_mismatch_and_malformed_near_degrade_without_widening_or
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.parametrize("change", ({"enabled": 1}, {"max_output_tokens": True}, {"max_output_tokens": 1025},
     {"timeout_seconds": True}, {"timeout_seconds": 46}, {"request_cost_bound_microusd": 0},
-    {"request_cost_bound_microusd": 25001}, {"model_id": "other/model"},
+    {"model_id": "other/model"},
     {"api_base": "https://example.com/v1"}, {"credential_ref": "env:OPENROUTER_API_KEY"},
     {"plaintext_egress_consent_revision": 3}, {"plaintext_provider_egress_acknowledged": "true"}))
 async def test_closed_near_input_rejects_before_mutation(client, model_fabric_workspace, keyless_openrouter, change):
@@ -191,14 +192,11 @@ async def test_near_stale_cas_and_missing_ack_do_not_store_key(client, model_fab
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.openrouter_legacy  # ADR-035: pins historical OpenRouter+NEAR coexistence
-async def test_near_preserves_or_slots_and_shared_ceiling(client, model_fabric_workspace, keyless_openrouter):
+async def test_near_preserves_or_slots(client, model_fabric_workspace, keyless_openrouter):
     response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
         "openrouter_setup": _v2_setup_payload(api_key="sk-or-original")})
     assert response.status_code == 200, response.text
     original = read_model_fabric_configuration()
-    before = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
-    assert (await save(client, 3, spend_ceiling_microusd=30000)).status_code == 409
-    assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == before
     assert (await save(client, 3, api_key="sk-near-own")).status_code == 200
     combined = read_model_fabric_configuration()
     assert combined.profiles == original.profiles
@@ -209,7 +207,7 @@ async def test_near_preserves_or_slots_and_shared_ceiling(client, model_fabric_w
         "openrouter_setup": _v2_setup_payload(spend_ceiling_microusd=30000,
             vision_egress_acknowledged=False, embedding_egress_acknowledged=False)})
     assert changed.status_code == 200, changed.text
-    assert changed.json()["near_text"]["spend_ceiling_microusd"] == 30000
+    assert "spend_ceiling_microusd" not in changed.json()["near_text"]
     assert changed.json()["near_text"]["consent_current"] is True
 
 
@@ -231,3 +229,58 @@ async def test_near_vault_compensation_after_revoked_publication(client, model_f
     assert configured.egress_revoked and configured.egress_revision == 4
     with pytest.raises(PermissionError):
         current_near_text_policy()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_removed_amounts_are_accepted_dropped_and_legacy_slot_bound_is_carried(
+        client, model_fabric_workspace, keyless_openrouter):
+    """#1284: a client still sending amounts is accepted; none is stored anew or echoed.
+
+    An upgraded install's stored NEAR TEE slot bound is carried while the model
+    is unchanged, so its consent (bound to the profile contract) is kept.
+    """
+    from tests.near_tee_support import NEAR_TEE_TEXT_MODEL, write_near_tee_text_configuration
+    write_near_tee_text_configuration(egress_revision=2, request_cost_bound_microusd=20_000)
+
+    def legacy_free(payload):
+        text = json.dumps(payload)
+        for key in ("spend_ceiling_microusd", "request_cost_bound_microusd", "request_reserve_review_microusd",
+                "ceiling_microusd", "remaining_microusd"):
+            assert key not in text, key
+
+    legacy_free((await client.get("/api/settings/model-fabric")).json())
+    slot = {"model_id": NEAR_TEE_TEXT_MODEL, "enabled": True, "max_input_tokens": 8192, "max_output_tokens": 1024,
+        "timeout_seconds": 30, "catalog_ttl_hours": 24, "plaintext_provider_egress_acknowledged": False}
+    # A slot save omitting the amount keeps the stored bound and so the consent.
+    kept = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 2,
+        "near_tee": {"slots": {"text": slot}}})
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["near_tee"]["slots"]["text"]["consent_current"] is True
+    legacy_free(kept.json())
+    stored = read_model_fabric_configuration()
+    assert stored.near_tee.slots["text"].request_cost_bound_microusd == 20_000
+    assert stored.near_tee.slots["text"].purpose_consent_revision == stored.egress_revision == 4
+    # A sent slot amount is dropped: the stored legacy bound is unchanged.
+    sent = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 4,
+        "near_tee": {"slots": {"text": {**slot, "request_cost_bound_microusd": 99}}}})
+    assert sent.status_code == 200, sent.text
+    assert sent.json()["near_tee"]["slots"]["text"]["consent_current"] is True
+    assert read_model_fabric_configuration().near_tee.slots["text"].request_cost_bound_microusd == 20_000
+    # Lane and NEAR text amounts are accepted and dropped.
+    lane = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 6,
+        "inference_lane": {"spend_ceiling_microusd": 5, "request_reserve_review_microusd": 5}})
+    assert lane.status_code == 200, lane.text
+    near = await save(client, 8, spend_ceiling_microusd=5, request_cost_bound_microusd=5)
+    assert near.status_code == 200, near.text
+    final = read_model_fabric_configuration()
+    assert final.inference_lane.spend_ceiling_microusd is None
+    assert final.inference_lane.request_reserve_review_microusd is None
+    assert final.near_text.spend_ceiling_microusd is None and final.near_text.request_cost_bound_microusd is None
+    for response in (lane, near, await client.get("/api/settings/model-fabric")):
+        legacy_free(response.json())
+    stored_text = (model_fabric_workspace / "model-fabric-settings.json").read_text()
+    assert '"spend_ceiling_microusd"' not in stored_text
+    # The month-review endpoint is gone.
+    period = await client.post("/api/settings/model-fabric/accounting/period", json={"expected_revision": 1})
+    assert period.status_code in (404, 405)

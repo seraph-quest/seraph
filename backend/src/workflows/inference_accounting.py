@@ -1,4 +1,9 @@
-"""Repository-owned cost evidence; the remote broker alone executes providers.
+"""Repository-owned request records; the remote broker alone executes providers.
+
+ADR-037 (#1284): Seraph keeps no cost limit. Each provider call has one durable
+request record: it gives at-most-once execution, binds the consent revision
+rechecked at contact, keeps a contact denial durable across restarts, and
+records the charge NEAR reports, as history and display only.
 
 The external lifecycle witness is written before transaction commit. Any crash
 between those two writes deliberately blocks egress until reconciliation. This
@@ -35,6 +40,11 @@ from src.workspace.production import (
     write_lifecycle_receipt,
     write_accounting_checkpoint,
 )
+
+
+ACCOUNTING_LEDGER_UNINITIALIZED = "accounting_ledger_uninitialized"
+_LEDGER_CONTEXT_KEY = "inference_ledger_context"
+_RESEAL_PENDING_KEY = "inference_ledger_reseal_pending"
 
 
 class InferenceAccountingError(RuntimeError):
@@ -157,6 +167,12 @@ def _provider_contact_denied(row: InferenceCostReservation) -> bool:
 
 def _operator_operation(row: InferenceCostReservation) -> dict[str, object]:
     payload = _operation_payload(row)
+    if row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required" and any(
+            isinstance(item, dict) and item.get("kind") == "restart_recovery"
+            for item in json.loads(row.evidence_json or "[]")):
+        # Display only: a row restart recovery classified before #1284 split
+        # the reasons lost its outcome; it is not "answered, not priced".
+        payload["recovery_reason"] = "provider_outcome_unknown"
     payload["controls"] = ([{"action": "settle", "endpoint": "/api/settings/model-fabric/accounting/settle",
         "method": "POST", "expected_revision": row.revision, "operation_id": row.operation_id,
         "job_id": row.job_id, "authority_scope": "deployment_accounting"}]
@@ -167,6 +183,26 @@ def _operator_operation(row: InferenceCostReservation) -> dict[str, object]:
 def _ledger_digest(account: InferenceAccountingOwner, rows: list[InferenceCostReservation]) -> str:
     from src.workspace.accounting_witness import ledger_digest
     return ledger_digest(account.model_dump(mode="json"), [_operation_payload(row) for row in rows])
+
+
+_HISTORY_GAP_ENTRIES_KEPT = 16
+
+
+def _append_history_gap(history: list, reason: str) -> list:
+    """Append a ``history_gap`` entry, keeping the first and the latest ones.
+
+    The first gap dates "history may be incomplete since"; the latest show
+    the current reason. Older middle entries are dropped so repeated reseals
+    cannot grow the account record without bound (#1284).
+    """
+    history = [*history, {"kind": "history_gap", "reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(), "memory_status": "no_learning"}]
+    gaps = [index for index, entry in enumerate(history)
+        if isinstance(entry, dict) and entry.get("kind") == "history_gap"]
+    if len(gaps) <= _HISTORY_GAP_ENTRIES_KEPT:
+        return history
+    dropped = set(gaps[1:len(gaps) - _HISTORY_GAP_ENTRIES_KEPT + 1])
+    return [entry for index, entry in enumerate(history) if index not in dropped]
 
 
 def _witness(account: InferenceAccountingOwner) -> dict[str, object]:
@@ -247,7 +283,7 @@ class InferenceAccountingRepositoryMixin:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
+                self._assert_accounting_continuity(workspace, account, rows, db=db)
                 row = next((item for item in rows if item.operation_id == binding[0]), None)
                 if row is None or not _provider_contact_denied(row) or (
                     row.operation_id, row.job_id, row.owner_id, row.payload_digest,
@@ -270,6 +306,8 @@ class InferenceAccountingRepositoryMixin:
                     row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.add(row)
                     await self._persist_accounting_witness(db, workspace, account, rows)
+                elif db.info.get(_RESEAL_PENDING_KEY):
+                    await self._persist_accounting_witness(db, workspace, account, rows)
                 return _operation_payload(row)
 
     async def recover_inference_accounting(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
@@ -289,7 +327,7 @@ class InferenceAccountingRepositoryMixin:
             if account is None:
                 return []
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
+                self._assert_accounting_continuity(workspace, account, rows, db=db)
                 changed = False
                 for row in rows:
                     if row.job_id in protected:
@@ -385,9 +423,14 @@ class InferenceAccountingRepositoryMixin:
                         row.recovery_reason = "never_contacted_callback_unavailable"
                         run.status = "blocked"
                     else:
+                        # Contacted with no callback: the outcome is unknown,
+                        # so it is never replayed. No charge is needed to move
+                        # on; recording one later is optional (#1284).
                         row.state = "unknown"
-                        row.recovery_reason = "provider_cost_readback_required"
-                        run.status = "cost_liability"
+                        # Contact started and the outcome was lost: no answer
+                        # was recorded, so it is not "answered, not priced".
+                        row.recovery_reason = "provider_outcome_unknown"
+                        run.status = "unknown_external_effect"
                     row.revision += 1
                     row.updated_at = observed.replace(tzinfo=None)
                     if run.job_kind == "audio_transcription_v1":
@@ -437,11 +480,19 @@ class InferenceAccountingRepositoryMixin:
         db.info[inference_ledger._SESSION_KEY] = inference_ledger.full_state(account, rows)
         return account, rows
 
-    def _assert_accounting_continuity(self, workspace, account, rows):
-        """Full verification: every row's evidence, key and content, digest, totals."""
+    def _assert_accounting_continuity(self, workspace, account, rows, db: Any = None):
+        """Full verification: every row's evidence, key and content, digest, totals.
+
+        ADR-037 (#1284): the ledger is spend history only, so a digest, totals,
+        witness or row mismatch never blocks. The session state (already built
+        from every row's content by ``_accounting_rows``) is resealed: the next
+        persist rewrites row digests, totals and the external witness, and a
+        ``history_gap`` entry is appended to the account history. Invalid row
+        evidence (a general-task group binding) still raises: it guards call
+        counts and lineage, not money. The deployment binding is checked by the
+        continuity lock itself and still blocks (a consent fence).
+        """
         from src.workflows import inference_ledger
-        if account is not None and inference_ledger.latched_reason(workspace, account):
-            raise InferenceAccountingError("accounting_continuity_unavailable")
 
         def expected():
             receipt = read_lifecycle_receipt(workspace)
@@ -450,50 +501,146 @@ class InferenceAccountingRepositoryMixin:
         try:
             inference_ledger.verify_full(account, rows, expected)
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            self._mark_history_gap(workspace, account, str(exc) or "ledger_verification_failed", db=db)
+            return
         inference_ledger.record_full_verification(workspace, account)
 
-    async def _open_ledger(self, db: Any, workspace, account):
-        """Verify continuity for one hot writer; full when due (R7) or required."""
-        from src.workflows import inference_ledger
-        if account is None or inference_ledger.latched_reason(workspace, account):
+    @staticmethod
+    def _assert_witness_not_ahead(workspace, account) -> None:
+        """Never reseal over records the database does not have.
+
+        An external witness (or retained checkpoint) newer than the account
+        means a committed-elsewhere write is missing here: a crash between the
+        witness and the commit, or an older database restored under a newer
+        witness. Those writes may record a started provider contact, which is
+        what keeps an operation from running twice, so they stay a block until
+        maintenance replays the checkpoint (at-most-once, not money; #1284).
+        """
+        receipt = read_lifecycle_receipt(workspace) or {}
+        expected = receipt.get("inference_accounting")
+        if isinstance(expected, dict) and (account is None
+                or expected.get("deployment_id") != account.deployment_id
+                or not isinstance(expected.get("revision"), int) or expected["revision"] > account.revision):
             raise InferenceAccountingError("accounting_continuity_unavailable")
+
+    def _mark_history_gap(self, workspace, account, reason: str, *, db: Any = None) -> None:
+        """Reseal the in-session ledger state from content and record the gap.
+
+        Nothing durable is written here. The reseal is marked in session state
+        (``_RESEAL_PENDING_KEY``) and sealed by the writer's single final
+        ``_persist_accounting_witness``. A writer that then refuses rolls the
+        reseal back with everything else, so the external witness never moves
+        ahead of a transaction that did not commit (#1284).
+        """
+        import logging
+        from src.workflows import inference_ledger
+        if account is None:
+            # Request records without their account: records may be missing,
+            # and they keep an operation from running twice. Never start over.
+            raise InferenceAccountingError("accounting_continuity_unavailable")
+        self._assert_witness_not_ahead(workspace, account)
+        logging.getLogger(__name__).warning(
+            "inference spend ledger verification failed (%s); resealing from current content", reason)
+        if db is None:
+            # A reader without a writer transaction proceeds on the content it
+            # read; the next writer reseals and records the gap.
+            return
+        state = db.info.get(inference_ledger._SESSION_KEY)
+        if state is not None:
+            state.backfill = True
+        if db.info.get(_RESEAL_PENDING_KEY):
+            # One gap entry per transaction, however many reads reseal.
+            return
+        # The gap entry is written by the sealing persist, not here: a writer
+        # that returns without persisting must not commit account content the
+        # ledger digest does not cover (that would read as a new gap each time).
+        db.info[_RESEAL_PENDING_KEY] = str(reason)[:128] or "ledger_verification_failed"
+
+    async def _seal_pending_reseal(self, db: Any, workspace, account) -> None:
+        """A writer returning without a write still seals a reseal it made.
+
+        Its single persist is then this one: the reseal (row digests, totals,
+        rederived group keys and the gap entry) is never committed unsealed.
+        """
+        if db.info.get(_RESEAL_PENDING_KEY):
+            await self._persist_accounting_witness(db, workspace, account)
+
+    async def _reseal_ledger(self, db: Any, reason: str):
+        """Escalate a hot writer to the whole ledger and reseal it in session (#1284).
+
+        Nothing is written: the writer's single final persist seals the reseal.
+        """
+        from src.workflows import inference_ledger
+        from src.workflows.inference_group_lookup import classify_group_lookup
+        from src.workflows.general_task_accounting import entry_for
+        workspace, account = db.info[_LEDGER_CONTEXT_KEY]
+        rows = list((await db.execute(select(InferenceCostReservation))).scalars())
+        # Group evidence guards call counts and lineage, not money: invalid
+        # evidence still refuses, exactly as full verification does.
+        for row in rows:
+            entry_for(row)
+        for row in rows:
+            # The lookup key is an unhashed hint: rederive it from sealed evidence.
+            key = classify_group_lookup(row)
+            if row.group_lookup_key != key:
+                row.group_lookup_key = key
+        state = inference_ledger.full_state(account, rows)
+        db.info[inference_ledger._SESSION_KEY] = state
+        # Sealed by this writer's final persist, never before it (#1284).
+        self._mark_history_gap(workspace, account, reason, db=db)
+        return state
+
+    async def _open_ledger(self, db: Any, workspace, account):
+        """Verify continuity for one hot writer; full when due (R7) or required.
+
+        A failed verification reseals the ledger instead of blocking (#1284).
+        """
+        from src.workflows import inference_ledger
+        if account is None:
+            raise InferenceAccountingError("accounting_continuity_unavailable")
+        db.info[_LEDGER_CONTEXT_KEY] = (workspace, account)
         digests, usable = await inference_ledger.scan_row_digests(db)
         from src.workspace.accounting_witness import is_v2_digest
-        if usable and is_v2_digest(account.ledger_digest) and not inference_ledger.full_verification_due(workspace, account):
+        if (usable and is_v2_digest(account.ledger_digest) and inference_ledger.totals_current(account)
+                and not inference_ledger.full_verification_due(workspace, account)):
             receipt = read_lifecycle_receipt(workspace)
             expected = receipt.get("inference_accounting") if receipt is not None else None
             try:
                 totals = inference_ledger.verify_fast(account, expected, digests)
             except inference_ledger.LedgerVerificationError as exc:
-                raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+                return await self._reseal_ledger(db, str(exc) or "ledger_verification_failed")
             await self._assert_group_keys_present(db)
             state = inference_ledger.LedgerState(digests=digests, totals=totals, full=False)
             db.info[inference_ledger._SESSION_KEY] = state
             return state
         _account, rows = await self._accounting_rows(db)
-        self._assert_accounting_continuity(workspace, account, rows)
+        # A reseal stays pending until this writer's final persist (#1284).
+        self._assert_accounting_continuity(workspace, account, rows, db=db)
         return db.info[inference_ledger._SESSION_KEY]
 
     async def _ledger_row(self, db: Any, state, operation_id: str):
         """One reservation by id, verified against its stored digest (R2)."""
         from src.workflows import inference_ledger
+        state = db.info.get(inference_ledger._SESSION_KEY, state)
         row = await db.get(InferenceCostReservation, operation_id)
         try:
             inference_ledger.verify_loaded_rows(state, [row])
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            state = await self._reseal_ledger(db, str(exc))
+            inference_ledger.verify_loaded_rows(state, [row])
         return row
 
     async def _ledger_rows(self, db: Any, state, *criteria):
         """Reservations matching ``criteria``, each verified against its digest."""
         from src.workflows import inference_ledger
+        state = db.info.get(inference_ledger._SESSION_KEY, state)
         rows = list((await db.execute(select(InferenceCostReservation).where(*criteria)
             .order_by(InferenceCostReservation.operation_id))).scalars())
         try:
             inference_ledger.verify_loaded_rows(state, rows)
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            state = await self._reseal_ledger(db, str(exc))
+            inference_ledger.verify_loaded_rows(state, rows)
         return rows
 
     async def _group_rows(self, db: Any, state, group_id: str):
@@ -502,23 +649,26 @@ class InferenceAccountingRepositoryMixin:
         Every row's key is a full-verification invariant; a missing or invalid
         key anywhere blocks, as the full-list ``assert_group_lookup`` did.
         """
-        await self._assert_group_keys_present(db)
-        rows = await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
-        # The key is an unhashed hint: a member hidden by editing it on an
-        # untouched row would under-count the group caps. Every returned row is
-        # digest-verified, so requiring its sealed evidence to name this group
-        # and the count to equal the sealed membership makes the read exact
-        # (a non-member swapped in under the key cannot stand in for a member).
+        from src.workflows import inference_ledger
         from src.workspace.accounting_witness import evidence_group_key
-        if any(evidence_group_key(row.evidence_json) != "g:" + group_id for row in rows):
-            raise InferenceAccountingError("accounting_continuity_unavailable")
-        self._require_sealed_count(len(rows), state.totals["rows_by_group"].get("g:" + group_id, 0))
-        return rows
-
-    @staticmethod
-    def _require_sealed_count(observed: int, sealed: int) -> None:
-        if observed != sealed:
-            raise InferenceAccountingError("accounting_continuity_unavailable")
+        await self._assert_group_keys_present(db)
+        for attempt in (0, 1):
+            rows = await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
+            # The key is an unhashed hint: a member hidden by editing it on an
+            # untouched row would under-count the group's call cap. Every
+            # returned row is digest-verified, so requiring its sealed evidence
+            # to name this group and the count to equal the sealed membership
+            # makes the read exact. A disagreement reseals the whole ledger
+            # (keys rederived from evidence, counts from content) and reads
+            # again (#1284) instead of blocking.
+            exact = (all(evidence_group_key(row.evidence_json) == "g:" + group_id for row in rows)
+                and len(rows) == state.totals["rows_by_group"].get("g:" + group_id, 0))
+            if exact:
+                return rows
+            if attempt:
+                raise InferenceAccountingError("general_task_group_lookup_invalid")
+            state = await self._reseal_ledger(db, "ledger_group_count_mismatch")
+            state = db.info[inference_ledger._SESSION_KEY]
 
     async def _discovery_rows(self, db: Any, state, run):
         """Every row ``discovery_generation_budget`` can count or raise on."""
@@ -531,9 +681,15 @@ class InferenceAccountingRepositoryMixin:
             InferenceCostReservation.owner_id == DISCOVERY_SERVICE,
             InferenceCostReservation.job_id.in_(discovery_jobs)))
         # Every programme row is owned by the discovery service; a row hidden
-        # by editing its owner would skip the programme limits.
-        self._require_sealed_count(sum(row.owner_id == DISCOVERY_SERVICE for row in rows),
-            state.totals["rows_by_owner"].get(DISCOVERY_SERVICE, 0))
+        # by editing its owner would skip the programme request limit. A
+        # disagreement with the sealed count reseals and reads again (#1284).
+        if sum(row.owner_id == DISCOVERY_SERVICE for row in rows) != state.totals["rows_by_owner"].get(DISCOVERY_SERVICE, 0):
+            from src.workflows import inference_ledger
+            await self._reseal_ledger(db, "ledger_owner_count_mismatch")
+            state = db.info[inference_ledger._SESSION_KEY]
+            rows = await self._ledger_rows(db, state, or_(
+                InferenceCostReservation.owner_id == DISCOVERY_SERVICE,
+                InferenceCostReservation.job_id.in_(discovery_jobs)))
         return rows
 
     async def _shadow_helper(self, db: Any, call, scoped_rows, *, compare=None) -> None:
@@ -555,22 +711,23 @@ class InferenceAccountingRepositoryMixin:
 
     @staticmethod
     def _near_outstanding_sealed(ledger, prior, owner_id: str) -> bool:
-        """Another open near-text reservation for this owner, from sealed counts.
+        """Another in-flight near-text request for this owner, from sealed counts.
 
         Not a content query: an edit to an untouched row could empty that.
         ``prior`` (this operation's own row, already digest-verified) is not
-        "another" reservation.
+        "another" request. A request NEAR has not priced yet is finished and
+        never counts (#1284).
         """
         own_open = bool(prior is not None and prior.owner_id == owner_id
             and prior.runtime_path == "near_text_native"
-            and prior.state in {"reserved", "contact_started", "unknown"})
+            and prior.state in {"reserved", "contact_started"})
         return ledger.totals["owner_near_text_open"].get(owner_id, 0) - int(own_open) > 0
 
     @staticmethod
     async def _near_outstanding(rows, owner_id: str, operation_id: str) -> bool:
         return any(row.operation_id != operation_id and row.owner_id == owner_id
             and row.runtime_path == "near_text_native"
-            and row.state in {"reserved", "contact_started", "unknown"} for row in rows)
+            and row.state in {"reserved", "contact_started"} for row in rows)
 
     async def _persist_accounting_witness(self, db, workspace, account, rows=None):
         """Seal the session's reservation changes and advance the witness.
@@ -579,6 +736,11 @@ class InferenceAccountingRepositoryMixin:
         changed set and the totals come from the session (#1086 R3).
         """
         from src.workflows import inference_ledger
+        resealed = db.info.pop(_RESEAL_PENDING_KEY, None)
+        if resealed:
+            account.settings_history_json = _json(_append_history_gap(
+                json.loads(account.settings_history_json),
+                resealed if isinstance(resealed, str) else "ledger_verification_failed"))
         base = _witness(account) if account.revision else None
         try:
             changed = await inference_ledger.persist(db, workspace, account)
@@ -590,68 +752,49 @@ class InferenceAccountingRepositoryMixin:
             "account": account.model_dump(mode="json"), "operations": [_operation_payload(row) for row in changed],
             "witness": _witness(account), "secret_values_included": False})
         write_lifecycle_receipt(workspace, receipt, _accounting_lock_held=True)
+        if resealed:
+            inference_ledger.record_full_verification(workspace, account)
 
-    async def configure_inference_accounting(self, ceiling_microusd: int, *, reserve_review_microusd: int | None = None, continuity_workspace=None) -> dict[str, object]:
-        """Explicit settings save bootstraps only a truly empty deployment."""
-        ceiling = integer_amount(ceiling_microusd, positive=True)
-        if reserve_review_microusd is not None:
-            integer_amount(reserve_review_microusd, positive=True)
-            if reserve_review_microusd > ceiling:
-                raise InferenceAccountingError("accounting_amount_invalid")
+    async def ensure_inference_ledger(self, *, continuity_workspace=None) -> dict[str, object]:
+        """Create the deployment's spend ledger once; it holds no amount (#1284).
+
+        Called by a NEAR settings save and before the first request. An
+        existing ledger is verified and returned unchanged. A second account is
+        never created when the external witness already names one.
+        """
         root = Path(settings.workspace_dir).resolve()
         async with self._session() as db:
             await self._accounting_begin(db)
             account, rows = await self._accounting_rows(db)
             with _continuity_lock(root, initialize=account is None, held_workspace=continuity_workspace) as workspace:
-                if account is None:
-                    prior = read_lifecycle_receipt(workspace)
-                    if rows or (prior and "inference_accounting" in prior):
-                        raise InferenceAccountingError("accounting_continuity_unavailable")
-                    # Legacy contacted history is not proof of an empty ledger.
-                    legacy = (await db.execute(select(WorkflowRunState.effect_receipts_json))).scalars()
-                    if any("remote_inference" in str(effects or "") for effects in legacy):
-                        raise InferenceAccountingError("accounting_legacy_reconciliation_required")
-                    prior_route = (await db.execute(select(ModelRouteAttemptReceiptRecord.id).where(
-                        (ModelRouteAttemptReceiptRecord.endpoint.like("https://openrouter.ai/%")
-                         | ModelRouteAttemptReceiptRecord.endpoint.like("https://cloud-api.near.ai/%"))).limit(1))).first()
-                    if prior_route is not None:
-                        raise InferenceAccountingError("accounting_legacy_reconciliation_required")
-                    now = datetime.now(timezone.utc).replace(tzinfo=None)
-                    account = InferenceAccountingOwner(ceiling_microusd=ceiling, created_at=now, updated_at=now, revision=0)
-                    account.settings_history_json = _json([{"kind": "period_initialized", "period_id": period_id(now), "recorded_at": now.isoformat()}])
-                    db.add(account)
-                    await db.flush()
-                else:
-                    self._assert_accounting_continuity(workspace, account, rows)
-                    if account.ceiling_microusd == ceiling and reserve_review_microusd is None:
-                        return _witness(account)
-                    account.settings_revision += 1
-                    account.ceiling_microusd = ceiling
-                history = json.loads(account.settings_history_json)
-                history.append({"revision": account.settings_revision, "ceiling_microusd": ceiling, "recorded_at": datetime.now(timezone.utc).isoformat()})
-                if reserve_review_microusd is not None:
-                    from src.workspace.accounting_witness import unreviewed_overruns
-                    overruns = unreviewed_overruns(account.model_dump(mode="json"), [_operation_payload(row) for row in rows])
-                    covered = [row for row in overruns if row["actual_cost_microusd"] <= reserve_review_microusd][:128]
-                    history.append({"kind": "request_reserve_review", "revision": account.settings_revision,
-                        "accounting_revision": account.revision, "bound_microusd": reserve_review_microusd,
-                        "operations": [{key: row[key] for key in ("operation_id", "sequence", "revision")} for row in covered],
-                        "recorded_at": datetime.now(timezone.utc).isoformat()})
-                account.settings_history_json = _json(history)
+                if account is not None:
+                    self._assert_accounting_continuity(workspace, account, rows, db=db)
+                    if db.info.get(_RESEAL_PENDING_KEY):
+                        await self._persist_accounting_witness(db, workspace, account, rows)
+                    return _witness(account)
+                prior = read_lifecycle_receipt(workspace)
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                # ``ceiling_microusd`` is a retained NOT NULL column; never read.
+                account = InferenceAccountingOwner(ceiling_microusd=0, created_at=now, updated_at=now, revision=0)
+                if rows or (prior and "inference_accounting" in prior):
+                    # Request records (or a witness of them) exist without the
+                    # account: records may be missing, and they are what keeps
+                    # an operation from running twice. Never start over.
+                    raise InferenceAccountingError("accounting_continuity_unavailable")
+                account.settings_history_json = _json([{"kind": "ledger_created", "recorded_at": now.isoformat()}])
+                db.add(account)
+                await db.flush()
                 await self._persist_accounting_witness(db, workspace, account, rows)
                 return _witness(account)
 
     async def reserve_inference_cost(self, *, operation_id: str, job_id: str, owner_id: str,
                                      payload_digest: str, policy_digest: str, runtime_path: str,
-                                     profile_id: str, bound_microusd: int, owner_ceiling_microusd: int | None,
+                                     profile_id: str,
                                      priority: int, deadline_at: float, owner: str, fencing_token: int,
                                      general_task_binding: object = None,
                                      now: datetime | None = None) -> dict[str, object]:
         from src.workflows.research_accounting import discovery_accounting_scope
         async with discovery_accounting_scope(self, job_id=job_id):
-            bound = integer_amount(bound_microusd, positive=True)
-            if owner_ceiling_microusd is not None:
-                integer_amount(owner_ceiling_microusd, positive=True)
             if not re.fullmatch(r"[0-9a-f]{64}", payload_digest or "") or not re.fullmatch(r"[0-9a-f]{64}", policy_digest or ""):
                 raise InferenceAccountingError("accounting_operation_binding_invalid")
             observed = _utc(now or datetime.now(timezone.utc))
@@ -671,7 +814,7 @@ class InferenceAccountingRepositoryMixin:
                         native = await accounting_pair(db, run)
                         job_rows = await self._ledger_rows(db, ledger, InferenceCostReservation.job_id == job_id)
                         if (operation_id != native.operation_id or policy_digest != native.policy_digest
-                            or profile_id != "openrouter.audio" or bound > native.audio_budget_microusd
+                            or profile_id != "openrouter.audio"
                             or _utc(deadline) != audio_utc(native.original_deadline_at)
                             or (prior is not None and prior.recovery_reason != "typed_owner_precontact_resume")
                             or any(item.operation_id != operation_id for item in job_rows)):
@@ -679,13 +822,16 @@ class InferenceAccountingRepositoryMixin:
                     from src.workflows.research_accounting import discovery_generation_budget
                     discovery_rows = await self._discovery_rows(db, ledger, run)
                     programme_budget = await discovery_generation_budget(self, db, run, discovery_rows,
-                        new_bound=bound if prior is None else 0, operation_id=operation_id, payload_digest=payload_digest)
+                        operation_id=operation_id, payload_digest=payload_digest)
                     await self._shadow_helper(db, lambda rows: discovery_generation_budget(self, db, run, rows,
-                        new_bound=bound if prior is None else 0, operation_id=operation_id, payload_digest=payload_digest), discovery_rows)
+                        operation_id=operation_id, payload_digest=payload_digest), discovery_rows)
                     if runtime_path == "near_text_native":
                         if profile_id != "near.text" or run.job_kind != "inference.near-text.v1":
                             raise InferenceAccountingError("near_native_binding_invalid")
-                        outstanding = self._near_outstanding_sealed(ledger, prior, owner_id)
+                        # A read above may have resealed: use the current state.
+                        from src.workflows import inference_ledger
+                        outstanding = self._near_outstanding_sealed(
+                            db.info.get(inference_ledger._SESSION_KEY, ledger), prior, owner_id)
                         await self._shadow_helper(db, lambda rows: self._near_outstanding(rows, owner_id, operation_id),
                             [] if not outstanding else None, compare=lambda value: value == outstanding)
                         if outstanding:
@@ -694,7 +840,7 @@ class InferenceAccountingRepositoryMixin:
                         if (prior.state == "reserved" and prior.recovery_reason == "typed_owner_precontact_resume"
                             and prior.job_id == job_id and prior.owner_id == owner_id and prior.payload_digest == payload_digest
                             and prior.policy_digest == policy_digest and prior.runtime_path == runtime_path and prior.profile_id == profile_id
-                            and prior.bound_microusd == bound and _utc(prior.deadline_at) > observed):
+                            and _utc(prior.deadline_at) > observed):
                             from src.workflows.general_task_accounting import entry_for, validate_recovered_entry
                             prior_entry = entry_for(prior)
                             if prior_entry is not None or general_task_binding is not None:
@@ -718,38 +864,26 @@ class InferenceAccountingRepositoryMixin:
                         group = general_task_binding.get("group") if isinstance(general_task_binding, dict) else None
                         group_rows = await self._group_rows(db, ledger, group.group_id) if hasattr(group, "group_id") else []
                         task_group_entry = await reserve_entry(db, run, group_rows, general_task_binding,
-                            operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline,
+                            operation_id=operation_id, bound=0, runtime_path=runtime_path, deadline_at=deadline,
                             policy_digest=policy_digest, payload_digest=payload_digest)
                         await self._shadow_helper(db, lambda rows: reserve_entry(db, run, rows, general_task_binding,
-                            operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline,
+                            operation_id=operation_id, bound=0, runtime_path=runtime_path, deadline_at=deadline,
                             policy_digest=policy_digest, payload_digest=payload_digest), group_rows)
+                    # ADR-037 (#1284): no month, ceiling, reserve or overrun is
+                    # checked. The record exists for at-most-once execution, the
+                    # consent binding rechecked at contact, and the charge.
                     period = period_id(observed)
-                    from src.workspace.accounting_witness import (
-                        held_microusd, period_state, totals_overrun_rows, totals_period_rows, unreviewed_overruns,
-                    )
-                    # Admission reads only the sealed running totals (#1086 R1).
-                    owner_data = account.model_dump(mode="json")
-                    from src.workflows.inference_ledger import shadow_compare_decisions
-                    await shadow_compare_decisions(db, account, ledger.totals, period, owner_id)
-                    period_status = period_state(owner_data, totals_period_rows(ledger.totals), period)
-                    if period_status["reason_code"]:
-                        raise InferenceAccountingError(period_status["reason_code"])
-                    if unreviewed_overruns(owner_data, totals_overrun_rows(ledger.totals)):
-                        raise InferenceAccountingError("provider_charge_exceeded_reservation")
-                    if held_microusd(ledger.totals, period) + bound > account.ceiling_microusd:
-                        raise InferenceAccountingError("deployment_cost_budget_exhausted")
-                    if owner_ceiling_microusd is not None and held_microusd(ledger.totals, period, owner_id) + bound > owner_ceiling_microusd:
-                        raise InferenceAccountingError("owner_cost_budget_exhausted")
                     row = InferenceCostReservation(
                         operation_id=operation_id, deployment_id=account.deployment_id,
                         job_id=job_id, owner_id=owner_id, goal_id=run.goal_id, goal_revision=run.goal_revision,
                         payload_digest=payload_digest, policy_digest=policy_digest, runtime_path=runtime_path,
                         profile_id=profile_id, period_id=period, settings_revision=account.settings_revision,
-                        ceiling_microusd=account.ceiling_microusd, bound_microusd=bound,
-                        owner_ceiling_microusd=owner_ceiling_microusd, sequence=account.revision + 1,
+                        # Retained NOT NULL columns, never compared (#1284).
+                        ceiling_microusd=0, bound_microusd=0,
+                        owner_ceiling_microusd=None, sequence=account.revision + 1,
                         priority=priority, deadline_at=deadline.replace(tzinfo=None),
                         job_fencing_token=fencing_token, created_at=observed.replace(tzinfo=None), updated_at=observed.replace(tzinfo=None),
-                        evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}]
+                        evidence_json=_json([{"kind": "reservation", "memory_status": "no_learning"}]
                             + ([task_group_entry] if task_group_entry else [])),
                     )
                     if programme_budget is not None:
@@ -808,7 +942,7 @@ class InferenceAccountingRepositoryMixin:
                     if run.job_kind == "audio_transcription_v1":
                         from src.workflows.audio_native import guard_audio_pair
                         native, _audio = await guard_audio_pair(db, run, physical=True)
-                        if operation_id != native.operation_id or row.policy_digest != native.policy_digest or row.bound_microusd > native.audio_budget_microusd:
+                        if operation_id != native.operation_id or row.policy_digest != native.policy_digest:
                             raise InferenceAccountingError("audio_contact_binding_invalid")
                     from src.workflows.job_runtime import _assert_canonical_goal_fence
                     await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
@@ -852,10 +986,6 @@ class InferenceAccountingRepositoryMixin:
                     # Recheck the canonical ledger under this SAME writer and
                     # witness lock before recording contact, including prefunding.
                     from src.model_fabric.effective_policy import current_inference_policy
-                    from src.model_fabric.configuration import deployment_spend_ceiling
-                    from src.workspace.accounting_witness import (
-                        held_microusd, period_state, totals_overrun_rows, totals_period_rows, unreviewed_overruns,
-                    )
                     if row.runtime_path == "near_text_native":
                         from src.work_board.near_text_native import recheck_provider_contact
                         from src.work_board.repository import BoardError
@@ -881,12 +1011,6 @@ class InferenceAccountingRepositoryMixin:
                             configured, current_digest = current_inference_policy()
                     except PermissionError:
                         configured, current_digest = None, None
-                    # Admission reads only the sealed running totals (#1086 R1).
-                    owner_data = account.model_dump(mode="json")
-                    period = period_id(_utc(now))
-                    from src.workflows.inference_ledger import shadow_compare_decisions
-                    await shadow_compare_decisions(db, account, ledger.totals, period, row.owner_id)
-                    period_status = period_state(owner_data, totals_period_rows(ledger.totals), period)
                     from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
                     # ADR-035: narrowed to OpenRouter (every non-NEAR) rows.
                     retired_denial = (OPENROUTER_RETIRED_REASON
@@ -896,16 +1020,10 @@ class InferenceAccountingRepositoryMixin:
                     guard_denial = (precontact_denial if isinstance(precontact_denial, str)
                         and re.fullmatch(r"[a-z0-9_:.-]{1,128}", precontact_denial) else
                         "precontact_guard_invalid" if precontact_denial is not None else None)
+                    # ADR-037 (#1284): only consent, policy and authority deny
+                    # here; no amount is compared.
                     denial = (guard_denial or opportunity_denial or retired_denial or ("provider_contact_denied" if _provider_contact_denied(row)
-                        else "provider_policy_revision_changed" if current_digest != policy_digest
-                        else "accounting_settings_revision_unavailable" if (
-                            account.ceiling_microusd != deployment_spend_ceiling(configured)
-                            or row.settings_revision != account.settings_revision)
-                        else period_status["reason_code"]
-                        or ("provider_charge_exceeded_reservation" if unreviewed_overruns(owner_data, totals_overrun_rows(ledger.totals)) else None)
-                        or ("deployment_cost_budget_exhausted" if held_microusd(ledger.totals, period) > account.ceiling_microusd else None)
-                        or ("owner_cost_budget_exhausted" if row.owner_ceiling_microusd is not None
-                            and held_microusd(ledger.totals, period, row.owner_id) > row.owner_ceiling_microusd else None)))
+                        else "provider_policy_revision_changed" if current_digest != policy_digest else None))
                     if not _provider_contact_denied(row):
                         history = json.loads(row.evidence_json)
                         if denial:
@@ -927,6 +1045,8 @@ class InferenceAccountingRepositoryMixin:
                         row.evidence_json = _json(history)
                         db.add(row)
                         await self._persist_accounting_witness(db, workspace, account, [row])
+                    else:
+                        await self._seal_pending_reseal(db, workspace, account)
                     result = _operation_payload(row)
                     if denial:
                         denial_binding = (row.operation_id, row.job_id, row.owner_id,
@@ -995,12 +1115,14 @@ class InferenceAccountingRepositoryMixin:
                     if repeated is not None:
                         if repeated.get("actual_cost_microusd") != actual or repeated.get("evidence_digest") != evidence_digest:
                             raise InferenceAccountingError("accounting_settlement_conflict")
+                        await self._seal_pending_reseal(db, workspace, account)
                         return _operation_payload(row)
                     if type(expected_revision) is not int or row.revision != expected_revision or not idempotency_key or len(idempotency_key) > 128:
                         raise InferenceAccountingError("accounting_settlement_revision_changed")
                 if row.state in {"settled", "released"}:
                     if row.actual_cost_microusd != actual and actual is not None:
                         raise InferenceAccountingError("accounting_settlement_conflict")
+                    await self._seal_pending_reseal(db, workspace, account)
                     return _operation_payload(row)
                 if _provider_contact_denied(row) and actual is None:
                     # The broker's finally path must read the canonical held
@@ -1016,6 +1138,7 @@ class InferenceAccountingRepositoryMixin:
                         and item.get("job_fence") == row.job_fencing_token and item.get("provider_never_contacted") is True
                         and item.get("callback_completed") is True for item in json.loads(row.evidence_json))
                     if not (closed and terminal_authority and quiesced):
+                        await self._seal_pending_reseal(db, workspace, account)
                         return _operation_payload(row)
                 if row.state == "reserved":
                     # Only callback-never-started cancellation/expiry releases.
@@ -1026,7 +1149,10 @@ class InferenceAccountingRepositoryMixin:
                     row.state = "unknown" if actual is None else "settled"
                     row.actual_cost_microusd = actual
                     row.provider_operation_id = provider_id or row.provider_operation_id
-                    row.recovery_reason = "provider_cost_readback_required" if actual is None else "provider_charge_exceeded_reservation" if actual > row.bound_microusd else None
+                    # "Not priced yet" when NEAR reported no charge; nothing waits
+                    # on it. A call that failed after contact says so (#1284).
+                    row.recovery_reason = (None if actual is not None else "provider_call_failed"
+                        if reason == "provider_call_failed" else "provider_cost_readback_required")
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 history = json.loads(row.evidence_json)
                 audio_run = await self._fetch(db, row.job_id)
@@ -1052,12 +1178,12 @@ class InferenceAccountingRepositoryMixin:
                 return _operation_payload(row)
 
     async def inference_accounting_snapshot(self, *, now: datetime | None = None, job_id: str | None = None, continuity_workspace=None) -> dict[str, object]:
-        """Advisory ledger view; admission re-checks everything under the writer lock.
+        """Spend history view (ADR-037): display only, it gates nothing.
 
-        Reads use a deferred snapshot. They escalate to the original writer
-        transaction only when the period high-water mark must be persisted or
-        continuity does not verify (a writer persists the witness before its
-        commit), so either outcome matches the serialized read.
+        Reads use a deferred snapshot and escalate to the serialized writer
+        transaction only when continuity does not verify on the fast path (a
+        writer persists the witness before its commit), so either outcome
+        matches the serialized read. Nothing is written by a read.
         """
         period = period_id(now or datetime.now(timezone.utc))
         try:
@@ -1069,71 +1195,56 @@ class InferenceAccountingRepositoryMixin:
             assert snapshot is not None
             return snapshot
         except Exception as exc:
-            return {"status": "blocked", "reason_code": getattr(exc, "code", "accounting_continuity_unavailable"),
-                "remaining_microusd": None, "period_id": period, "operations": [], "memory_status": "no_learning"}
+            return {"status": "unavailable", "reason_code": getattr(exc, "code", "accounting_continuity_unavailable"),
+                "accounting_continuity_verified": False, "history_verified": False,
+                "period_id": period, "spent_microusd": None, "unpriced_requests": None,
+                "operation_count": 0, "operations_truncated": False, "operations": [], "memory_status": "no_learning"}
 
     async def _accounting_snapshot(self, period: str, job_id: str | None, *, read_only: bool = False,
                                    continuity_workspace=None) -> dict[str, object] | None:
-        from src.workspace.accounting_witness import (
-            period_state, totals_overrun_rows, totals_period_rows, unreviewed_overruns,
-        )
+        from src.workflows import inference_ledger
         async with self._session() as db:
             await self._accounting_begin(db, read_only=read_only)
             account = await db.get(InferenceAccountingOwner, "deployment")
+            if account is None:
+                raise InferenceAccountingError(ACCOUNTING_LEDGER_UNINITIALIZED)
             with _continuity_lock(Path(settings.workspace_dir).resolve(), held_workspace=continuity_workspace,
                                   exclusive=not read_only) as workspace:
                 try:
-                    if account is None:
-                        raise InferenceAccountingError("accounting_continuity_unavailable")
                     ledger = await (self._read_ledger(db, workspace, account) if read_only
                         else self._open_ledger(db, workspace, account))
                 except Exception:
                     # Unserialized, a concurrent writer may have persisted the
                     # witness ahead of its commit; only the serialized read may
                     # conclude continuity is broken.
-                    if read_only and account is not None:
-                        return None
-                    raise
-                totals = ledger.totals
-                owner_data = account.model_dump(mode="json")
-                period_status = period_state(owner_data, totals_period_rows(totals), period)
-                if period > period_status["period_high_water"]:
                     if read_only:
                         return None
-                    history = json.loads(account.settings_history_json)
-                    history.append({"kind": "period_observed", "period_id": period, "recorded_at": datetime.now(timezone.utc).isoformat()})
-                    account.settings_history_json = _json(history)
-                    await self._persist_accounting_witness(db, workspace, account, [])
-                    owner_data = account.model_dump(mode="json")
-                    period_status = period_state(owner_data, totals_period_rows(totals), period)
-                overruns = unreviewed_overruns(owner_data, totals_overrun_rows(totals))
-                reason = period_status["reason_code"] or ("provider_charge_exceeded_reservation" if overruns else None)
-                committed = sum(value for key, value in totals["settled_by_period"].items() if key >= period)
-                reserved = totals["open_bound_by_state"]["reserved"]
-                unknown = totals["open_bound_by_state"]["contact_started"] + totals["open_bound_by_state"]["unknown"]
-                listed = await self._snapshot_operations(db, ledger, job_id)
-                current_review = next((entry for entry in reversed(json.loads(account.settings_history_json))
-                    if entry.get("kind") == "request_reserve_review"
-                    and entry.get("revision") == account.settings_revision), None)
-                return {**period_status, "status": "blocked" if reason else "ready", "reason_code": reason,
-                    "accounting_continuity_verified": True, "revision": account.revision,
-                    "ledger_digest": account.ledger_digest,
-                    "request_reserve_review": {"settings_revision": current_review["revision"],
-                        "accounting_revision": current_review["accounting_revision"],
-                        "bound_microusd": current_review["bound_microusd"]} if current_review else None,
-                    "period_review": {"endpoint": "/api/settings/model-fabric/accounting/period", "method": "POST",
-                        "period_id": period, "expected_revision": account.revision,
-                        "authority_scope": "deployment_accounting"} if period_status["reason_code"] else None,
-                    "deployment_id": account.deployment_id,
-                    "period_id": period, "settings_revision": account.settings_revision,
-                    "ceiling_microusd": account.ceiling_microusd, "committed_microusd": committed,
-                    "reserved_microusd": reserved, "unknown_microusd": unknown,
-                    "remaining_microusd": max(0, account.ceiling_microusd - committed - reserved - unknown),
-                    "overrun_max_cost_microusd": max((row["actual_cost_microusd"] for row in overruns), default=0),
-                    # Bounded projection so the operator can see each charge to review.
-                    "unreviewed_overruns": [{key: row[key] for key in ("operation_id", "job_id", "runtime_path",
-                        "period_id", "bound_microusd", "actual_cost_microusd")}
-                        for row in sorted(overruns, key=lambda item: -item["actual_cost_microusd"])[:16]],
+                    raise
+                try:
+                    listed = await self._snapshot_operations(db, ledger, job_id)
+                except InferenceAccountingError:
+                    if read_only:
+                        return None
+                    raise
+                if db.info.get(_RESEAL_PENDING_KEY):
+                    # This serialized read resealed: its single, final write.
+                    await self._persist_accounting_witness(db, workspace, account)
+                ledger = db.info[inference_ledger._SESSION_KEY]
+                totals = ledger.totals
+                gaps = [entry for entry in json.loads(account.settings_history_json)
+                    if isinstance(entry, dict) and entry.get("kind") == "history_gap"]
+                return {"status": "ready", "reason_code": None,
+                    # Display only (#1284): a resealed ledger may be missing
+                    # history; nothing is blocked by it.
+                    "accounting_continuity_verified": True, "history_verified": not gaps,
+                    "history_gap_since": gaps[0].get("recorded_at") if gaps else None,
+                    "revision": account.revision, "ledger_digest": account.ledger_digest,
+                    "deployment_id": account.deployment_id, "period_id": period,
+                    # Settled charges of this UTC month, from the sealed totals.
+                    "spent_microusd": totals["settled_by_period"].get(period, 0),
+                    # Unpriced (``unknown``) requests over all months; the UI
+                    # labels it so (#1284).
+                    "unpriced_requests": totals.get("open_rows_by_state", {}).get("unknown", 0),
                     "operation_count": totals["row_count"], "operations_truncated": totals["row_count"] > 128,
                     "operations": [_operator_operation(row) for row in listed],
                     "memory_status": "no_learning"}
@@ -1144,7 +1255,8 @@ class InferenceAccountingRepositoryMixin:
         Reads a deferred snapshot with stdlib sqlite3 on a worker thread and
         checks only DB-internal consistency (never the external witness, which
         writers persist before commit). A failure is re-checked with the full
-        in-process verification under the writer lock before latching.
+        in-process verification under the writer lock, which reseals the ledger
+        and records a ``history_gap`` instead of blocking (#1284).
         """
         import asyncio
         from types import SimpleNamespace
@@ -1168,22 +1280,23 @@ class InferenceAccountingRepositoryMixin:
                 await self._accounting_begin(db)
                 account, rows = await self._accounting_rows(db)
                 with _continuity_lock(root) as workspace:
-                    self._assert_accounting_continuity(workspace, account, rows)
+                    self._assert_accounting_continuity(workspace, account, rows, db=db)
+                    if db.info.get(_RESEAL_PENDING_KEY):
+                        await self._persist_accounting_witness(db, workspace, account, rows)
+                        return {"status": "resealed", "reason": failure}
         except InferenceAccountingError as exc:
             if exc.code == "accounting_continuity_busy":
                 return {"status": "deferred", "reason": failure}
-            inference_ledger.latch(*key, failure)
-            return {"status": "latched", "reason": failure}
+            raise
+        del key
         return {"status": "verified_under_lock", "revision": revision}
 
     async def _read_ledger(self, db: Any, workspace, account):
         """Read-only fast verification; anything needing more escalates."""
         from src.workflows import inference_ledger
         from src.workspace.accounting_witness import is_v2_digest
-        if inference_ledger.latched_reason(workspace, account):
-            raise InferenceAccountingError("accounting_continuity_unavailable")
         digests, usable = await inference_ledger.scan_row_digests(db)
-        if not usable or not is_v2_digest(account.ledger_digest):
+        if not usable or not is_v2_digest(account.ledger_digest) or not inference_ledger.totals_current(account):
             raise InferenceAccountingError("accounting_continuity_unavailable")
         receipt = read_lifecycle_receipt(workspace)
         expected = receipt.get("inference_accounting") if receipt is not None else None
@@ -1222,10 +1335,15 @@ class InferenceAccountingRepositoryMixin:
         rows = list((await db.execute(query.order_by(open_first, InferenceCostReservation.priority.desc(),
             InferenceCostReservation.sequence.asc(), literal_column("inference_cost_reservations.rowid")).limit(128))).scalars())
         from src.workflows import inference_ledger
+        ledger = db.info.get(inference_ledger._SESSION_KEY, ledger)
         try:
             inference_ledger.verify_loaded_rows(ledger, rows)
         except inference_ledger.LedgerVerificationError as exc:
-            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            if _LEDGER_CONTEXT_KEY not in db.info:
+                # A deferred read escalates to the serialized writer read.
+                raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+            ledger = await self._reseal_ledger(db, str(exc))
+            inference_ledger.verify_loaded_rows(ledger, rows)
         return rows
 
 

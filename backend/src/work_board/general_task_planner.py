@@ -79,7 +79,6 @@ class GeneralTaskPlanner:
             "original_provenance": original_provenance,
             "max_steps": context.request.limits.max_steps,
             "wall_seconds": context.request.limits.wall_seconds,
-            "max_cost_microusd": context.request.limits.max_cost_microusd,
             "deadline_at": _utc(context.callback.deadline_at).timestamp(),
             "specialist_role": context.request.role}
         return await self.propose(db, owner, task_input, descriptors, group.goal_revision,
@@ -153,13 +152,13 @@ class GeneralTaskPlanner:
             from src.workflows.inference_accounting import _utc
             _specialist = {**_specialist, "max_steps": specialist_context.request.limits.max_steps,
                 "wall_seconds": specialist_context.request.limits.wall_seconds,
-                "max_cost_microusd": specialist_context.request.limits.max_cost_microusd,
                 "deadline_at": _utc(specialist_context.callback.deadline_at).timestamp(),
                 "specialist_role": specialist_context.request.role}
         if not task_input.inference_egress_acknowledged:
             raise BoardError("general_task_planning_consent_required", "Acknowledge intent egress for planning", status_code=422)
-        if task_input.limits.max_inference_calls < 1 or task_input.limits.max_cost_microusd <= 0:
-            raise BoardError("general_task_planning_budget_required", "Planning requires one call and a nonzero monetary ceiling", status_code=422)
+        if task_input.limits.max_inference_calls < 1:
+            # ADR-037 (#1284): planning needs one call; no dollar allowance.
+            raise BoardError("general_task_planning_call_required", "Planning requires at least one inference call", status_code=422)
         if not descriptors:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
         from src.model_fabric.retirement import (NO_ACTIVE_PROVIDER_REASON, inactive_route_label,
@@ -189,8 +188,6 @@ class GeneralTaskPlanner:
                 route_block=True, provider_contact="not_started")
         if near_route is not None:
             setup = route = None
-            bound = near_route.request_cost_bound_microusd
-            budget = min(task_input.limits.max_cost_microusd, near_route.spend_ceiling_microusd)
         else:
             try:
                 configured, _policy_digest = current_inference_policy()
@@ -200,12 +197,6 @@ class GeneralTaskPlanner:
             route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
             if route is None or not getattr(route, "enabled", True):
                 raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
-            bound = route.request_cost_bound_microusd
-            budget = min(task_input.limits.max_cost_microusd, setup.spend_ceiling_microusd or 0)
-        if _specialist is not None:
-            budget = min(budget, _specialist["max_cost_microusd"], _specialist["group"].max_cost_microusd)
-        if type(bound) is not int or bound <= 0 or bound > budget:
-            raise BoardError("general_task_planning_budget_insufficient", "Existing request reserve exceeds the planning ceiling", status_code=422)
         operator = await authenticate_session(owner.session_id, touch=False)
         if operator.session_id != owner.session_id or operator.principal.principal_id != owner.principal_id:
             raise BoardError("general_task_planning_owner_changed", "Original operator session changed", status_code=403)
@@ -314,11 +305,6 @@ class GeneralTaskPlanner:
         if _specialist is not None:
             context = replace(context, deadline_at=min(context.deadline_at, _specialist["deadline_at"],
                 time.time() + _specialist["wall_seconds"]))
-        # Route metadata uses the persisted deployment cost envelope. The
-        # broker applies the narrower operator ceiling to its actual reserve;
-        # substituting it into route metadata would reject every legacy
-        # profile whose cost tag describes the deployment ceiling instead.
-        context = replace(context, owner_budget_microusd=budget, estimated_cost_microusd=bound)
         near_call = None
         if near_route is not None:
             from src.model_fabric.near_tee import NearTeeDenied
@@ -393,9 +379,9 @@ class GeneralTaskPlanner:
             if isinstance(exc, (RemoteInferenceAdmissionError, RemoteInferenceBindingError)):
                 raise BoardError("general_task_planning_admission_blocked", str(exc), status_code=409) from exc
             from src.model_fabric.near_tee import NearTeeError
-            if isinstance(exc, NearTeeError) and exc.code != "near_tee_cost_liability":
-                # Contact happened and NEAR billing settled the known cost;
-                # no output is adopted and no task execution is admitted.
+            if isinstance(exc, NearTeeError):
+                # Contact happened; no output is adopted and no task execution
+                # is admitted.
                 raise BoardError("general_task_planning_output_not_adopted",
                     "Planner output was not adopted: " + exc.code, status_code=409, reason_code=exc.code) from exc
             raise

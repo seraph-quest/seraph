@@ -45,13 +45,12 @@ async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepa
     """``provider="openrouter"`` only for openrouter_legacy tests that pin the historical route."""
     _root,_engine,factory=accounting_db
     if provider == "near_tee":
-        # ADR-035: research children run on the NEAR TEE text slot (a 100
-        # micro-USD request bound under a 1000 micro-USD lane, as before).
-        configured = write_near_tee_text_configuration(request_cost_bound_microusd=100, ceiling_microusd=1000)
+        # ADR-035: research children run on the NEAR TEE text slot, which
+        # carries no amount (ADR-037, #1284).
+        configured = write_near_tee_text_configuration()
         if reviewed_route:
             # A newer reviewed setup of the same slot (research needs <= 45 s).
-            write_near_tee_text_configuration(request_cost_bound_microusd=100, ceiling_microusd=1000,
-                timeout_seconds=30, egress_revision=configured.egress_revision+1)
+            write_near_tee_text_configuration(timeout_seconds=30, egress_revision=configured.egress_revision+1)
     else:
         from tests.test_inference_accounting import setup_configuration
         configured = setup_configuration()
@@ -63,7 +62,7 @@ async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepa
                 replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
                 egress_revision=configured.egress_revision+1))
     jobs=DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+    await jobs.ensure_inference_ledger()
     from src.auth.service import create_session
     _private_token, operator = await create_session()
     now=datetime.now(timezone.utc)
@@ -141,13 +140,15 @@ async def test_fixed_group_wait_and_paired_funding_preserve_original_lineage_and
     resumed=await resume_parent(jobs,parent_id=spec.identity.job_id,owner="research-kernel",phase="research_funding")
     assert resumed["job_fence"]==2 and resumed["board_fence"]==2
     rows=await fund_fixed_group(jobs,parent_id=spec.identity.job_id,owner="research-kernel",fencing_token=2)
-    assert len(rows)==2 and sum(row["bound_microusd"] for row in rows)==200
+    # #1284: funding writes request records without amounts.
+    assert len(rows)==2 and all(row["bound_microusd"]==0 and row["state"]=="reserved" for row in rows)
     assert rows==await fund_fixed_group(jobs,parent_id=spec.identity.job_id,owner="research-kernel",fencing_token=2)
     await pause_parent(jobs,parent_id=spec.identity.job_id,owner="research-kernel",job_fence=2,
         board_fence=2,board_revision=resumed["task_revision"],reason=WAIT_CHILDREN)
     await accounting_db[1].dispose()
     snapshot=await jobs.inference_accounting_snapshot()
-    assert snapshot["accounting_continuity_verified"] is True and snapshot["reserved_microusd"]==200
+    assert snapshot["accounting_continuity_verified"] is True
+    assert sorted(row["operation_id"] for row in snapshot["operations"] if row["state"]=="reserved")==sorted(row["operation_id"] for row in rows)
     assert (await jobs.get_job(spec.identity.job_id))["deadline_at"]==parent["deadline_at"]
     for slot,child_id in enumerate(creation["child_ids"]):
         child=await jobs.get_job(child_id)

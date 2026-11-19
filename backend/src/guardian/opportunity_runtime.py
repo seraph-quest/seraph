@@ -339,8 +339,11 @@ async def _persisted_result_binding(db, run, row):
             or any(authority.get(key) != value for key, value in expected.items()) or len(reservations) != 1):
         raise OpportunityError("assessment_restart_requires_readback")
     cost = reservations[0]
-    if (cost.state != "settled" or cost.contact_started_at is None or cost.actual_cost_microusd is None
-            or cost.actual_cost_microusd < 0 or cost.job_fencing_token != run.fencing_token
+    # The call must have completed; NEAR's price (or "not priced yet") never
+    # withholds the assessment (ADR-037, #1284).
+    if (cost.state not in {"settled", "unknown"} or cost.contact_started_at is None
+            or (cost.state == "settled" and (cost.actual_cost_microusd is None or cost.actual_cost_microusd < 0))
+            or cost.job_fencing_token != run.fencing_token
             or cost.operation_id != f"remote:opportunity:{row.id}" or cost.owner_id != SERVICE_PRINCIPAL
             or cost.goal_id != row.goal_id or cost.goal_revision != row.goal_revision):
         raise OpportunityError("assessment_restart_requires_readback")
@@ -580,9 +583,7 @@ async def _completion(row, goal, evidence, *, fence):
                 return await run_near_tee_vertical_call(call, priority=GpuPriority.REPORTS_RESEARCH_MEMORY,
                     before_contact=fresh_authority)
             except NearTeeError as exc:
-                if exc.code == "near_tee_cost_liability":
-                    raise
-                # Contact happened and NEAR billing settled it; nothing adopted.
+                # Contact happened; nothing adopted.
                 raise OpportunityError(exc.code) from exc
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
     profile = llm_runtime._provider_profile(profile_id)

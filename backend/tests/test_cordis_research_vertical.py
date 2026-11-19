@@ -71,10 +71,8 @@ class Fixture:
         return [method for method, _ in self.frames]
 
 
-# The NEAR TEE slot reserves its catalog-priced bound per request (the
-# catalog check requires >= 1711 micro-USD for this slot), so the programme's
-# inference budget funds that reserve; NEAR bills 2 micro-USD per request.
-_REQUEST_BOUND = 2_000
+# The NEAR TEE slot carries no amount (ADR-037, #1284); the programme keeps
+# its recorded allowance until #1284 part 2. NEAR bills 2 micro-USD per request.
 _PROGRAMME_BUDGET = 20_000
 
 
@@ -122,7 +120,7 @@ async def discovery(accounting_db, monkeypatch, fixture, *, package_root=None, h
     # ADR-035: research inference runs on the NEAR TEE text slot; the model is
     # the intercepted NEAR gateway (any other host fails the test).
     await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=research_gateway(fixture),
-                                    capabilities=("text",), request_cost_bound_microusd=_REQUEST_BOUND)
+                                    capabilities=("text",))
 
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):

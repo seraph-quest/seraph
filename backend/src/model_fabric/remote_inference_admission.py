@@ -22,7 +22,6 @@ from typing import Any, NoReturn, Protocol
 from .gpu_admission import (
     GPU_ADMISSION_SCHEMA_VERSION,
     GPU_ADMISSION_STATUSES,
-    GPU_OWNER_BUDGET_REASON,
     GPU_OWNER_CAPACITY_REASON,
     GpuAdmissionBroker,
     GpuAdmissionCapacityError,
@@ -32,7 +31,6 @@ from .gpu_admission import (
     GpuAdmissionIdentityError,
     GpuAdmissionLease,
     GpuAdmissionLeaseError,
-    GpuAdmissionOwnerBudgetError,
     GpuAdmissionOwnerCapacityError,
     GpuAdmissionOwnerRevokedError,
     GpuAdmissionReceipt,
@@ -52,7 +50,6 @@ REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING = 16
 REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT = 1
 REMOTE_INFERENCE_DEFAULT_RETRIES = 2
 REMOTE_INFERENCE_MAX_RETRIES = 2
-REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON = "owner_cost_unknown"
 REMOTE_INFERENCE_OWNER_REVOCATION_REASON = GPU_OWNER_REVOCATION_REASON
 
 
@@ -299,14 +296,13 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
     serial_gpu = False
     serial_remote_inference = True
     uncertain_on_callback_error = True
+    release_completed_uncertain_callbacks = True
 
     def __init__(
         self,
         *,
         max_queued: int = REMOTE_INFERENCE_DEFAULT_QUEUE,
         max_outstanding_per_owner: int | None = REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING,
-        max_owner_cost_microusd: int | None = None,
-        owner_budget_resolver: Callable[[str], int | None] | None = None,
         max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
         durable_accounting: bool = False,
         **kwargs: Any,
@@ -314,10 +310,8 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
         super().__init__(
             max_queued=max_queued,
             max_outstanding_per_owner=max_outstanding_per_owner,
-            max_owner_cost_microusd=max_owner_cost_microusd,
             **kwargs,
         )
-        self._owner_budget_resolver = owner_budget_resolver
         # False is only for isolated provider-free broker fixtures. The one
         # production instance always accounts; no server setting selects this.
         self.durable_accounting = durable_accounting
@@ -337,53 +331,26 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
         max_queued: int = REMOTE_INFERENCE_DEFAULT_QUEUE,
         max_inflight: int = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT,
         max_outstanding_per_owner: int | None = REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING,
-        max_owner_cost_microusd: int | None = None,
         max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
     ) -> None:
-        """Apply persisted OpenRouter limits to the process-local lane."""
+        """Apply persisted queue and concurrency bounds to the process-local lane."""
         if int(max_inflight) != REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT:
             raise ValueError("remote inference admission supports exactly one in-flight request")
         normalized_queue = int(max_queued)
         normalized_owner = (
             None if max_outstanding_per_owner is None else int(max_outstanding_per_owner)
         )
-        normalized_budget = (
-            None if max_owner_cost_microusd is None else int(max_owner_cost_microusd)
-        )
         if normalized_queue < 1:
             raise ValueError("max_queued must be positive")
         if normalized_owner is not None and normalized_owner < 1:
             raise ValueError("max_outstanding_per_owner must be positive")
-        if normalized_budget is not None and normalized_budget < 0:
-            raise ValueError("max_owner_cost_microusd must be non-negative")
         normalized_retries = self._validate_retry_limit(max_retries)
         with self._condition:
             self.max_queued = normalized_queue
             self.max_inflight = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT
             self.max_outstanding_per_owner = normalized_owner
-            self.max_owner_cost_microusd = normalized_budget
             self.max_retries = normalized_retries
             self._notify_all_locked()
-
-    def _effective_owner_budget(self, request: GpuAdmissionRequest) -> int | None:
-        """Use only a server-side broker/resolver budget as authority.
-
-        ``request.owner_budget_microusd`` can further narrow that authority,
-        but cannot create or widen a spend allowance when the trusted policy
-        source has not configured one.
-        """
-        configured = self.max_owner_cost_microusd
-        if self._owner_budget_resolver is not None:
-            resolved = self._owner_budget_resolver(request.owner_id)
-            if resolved is not None:
-                resolved = int(resolved)
-                if resolved < 0:
-                    raise ValueError("owner budget resolver returned a negative budget")
-                configured = resolved if configured is None else min(configured, resolved)
-        if configured is None:
-            return None
-        requested = request.owner_budget_microusd
-        return configured if requested is None else min(configured, requested)
 
     async def persist_receipt(
         self,
@@ -429,8 +396,7 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
         Queued operations are terminally cancelled before a provider callback
         can run.  An active operation is only marked for cooperative
         cancellation; because this broker treats callback outcomes as
-        uncertain, its lease remains blocked until the existing fenced
-        ``reconcile`` method settles the actual cost.  The operation is
+        uncertain, its lease is freed once that callback has returned.  The operation is
         intentionally scoped by owner identity and repeated revocations are
         idempotent for the same reason code.
         """
@@ -446,7 +412,6 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
         observed_at: float,
         reason_code: str,
         message: str,
-        budget_error: bool = False,
     ) -> NoReturn:
         operation = self._record_terminal_locked(
             request,
@@ -456,8 +421,7 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
         )
         self._last_degraded_reason = reason_code
         receipt = self._receipt_locked(operation)
-        error_type = GpuAdmissionOwnerBudgetError if budget_error else GpuAdmissionOwnerCapacityError
-        raise error_type(message, receipt=receipt)
+        raise GpuAdmissionOwnerCapacityError(message, receipt=receipt)
 
     def _validate_admission_locked(
         self,
@@ -468,9 +432,8 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
 
         This hook runs while the base broker condition is held. The usage
         snapshot and terminal rejection are therefore atomic with operation
-        identity admission. Unknown estimates are allowed only when no owner
-        spend budget is configured; the receipt exposes the outstanding
-        liability so an operator can reconcile it before setting a budget.
+        identity admission. Only the owner's outstanding request count is
+        bounded; no dollar amount is read (#1284).
         """
         usage = self._owner_usage_locked().get(request.owner_id, {})
         outstanding = int(usage.get("outstanding", 0))
@@ -482,27 +445,6 @@ class RemoteInferenceAdmissionBroker(DurableInferenceBrokerMixin, GpuAdmissionBr
                 message="remote inference owner outstanding limit is exhausted",
             )
 
-        budget = self._effective_owner_budget(request)
-        estimate = request.estimated_cost_microusd
-        if budget is None:
-            return
-        if estimate is None:
-            self._reject_owner_policy(
-                request,
-                observed_at=observed_at,
-                reason_code=REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON,
-                message="remote inference cost estimate is required for the configured owner budget",
-                budget_error=True,
-            )
-        reserved = int(usage.get("cost_reserved_microusd", 0))
-        if reserved + estimate > budget:
-            self._reject_owner_policy(
-                request,
-                observed_at=observed_at,
-                reason_code=GPU_OWNER_BUDGET_REASON,
-                message="remote inference owner spend budget is exhausted",
-                budget_error=True,
-            )
 
 
 # Compatibility aliases retain the original names while making this separate
@@ -514,7 +456,6 @@ RemoteInferenceAdmissionExpiredError = GpuAdmissionExpiredError
 RemoteInferenceAdmissionIdentityError = GpuAdmissionIdentityError
 RemoteInferenceAdmissionLease = GpuAdmissionLease
 RemoteInferenceAdmissionLeaseError = GpuAdmissionLeaseError
-RemoteInferenceAdmissionOwnerBudgetError = GpuAdmissionOwnerBudgetError
 RemoteInferenceAdmissionOwnerCapacityError = GpuAdmissionOwnerCapacityError
 RemoteInferenceAdmissionOwnerRevokedError = GpuAdmissionOwnerRevokedError
 RemoteInferenceAdmissionReceipt = GpuAdmissionReceipt
@@ -552,7 +493,6 @@ def configure_remote_inference_admission(
     max_queued: int = REMOTE_INFERENCE_DEFAULT_QUEUE,
     max_inflight: int = REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT,
     max_outstanding_per_owner: int | None = REMOTE_INFERENCE_DEFAULT_OWNER_OUTSTANDING,
-    max_owner_cost_microusd: int | None = None,
     max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
 ) -> None:
     """Apply canonical setup limits to the process-local remote lane."""
@@ -560,7 +500,6 @@ def configure_remote_inference_admission(
         max_queued=max_queued,
         max_inflight=max_inflight,
         max_outstanding_per_owner=max_outstanding_per_owner,
-        max_owner_cost_microusd=max_owner_cost_microusd,
         max_retries=max_retries,
     )
 
@@ -573,7 +512,6 @@ __all__ = [
     "REMOTE_INFERENCE_DEFAULT_MAX_INFLIGHT",
     "REMOTE_INFERENCE_DEFAULT_RETRIES",
     "REMOTE_INFERENCE_MAX_RETRIES",
-    "REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON",
     "REMOTE_INFERENCE_OWNER_REVOCATION_REASON",
     "GPU_OWNER_REVOCATION_REASON",
     "RemoteInferenceReceiptRepository",
@@ -596,7 +534,6 @@ __all__ = [
     "RemoteInferenceAdmissionIdentityError",
     "RemoteInferenceAdmissionLease",
     "RemoteInferenceAdmissionLeaseError",
-    "RemoteInferenceAdmissionOwnerBudgetError",
     "RemoteInferenceAdmissionOwnerCapacityError",
     "RemoteInferenceAdmissionOwnerRevokedError",
     "RemoteInferenceAdmissionReceipt",

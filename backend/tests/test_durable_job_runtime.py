@@ -451,10 +451,18 @@ def test_approval_resume_receipt_rechecks_current_authority_and_execution_contra
         now=datetime.now(timezone.utc),
     )
     assert validated["kind"] == "approval_resume"
+    # #1284: a declared budget is never compared; the recorded values are
+    # carried so the approval still matches the binding it was granted under.
+    other_budget = _validate_approval_resume_receipt(
+        run, {**receipt, "budget_microusd": 26}, now=datetime.now(timezone.utc))
+    assert other_budget["budget_microusd"] == 26
+    assert other_budget["budget_digest"] == receipt["budget_digest"]
     for field_name, changed_value in (
         ("authority_digest", "stale-authority"),
         ("goal_revision", 5),
-        ("budget_microusd", 26),
+        ("plan_revision", 3),
+        ("capability_version", "strategist-tick-v2"),
+        ("owner_principal_id", "service:other"),
     ):
         stale = dict(receipt)
         stale[field_name] = changed_value
@@ -2441,7 +2449,7 @@ async def test_expired_lease_transfer_requires_source_fence_and_increments_both_
 
 
 @pytest.mark.asyncio
-async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_retry(async_db):
+async def test_restart_recovery_keeps_unknown_effect_and_legacy_cost_liability_out_of_retry(async_db):
     admitted = await durable_job_repository.admit_job(
         _spec(job_id="job-743-unknown", dedupe_key="candidate-unknown")
     )
@@ -2531,6 +2539,8 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
         effect_id="cost-effect",
         effect_type="remote_inference_admission",
         adapter_idempotency_key="operation-cost",
+        target_path="remote-inference:operation-cost",
+        target_digest="target-cost",
         status="unknown",
         details={"unknown_cost_outstanding": True},
         owner="runner-cost",
@@ -2540,7 +2550,10 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
         now=datetime.now(timezone.utc) + timedelta(seconds=5)
     )
     cost_recovered = next(item for item in cost_recovery if item["job_id"] == cost_job["job_id"])
-    assert cost_recovered["status"] == "cost_liability"
+    # #1284: an unresolved remote call is an uncertain external effect, never
+    # replayed; an unknown charge no longer parks it in ``cost_liability``.
+    assert cost_recovered["status"] == "unknown_external_effect"
+    assert cost_recovered["receipt"]["recovery_state"] == "unknown_external_effect"
     with pytest.raises(DurableJobTransitionError, match="reconciliation"):
         await durable_job_repository.retry_job(
             cost_job["job_id"],
@@ -2555,20 +2568,8 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
                 "adapter_idempotency_key": "operation-cost",
             },
         )
-    with pytest.raises(DurableJobTransitionError, match="cost liability requires a settled receipt"):
-        await durable_job_repository.reconcile_external_effect(
-            cost_job["job_id"],
-            owner_kind="service",
-            owner_principal_id="service:strategist",
-            service_id="service:strategist",
-            reconciliation_receipt={
-                "effect_id": cost_effect["receipt"]["effect_id"],
-                "effect_type": "remote_inference_admission",
-                "status": "read_back",
-                "outcome": "absent",
-            },
-        )
-    settled = await durable_job_repository.reconcile_external_effect(
+    # Resolving the effect no longer needs a settled charge.
+    resolved = await durable_job_repository.reconcile_external_effect(
         cost_job["job_id"],
         owner_kind="service",
         owner_principal_id="service:strategist",
@@ -2576,12 +2577,57 @@ async def test_restart_recovery_keeps_unknown_effect_and_cost_liability_out_of_r
         reconciliation_receipt={
             "effect_id": cost_effect["receipt"]["effect_id"],
             "effect_type": "remote_inference_admission",
-            "status": "settled",
-            "actual_cost_microusd": 0,
-            "adapter_idempotency_key": "operation-cost",
+            "status": "read_back",
+            "target_path": "remote-inference:operation-cost",
+            "target_digest": "target-cost",
+            "outcome": "absent",
         },
     )
-    assert settled["status"] == "failed"
+    assert resolved["status"] == "failed"
+
+    # A legacy job already in ``cost_liability`` stays readable and out of retry.
+    legacy_job = await durable_job_repository.admit_job(
+        _spec(job_id="job-743-legacy-cost", dedupe_key="candidate-legacy-cost")
+    )
+    await durable_job_repository.queue_job(legacy_job["job_id"])
+    legacy_claimed = await durable_job_repository.claim_job(
+        legacy_job["job_id"], owner="runner-legacy-cost", lease_seconds=1
+    )
+    legacy_effect = await durable_job_repository.record_effect(
+        legacy_job["job_id"],
+        effect_id="legacy-cost-effect",
+        effect_type="remote_inference_admission",
+        adapter_idempotency_key="operation-legacy-cost",
+        status="unknown",
+        details={"unknown_cost_outstanding": True},
+        owner="runner-legacy-cost",
+        fencing_token=legacy_claimed["lease"]["fencing_token"],
+    )
+    await durable_job_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5)
+    )
+    async with async_db() as db:
+        await db.execute(
+            update(WorkflowRunState)
+            .where(WorkflowRunState.run_identity == legacy_job["job_id"])
+            .values(status="cost_liability")
+        )
+    assert (await durable_job_repository.get_job(legacy_job["job_id"]))["status"] == "cost_liability"
+    with pytest.raises(DurableJobTransitionError, match="reconciliation"):
+        await durable_job_repository.retry_job(
+            legacy_job["job_id"],
+            owner_kind="service",
+            owner_principal_id="service:strategist",
+            service_id="service:strategist",
+            reconciliation_receipt={
+                "effect_id": legacy_effect["receipt"]["effect_id"],
+                "effect_type": "remote_inference_admission",
+                "status": "settled",
+                "actual_cost_microusd": 0,
+                "adapter_idempotency_key": "operation-legacy-cost",
+            },
+        )
+    assert (await durable_job_repository.get_job(legacy_job["job_id"]))["status"] == "cost_liability"
 
 
 @pytest.mark.asyncio

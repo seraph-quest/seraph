@@ -13,8 +13,6 @@ from sqlalchemy import select
 from src.auth.middleware import OperatorAuthMiddleware
 from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkflowRunState, InferenceCostReservation, WorkBoardStatus
 from src.work_board.dispatcher import WorkBoardDispatcher
-from src.work_board.repository import WorkBoardRepository, BoardError
-from src.work_board.contracts import WorkBoardOwner
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError
 from tests.test_inference_accounting import accounting_db
@@ -133,36 +131,45 @@ def no_answer(task, run):
 
 
 @pytest.mark.asyncio
-async def test_actual_overrun_retains_full_charge_without_answer(actual_billing_journey):
+async def test_actual_large_charge_settles_and_delivers_the_answer(actual_billing_journey):
+    # #1284: a charge above the legacy stored bound is recorded and the answer
+    # is delivered; nothing is withheld or latched for an amount.
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     controls["nano"] = 2_000_001
     task_id, _owner = await create_actual_near_task(client, factory)
     await drive(dispatcher)
     task, run, row = await state(factory, task_id)
-    no_answer(task, run)
-    assert row.state == "settled" and row.bound_microusd == 1000 and row.actual_cost_microusd == 2001
+    assert task.status is WorkBoardStatus.review and run.status == "succeeded"
+    assert row.state == "settled" and row.actual_cost_microusd == 2001 and row.recovery_reason is None
     history = json.loads(row.evidence_json)
     assert history[-1]["provenance"] == "near_billing_costs" and history[-1]["cost_nano_usd"] == 2_000_001
     snapshot = await jobs.inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 2001 and snapshot["overrun_max_cost_microusd"] == 2001
-    assert snapshot["status"] == "blocked" and snapshot["reason_code"] == "provider_charge_exceeded_reservation"
-    assert (await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")).status_code == 409
+    assert snapshot["spent_microusd"] == 2001
+    assert snapshot["status"] == "ready" and snapshot["reason_code"] is None
+    output = await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")
+    assert output.status_code == 200 and output.json()["text"] == "Unreleased private answer", output.text
     await drive(dispatcher)
     assert controls["calls"].count(("cloud-api.near.ai", "/v1/chat/completions")) == 1
 
 
 @pytest.mark.asyncio
-async def test_manual_unknown_settlement_reconciles_only_debt_after_reopen(actual_billing_journey):
+async def test_unpriced_answer_is_delivered_and_manual_charge_record_survives_reopen(actual_billing_journey):
+    # #1284: billing that reports nothing leaves the row "not priced yet"; the
+    # answer is still delivered and recording the charge later changes only
+    # the spend history, never the job or the provider contact count.
     client, factory, jobs, dispatcher, controls, engine = actual_billing_journey
     controls["missing"] = True
     task_id, _owner = await create_actual_near_task(client, factory)
     await drive(dispatcher)
     task, run, row = await state(factory, task_id)
-    no_answer(task, run)
+    assert task.status is WorkBoardStatus.review and run.status == "succeeded", (task.block_reason, run.status, run.failure_reason, row.state, row.recovery_reason)
     assert row.state == "unknown" and row.actual_cost_microusd is None
+    assert row.recovery_reason == "provider_cost_readback_required"
+    output = await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")
+    assert output.status_code == 200 and output.json()["text"] == "Unreleased private answer", output.text
     original = (run.run_identity, run.deadline_at, row.operation_id, row.bound_microusd)
     snapshot = await jobs.inference_accounting_snapshot()
-    assert snapshot["unknown_microusd"] == 1000 and snapshot["remaining_microusd"] == 24000
+    assert snapshot["unpriced_requests"] == 1 and snapshot["spent_microusd"] == 0
     await engine.dispose()
     fresh_jobs = DurableJobRepository()
     await fresh_jobs.recover_inference_accounting(job_id=run.run_identity)
@@ -170,43 +177,26 @@ async def test_manual_unknown_settlement_reconciles_only_debt_after_reopen(actua
     await drive(fresh_dispatcher)
     task, run, row = await state(factory, task_id)
     assert (run.run_identity, run.deadline_at, row.operation_id, row.bound_microusd) == original
-    assert (await fresh_jobs.inference_accounting_snapshot())["unknown_microusd"] == 1000
+    assert run.status == "succeeded"
+    assert (await fresh_jobs.inference_accounting_snapshot())["unpriced_requests"] == 1
     settled = await client.post("/api/settings/model-fabric/accounting/settle", json={
         "operation_id": row.operation_id, "job_id": run.run_identity, "expected_revision": row.revision,
         "actual_cost_microusd": 7, "evidence_digest": hashlib.sha256(b"manual statement fixture").hexdigest(),
         "idempotency_key": str(uuid4())})
     assert settled.status_code == 200, settled.text
-    assert settled.json()['lane_recovery'] == {
-        'status': 'reconciled', 'reason_code': 'settled_liability_reconciled'}
     task, run, row = await state(factory, task_id)
-    no_answer(task, run)
+    assert task.status is WorkBoardStatus.review and run.status == "succeeded"
     assert row.state == "settled" and row.actual_cost_microusd == 7
     assert json.loads(row.evidence_json)[-1]["provenance"] == "manual_externally_unverified"
     assert json.loads(row.evidence_json)[-1]["provider_charge_verified"] is False
-    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
-    original_broker_receipt = get_remote_inference_admission_broker().receipt_for(row.operation_id)
-    assert original_broker_receipt.status == 'failed' and original_broker_receipt.callback_completed
-    assert original_broker_receipt.active_operation_id is None and not original_broker_receipt.reconciliation_required
-    from src.auth.service import authenticate_token
-    from config.settings import settings
-    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    replay = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
-        operation_id=row.operation_id, job_id=run.run_identity, expected_revision=row.revision, operator=operator)
-    assert replay == {'status': 'reconciled', 'reason_code': 'already_reconciled'}
-    async with factory.accounting_sessions() as db:
-        with pytest.raises(BoardError) as denied:
-            await WorkBoardRepository().retry_task(db, WorkBoardOwner(
-                principal_id=_owner["principal_id"], session_id=_owner["session_id"]),
-                task_id, expected_revision=task.task_revision)
-        assert denied.value.code == "attempt_limit"
-    assert (await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")).status_code == 409
+    after = await fresh_jobs.inference_accounting_snapshot()
+    assert after["unpriced_requests"] == 0 and after["spent_microusd"] == 7
+    assert (await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")).status_code == 200
     await drive(fresh_dispatcher)
     assert controls["calls"].count(("cloud-api.near.ai", "/v1/chat/completions")) == 1
-    assert controls["calls"].count(("cloud-api.near.ai", "/v1/billing/costs")) == 2
     task, run, row = await state(factory, task_id)
     assert (run.run_identity, run.deadline_at, row.operation_id, row.bound_microusd) == original
-    # A separately requested question is a new admission, never recovery of old text.
-    assert run.status == 'blocked'
+    # A separately requested question is a new admission, never a replay of old text.
     goal = await client.post('/api/goals', json={'title': 'Fresh question after liability reconciliation',
         'admission_budget': {'reviewed_grant': True, 'grant_id': 'fresh-question-explicit-review',
             'max_outstanding_jobs': 1, 'max_attempts': 1, 'max_runtime_seconds': 120}})
@@ -233,10 +223,55 @@ async def test_manual_unknown_settlement_reconciles_only_debt_after_reopen(actua
     assert new_row.actual_cost_microusd == 2
     output = await client.get(f'/api/work-board/tasks/{fresh_id}/near-text/output')
     assert output.status_code == 200 and output.json()['text'] == 'New explicitly admitted answer', output.text
-    assert (await client.get(f'/api/work-board/tasks/{task_id}/near-text/output')).status_code == 409
+    assert (await client.get(f'/api/work-board/tasks/{task_id}/near-text/output')).json()['text'] == 'Unreleased private answer'
     old_task, old_run, old_row = await state(factory, task_id)
     assert (old_run.run_identity, old_run.deadline_at, old_row.operation_id, old_row.bound_microusd) == original
     assert old_row.actual_cost_microusd == 7 and controls['calls'].count(('cloud-api.near.ai', '/v1/chat/completions')) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['wrong_revision', 'wrong_job', 'revoked_root', 'current'])
+async def test_recording_a_charge_keeps_job_revision_and_session_checks(actual_billing_journey, case):
+    # Replaces PR 1's lane-recovery boundary test: #1284 part 2 deletes
+    # reconcile_settled_near_operation (nothing holds the lane). The remaining
+    # operator path, recording a charge, still refuses a foreign job, a stale
+    # revision and a revoked session, and never touches the delivered answer,
+    # the job or the provider contact count.
+    from src.auth.service import authenticate_token, revoke_session
+    from config.settings import settings
+    client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
+    controls['missing'] = True
+    task_id, _owner = await create_actual_near_task(client, factory)
+    await drive(dispatcher)
+    task, run, row = await state(factory, task_id)
+    assert task.status is WorkBoardStatus.review and run.status == 'succeeded' and row.state == 'unknown'
+    job_id, revision = run.run_identity, row.revision
+    if case == 'wrong_job':
+        job_id = 'foreign-native-job'
+    elif case == 'wrong_revision':
+        revision += 1
+    elif case == 'revoked_root':
+        operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
+        await revoke_session(operator.session_id)
+    settled = await client.post('/api/settings/model-fabric/accounting/settle', json={
+        'operation_id': row.operation_id, 'job_id': job_id, 'expected_revision': revision,
+        'actual_cost_microusd': 7, 'evidence_digest': hashlib.sha256(b'explicit operator statement').hexdigest(),
+        'idempotency_key': str(uuid4())})
+    expected = {'wrong_revision': (409, 'accounting_settlement_revision_changed'),
+        'wrong_job': (409, 'accounting_job_binding_invalid')}
+    final_task, final_run, final_row = await state(factory, task_id)
+    if case == 'current':
+        assert settled.status_code == 200 and settled.json()['status'] == 'settled', settled.text
+        assert 'lane_recovery' not in settled.json()
+        assert final_row.actual_cost_microusd == 7
+    else:
+        if case in expected:
+            assert (settled.status_code, settled.json()['detail']) == expected[case], settled.text
+        else:
+            assert settled.status_code in {401, 403}, settled.text
+        assert final_row.revision == row.revision and final_row.actual_cost_microusd is None
+    assert final_run.status == 'succeeded' and final_run.revision == run.revision
+    assert controls['calls'].count(('cloud-api.near.ai', '/v1/chat/completions')) == 1
 
 
 @pytest.mark.asyncio
@@ -253,7 +288,7 @@ async def test_disable_after_post_still_settles_original_charge_without_adoption
     no_answer(task, run)
     assert row.state == "settled" and row.actual_cost_microusd == 2
     assert json.loads(row.evidence_json)[-1]["provider_charge_verified"] is True
-    assert (await jobs.inference_accounting_snapshot())["committed_microusd"] == 2
+    assert (await jobs.inference_accounting_snapshot())["spent_microusd"] == 2
     await drive(dispatcher)
     assert controls["calls"] == [("cloud-api.near.ai", "/v1/chat/completions"), ("cloud-api.near.ai", "/v1/billing/costs")]
     assert (await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")).status_code == 409
@@ -274,7 +309,7 @@ async def test_foreign_sealed_evidence_cannot_rewrite_actual_near_settlement(act
         await jobs.settle_inference_cost(row.operation_id, near_billing_evidence=evidence)
     after = await jobs.inference_accounting_snapshot()
     assert after["ledger_digest"] == before["ledger_digest"] and after["revision"] == before["revision"]
-    assert after["committed_microusd"] == 2
+    assert after["spent_microusd"] == 2
     assert (await client.get(f"/api/work-board/tasks/{task_id}/near-text/output")).status_code == 200
     assert len(controls["calls"]) == 2
 
@@ -332,9 +367,8 @@ async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledg
         assert task.status is WorkBoardStatus.review and run.status == "succeeded" and row.actual_cost_microusd == 2
         assert controls["order"] == ["or-1", "near", "or-2"] and controls["peak"] == 1
         snapshot = await jobs.inference_accounting_snapshot()
-        assert snapshot["operation_count"] == 3 and snapshot["committed_microusd"] == 8
-        assert snapshot["unknown_microusd"] == 0 and snapshot["reserved_microusd"] == 0
-        assert snapshot["ceiling_microusd"] == 25000 and snapshot["accounting_continuity_verified"] is True
+        assert snapshot["operation_count"] == 3 and snapshot["spent_microusd"] == 8
+        assert snapshot["unpriced_requests"] == 0 and snapshot["accounting_continuity_verified"] is True
     finally:
         controls["or_release"].set()
         for worker in workers:
@@ -344,74 +378,7 @@ async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledg
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('case', ['unsettled', 'wrong_revision', 'wrong_job', 'foreign_root', 'revoked_root', 'cold_restart', 'fence_race'])
-async def test_real_near_recovery_rejects_unproved_release(actual_billing_journey, monkeypatch, case):
-    from config.settings import settings
-    from src.auth.service import authenticate_token, revoke_session
-    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker, RemoteInferenceAdmissionBroker
-    client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
-    controls['missing'] = True
-    task_id, _owner = await create_actual_near_task(client, factory)
-    await drive(dispatcher)
-    task, run, row = await state(factory, task_id)
-    no_answer(task, run)
-    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    original_receipt = get_remote_inference_admission_broker().receipt_for(row.operation_id)
-    assert original_receipt.callback_completed and original_receipt.status == 'blocked'
-    assert original_receipt.active_operation_id == row.operation_id
-    # Exercise the actual durable settlement boundary before its new postcommit bridge.
-    if case not in ('unsettled', 'wrong_revision', 'wrong_job'):
-        await jobs.settle_inference_cost(operation_id=row.operation_id, job_id=run.run_identity,
-            expected_revision=row.revision, actual_cost_microusd=7,
-            evidence_digest=hashlib.sha256(b'explicit manual negative-boundary statement').hexdigest(),
-            idempotency_key=str(uuid4()), operator_id=operator.principal.principal_id,
-            reason='explicit_operator_account_settlement')
-        task, run, row = await state(factory, task_id)
-        assert row.state == 'settled' and row.actual_cost_microusd == 7
-    selector_job, selector_revision = run.run_identity, row.revision
-    selected_broker = get_remote_inference_admission_broker()
-    if case == 'wrong_job':
-        selector_job = 'foreign-native-job'
-    elif case == 'wrong_revision':
-        selector_revision += 1
-    elif case == 'foreign_root':
-        login = await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret', 'start_new_scope': True})
-        assert login.status_code == 200, login.text
-        operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-        assert operator.principal.principal_id != row.owner_id
-    elif case == 'revoked_root':
-        await revoke_session(operator.session_id)
-    elif case == 'cold_restart':
-        selected_broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    elif case == 'fence_race':
-        original_reconcile = selected_broker.reconcile
-        async def competing_reconciliation(*args, **kwargs):
-            # An actual first fenced reconciliation wins after the helper staged
-            # its genuine receipt. Its stale second CAS must remain deferred.
-            await original_reconcile(*args, **kwargs)
-            return await original_reconcile(*args, **kwargs)
-        monkeypatch.setattr(selected_broker, 'reconcile', competing_reconciliation)
-    result = await selected_broker.reconcile_settled_near_operation(operation_id=row.operation_id,
-        job_id=selector_job, expected_revision=selector_revision, operator=operator)
-    expected = {'unsettled': 'settled_charge_required', 'wrong_revision': 'settled_operation_changed',
-        'wrong_job': 'settled_operation_unavailable', 'foreign_root': 'original_owner_required',
-        'revoked_root': 'original_root_inactive', 'cold_restart': 'no_local_operation',
-        'fence_race': 'broker_reconciliation_deferred'}
-    assert result == {'status': 'absent' if case == 'cold_restart' else 'deferred', 'reason_code': expected[case]}
-    current = get_remote_inference_admission_broker().receipt_for(row.operation_id)
-    if case == 'fence_race':
-        assert current.status == 'failed' and current.active_operation_id is None
-    else:
-        assert current.status == 'blocked' and current.active_operation_id == row.operation_id
-    assert current.fencing_token == original_receipt.fencing_token
-    assert controls['calls'].count(('cloud-api.near.ai', '/v1/chat/completions')) == 1
-    final_task, final_run, final_row = await state(factory, task_id)
-    no_answer(final_task, final_run)
-    assert final_row.actual_cost_microusd == row.actual_cost_microusd
-
-
-@pytest.mark.asyncio
-async def test_manual_debt_commit_cannot_release_physically_running_callback(actual_billing_journey):
+async def test_manual_charge_record_never_releases_physically_running_callback(actual_billing_journey):
     from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     task_id, _owner = await create_actual_near_task(client, factory)
@@ -431,7 +398,8 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
             'actual_cost_microusd': 7, 'evidence_digest': hashlib.sha256(b'explicit pending-callback statement').hexdigest(),
             'idempotency_key': str(uuid4())})
         assert settled.status_code == 200 and settled.json()['status'] == 'settled', settled.text
-        assert settled.json()['lane_recovery'] == {'status': 'deferred', 'reason_code': 'provider_callback_running'}
+        # #1284: a charge record is billing history only; it never touches the lane.
+        assert 'lane_recovery' not in settled.json()
         current = get_remote_inference_admission_broker().receipt_for(row.operation_id)
         assert current.status == 'running' and not current.callback_completed
         assert current.active_operation_id == row.operation_id and current.fencing_token == before.fencing_token
@@ -447,31 +415,6 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
         if not worker.done():
             worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
-
-
-@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger
-@pytest.mark.asyncio
-async def test_near_lane_recovery_cannot_reconcile_real_openrouter_operation(actual_billing_journey):
-    from config.settings import settings
-    from src.auth.service import authenticate_token
-    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
-    client, factory, jobs, _dispatcher, _controls, _engine = actual_billing_journey
-    assert (await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret'})).status_code == 200
-    saved = await client.put('/api/settings/model-fabric', json={'expected_policy_revision': 1,
-        'openrouter_setup': _v2_setup_payload(api_key='private-intercepted-or-key')})
-    assert saved.status_code == 200, saved.text
-    canary = await client.post('/api/settings/model-fabric/canary', json={
-        'profile_id': 'openrouter.text', 'capability': 'text', 'timeout_seconds': 45})
-    assert canary.status_code == 200 and canary.json()['outcome'] == 'passed', canary.text
-    snapshot = await jobs.inference_accounting_snapshot()
-    assert len(snapshot['operations']) == 1
-    row = snapshot['operations'][0]
-    operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    result = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
-        operation_id=row['operation_id'], job_id=row['job_id'], expected_revision=row['revision'], operator=operator)
-    assert result == {'status': 'deferred', 'reason_code': 'settled_operation_changed'}
-    after = await jobs.inference_accounting_snapshot()
-    assert after['ledger_digest'] == snapshot['ledger_digest'] and after['committed_microusd'] == 3
 
 
 @pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger
@@ -564,8 +507,8 @@ async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority
         task, run, row = await state(factory, task_id)
         assert task.status is WorkBoardStatus.review and run.status == 'succeeded' and row.actual_cost_microusd == 2
         snapshot = await jobs.inference_accounting_snapshot()
-        assert snapshot['operation_count'] == 7 and snapshot['committed_microusd'] == 20
-        assert snapshot['unknown_microusd'] == snapshot['reserved_microusd'] == 0
+        assert snapshot['operation_count'] == 7 and snapshot['spent_microusd'] == 20
+        assert snapshot['unpriced_requests'] == 0
     finally:
         controls['or_release'].set()
         for worker in workers:

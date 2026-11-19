@@ -98,8 +98,8 @@ def test_reviewed_method_projection_excludes_private_parameters_and_memory_bindi
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changes,reason", [
     ({"inference_egress_acknowledged": False}, "general_task_planning_consent_required"),
-    ({"limits": TaskLimits(max_cost_microusd=0)}, "general_task_planning_budget_required"),
-    ({"limits": TaskLimits(max_cost_microusd=500, max_inference_calls=0)}, "general_task_planning_budget_required"),
+    # ADR-037 (#1284): planning needs one call, never a dollar allowance.
+    ({"limits": TaskLimits(max_inference_calls=0)}, "general_task_planning_call_required"),
 ])
 async def test_missing_authority_denies_before_policy_and_contact(changes, reason):
     with pytest.raises(BoardError) as error:
@@ -126,7 +126,7 @@ async def prepare(accounting_db, monkeypatch, *, existing_owner=None):
     configured = replace(configured, egress_revision=2)
     write_model_fabric_configuration(configured)
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+    await jobs.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     use_inference_broker(monkeypatch, broker)
     if existing_owner is None:
@@ -214,8 +214,8 @@ async def test_real_serial_broker_records_planning_contact_without_task_executio
         await propose(accounting_db, owner, task_input(intent="Changed unpublished intent must not renew the allowance"))
     assert len(calls) == 1
     snapshot = await jobs.inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 0
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["spent_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 0
     assert snapshot["operations"][0]["state"] == "settled"
     assert snapshot["operations"][0]["runtime_path"] == "general_task_planner"
     from src.work_board.general_task_proposal import group_entry, proposal_provenance
@@ -231,16 +231,6 @@ async def test_real_serial_broker_records_planning_contact_without_task_executio
         assert len(roots) == 1
         assert roots[0].job_kind == "model_inference_ephemeral_v1"
         assert roots[0].status == "succeeded"
-
-
-@pytest.mark.asyncio
-async def test_finite_operator_limit_cannot_lower_actual_reserve(accounting_db, monkeypatch):
-    jobs, owner = await prepare(accounting_db, monkeypatch)
-    with pytest.raises(BoardError) as error:
-        await GeneralTaskPlanner().propose(None, owner,
-            task_input(limits=TaskLimits(max_cost_microusd=99)), [descriptor()], 1, "intent")
-    assert error.value.code == "general_task_planning_budget_insufficient"
-    assert (await jobs.inference_accounting_snapshot())["operations"] == []
 
 
 @pytest.mark.asyncio

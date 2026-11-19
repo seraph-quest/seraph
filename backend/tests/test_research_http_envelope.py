@@ -80,7 +80,7 @@ async def test_bounded_research_http_positive_has_one_actual_post(monkeypatch):
 async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db, monkeypatch, kind, fake_clock):
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     headers = None
     status = 200
     stream = ResponseStream(b"x" * (96 * 1024) if kind == "oversized" else b"{}")
@@ -131,7 +131,7 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
         assert 0 < stream.yielded < 12 * 1024
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
-    assert snapshot["unknown_microusd"] == 100
+    assert snapshot["unpriced_requests"] == 1
     row = snapshot["operations"][0]
     assert row["state"] == "unknown" and row["contact_started_at"] is not None
     assert row["actual_cost_microusd"] is None

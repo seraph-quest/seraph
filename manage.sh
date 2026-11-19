@@ -16,6 +16,8 @@
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
+#   ./manage.sh -e dev local identity|workspace-status - Local accounting binding and lifecycle receipts.
+#   ./manage.sh -e dev local accounting-rebind --from-root /prior/root --confirm - Rebind local accounting after a workspace root move (stack stopped).
 #   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed Cordis host (goal research).
 #   ./manage.sh -e dev composition dump [--node /absolute/node] - Read-only, secret-free composition dump.
 #   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
@@ -32,7 +34,6 @@
 #   ./manage.sh -e prod backup          - Create a verified workspace archive.
 #   ./manage.sh -e prod accounting-reconcile --confirm - Repair a retained accounting commit checkpoint.
 #   ./manage.sh -e prod accounting-reconcile --policy --confirm - Recover provider policy revoked.
-#   ./manage.sh -e prod accounting-reconcile --period YYYY-MM --expected-revision N --confirm - Review exact current UTC month.
 #   ./manage.sh -e prod accounting-rebind --from-root /prior/root --confirm - Retain deployment accounting before root adoption.
 #   ./manage.sh -e prod restore --archive <archive> --confirm
 #   ./manage.sh -e prod status          - Show the durable lifecycle result.
@@ -76,6 +77,7 @@ function display_help() {
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
+    echo "          Local workspace lifecycle: identity, workspace-status, accounting-rebind --from-root <prior root> --confirm."
     echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. No dependency installation."
     echo "  composition dump  Read-only, secret-free dump of the profile, bundles, patch rows, domain owners, epochs, digests and pins (dev only)."
     echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
@@ -89,6 +91,8 @@ function display_help() {
     echo "  $PROG_NAME -e dev local up"
     echo "  $PROG_NAME -e dev local run"
     echo "  $PROG_NAME -e dev local status"
+    echo "  $PROG_NAME -e dev local identity"
+    echo "  $PROG_NAME -e dev local accounting-rebind --from-root /absolute/prior/root --confirm"
     echo "  $PROG_NAME -e dev daemon start"
     echo "  $PROG_NAME -e dev daemon status"
     echo "  $PROG_NAME -e dev daemon logs"
@@ -623,21 +627,31 @@ function proxy_logs() {
 }
 
 # --- Production workspace lifecycle ---
+# The dependency-free CLI resolves BACKEND_DATA_PATH_PROD on the host, verifies
+# the one canonical owner, and keeps backup/restore sidecars next to that bind.
+# It deliberately does not start Docker or contact a provider. The first
+# argument is the interpreter; production keeps the host python3.
+function run_workspace_cli() {
+    local interpreter="$1"
+    shift
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
+        "$interpreter" -B "$SCRIPT_DIR/backend/workspace_cli.py" \
+        --base-dir "$SCRIPT_DIR" "$@"
+}
+
 function production_workspace_lifecycle() {
     local lifecycle_command="$1"
     shift
     if [ "$ENV" != "prod" ]; then
         echo "Error: production workspace lifecycle commands are production-only." >&2
+        if [ "$lifecycle_command" = "identity" ] || [ "$lifecycle_command" = "status" ] || [ "$lifecycle_command" = "accounting-rebind" ]; then
+            local local_command="$lifecycle_command"
+            [ "$local_command" = "status" ] && local_command="workspace-status"
+            echo "For the managed local stack use '$PROG_NAME -e $ENV local $local_command'." >&2
+        fi
         return 1
     fi
-
-    # The dependency-free CLI resolves BACKEND_DATA_PATH_PROD on the host,
-    # verifies the one canonical owner, and keeps backup/restore sidecars next
-    # to that bind. It deliberately does not start Docker or contact a
-    # provider.
-    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 -B "$SCRIPT_DIR/backend/workspace_cli.py" \
-        --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
+    run_workspace_cli python3 "$lifecycle_command" "$@"
 }
 
 function refresh_production_bind_identity() {
@@ -646,11 +660,7 @@ function refresh_production_bind_identity() {
     # every managed production start so the container check remains strict
     # without leaving operators to edit a stale env value by hand.
     local identity_json identity
-    if ! identity_json=$(
-        PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
-            python3 -B "$SCRIPT_DIR/backend/workspace_cli.py" \
-            --base-dir "$SCRIPT_DIR" identity
-    ); then
+    if ! identity_json=$(run_workspace_cli python3 identity); then
         echo "Error: unable to derive the production bind identity; workspace startup is blocked." >&2
         return 1
     fi
@@ -689,6 +699,72 @@ function reject_prod_local_stack() {
     return 0
 }
 
+# --- Local workspace lifecycle (#1277) ---
+# The managed local stack has no Docker bind, so the lifecycle CLI is pointed
+# at LOCAL_WORKSPACE_DIR and the descriptor exported in
+# SERAPH_WORKSPACE_LIFECYCLE_PATH, both resolved once by
+# resolve_local_workspace_paths exactly as `local up` uses them. The backend's
+# own interpreter runs it (like the Cordis CLI), falling back to python3.
+function local_workspace_cli() {
+    local interpreter
+    interpreter="$(cordis_cli_python)"
+    BACKEND_DATA_PATH_PROD="$LOCAL_WORKSPACE_DIR" WORKSPACE_DIR="$LOCAL_WORKSPACE_DIR" \
+        SERAPH_WORKSPACE_LIFECYCLE_PATH="$SERAPH_WORKSPACE_LIFECYCLE_PATH" \
+        run_workspace_cli "$interpreter" "$@"
+}
+
+function local_accounting_rebind_command() {
+    printf '%s\n' "$PROG_NAME -e $ENV local accounting-rebind --from-root /absolute/prior/root --confirm"
+}
+
+# Reads a redacted identity receipt on stdin and, when the accounting
+# descriptor is bound to a different root, names the recovery command.
+function print_local_accounting_binding_hint() {
+    local receipt reason
+    receipt="$(cat)"
+    reason="$(printf '%s' "$receipt" | sed -n 's/.*"accounting_continuity_reason_code": "\([a-z_]*\)".*/\1/p')"
+    if [ "$reason" = "accounting_deployment_binding_unavailable" ]; then
+        echo "Accounting continuity blocked (accounting_deployment_binding_unavailable): the deployment descriptor is bound to a different workspace root than $LOCAL_WORKSPACE_DIR; inference stays off until you rebind and give your OK again, so a revoked consent cannot come back with a moved or restored workspace." >&2
+        echo "  Fix: if the workspace root moved, run '$PROG_NAME -e $ENV local down', then '$(local_accounting_rebind_command)', then '$PROG_NAME -e $ENV local up' and re-consent to provider policy in Settings." >&2
+    fi
+}
+
+function local_workspace_lifecycle() {
+    local lifecycle_command="$1"
+    shift
+    if ! reject_prod_local_stack; then
+        return 1
+    fi
+    if [ "$lifecycle_command" != "status" ]; then
+        # identity prepares the lifecycle descriptor and accounting-rebind
+        # rewrites it. The local backend does not hold the maintenance lease,
+        # so refuse while any part of it is still up.
+        local backend_state
+        backend_state="$(service_readiness "$LOCAL_BACKEND_PID_FILE" "$LOCAL_BACKEND_PORT" backend)"
+        if [ "$backend_state" != "stopped" ]; then
+            echo "Error: the local backend is running ($backend_state); stop it with '$PROG_NAME -e $ENV local down' before 'local $lifecycle_command'." >&2
+            return 1
+        fi
+    fi
+    local receipt status=0
+    receipt="$(local_workspace_cli "$lifecycle_command" "$@")" || status=$?
+    printf '%s\n' "$receipt"
+    if [ "$lifecycle_command" = "identity" ]; then
+        printf '%s' "$receipt" | print_local_accounting_binding_hint
+    elif [ "$lifecycle_command" = "accounting-rebind" ] && [ "$status" -eq 0 ]; then
+        echo "Accounting rebound: spend history was retained and provider policy was revoked. Start with '$PROG_NAME -e $ENV local up', then give your OK again in Settings before any inference." >&2
+    fi
+    return "$status"
+}
+
+function check_local_accounting_binding() {
+    # Boot-time hint only: startup continues either way and inference stays
+    # off (a consent fence) by the backend's own continuity check.
+    local receipt
+    receipt="$(local_workspace_cli identity 2>/dev/null)" || return 0
+    printf '%s' "$receipt" | print_local_accounting_binding_hint
+}
+
 function start_local_backend() {
     python3 -B "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
     if local_backend_is_running; then
@@ -707,7 +783,8 @@ function start_local_backend() {
     mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
     PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -B -c \
         'import sys; from pathlib import Path; from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory; prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(sys.argv[1]).resolve()))' \
-        "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; billable inference remains blocked." >&2
+        "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; inference stays off until the workspace binding is restored." >&2
+    check_local_accounting_binding
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
@@ -785,7 +862,7 @@ function prepare_local_cordis() {
         node_args=(--node "$CORDIS_NODE_PATH")
     fi
     if status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
-        echo "Cordis research runtime: package available (live readiness: Settings > Cordis runtime host)"
+        echo "Cordis research runtime: package available (live readiness: Settings > Model > Advanced and diagnostics > Cordis runtime host)"
         return 0
     fi
     reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
@@ -902,6 +979,22 @@ function local_run() {
     local_logs all
 }
 
+# The one resolution of the local workspace and its lifecycle descriptor. `local
+# up` and the local lifecycle commands both read the values this sets (#1277).
+function resolve_local_workspace_paths() {
+    export SERAPH_WORKSPACE_LIFECYCLE_PATH="$SCRIPT_DIR/docker-data/$ENV/workspace-lifecycle"
+    SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"
+    if [ "$COMMAND" = "local" ] || [ "$COMMAND" = "composition" ]; then
+        # `composition dump` reads the same workspace the managed local stack uses.
+        LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"
+    else
+        LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}}"
+    fi
+    if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
+        LOCAL_WORKSPACE_DIR="$SCRIPT_DIR/$LOCAL_WORKSPACE_DIR"
+    fi
+}
+
 # Physical path of the system temp base.  On macOS /tmp is a symlink to
 # /private/tmp and the backend rejects symlinked runtime roots, so built-in
 # defaults are derived from the resolved directory.  Explicitly configured
@@ -989,23 +1082,13 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
-export SERAPH_WORKSPACE_LIFECYCLE_PATH="$SCRIPT_DIR/docker-data/$ENV/workspace-lifecycle"
 if [ "$TRACE_WAS_ENABLED" = true ]; then
     set -x
 fi
 
 LOCAL_BACKEND_PORT="${LOCAL_BACKEND_PORT:-8004}"
 LOCAL_FRONTEND_PORT="${LOCAL_FRONTEND_PORT:-3001}"
-SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"
-if [ "$COMMAND" = "local" ] || [ "$COMMAND" = "composition" ]; then
-    # `composition dump` reads the same workspace the managed local stack uses.
-    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"
-else
-    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}}"
-fi
-if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
-    LOCAL_WORKSPACE_DIR="$SCRIPT_DIR/$LOCAL_WORKSPACE_DIR"
-fi
+resolve_local_workspace_paths
 LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-logs}"
 LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/uv-cache}"
 LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}}"
@@ -1070,8 +1153,16 @@ if [ "$COMMAND" = "local" ]; then
             shift || true
             local_logs "${1:-all}" || LOCAL_EXIT_STATUS=$?
             ;;
+        identity|accounting-rebind)
+            shift || true
+            local_workspace_lifecycle "$LOCAL_SUB" "$@" || LOCAL_EXIT_STATUS=$?
+            ;;
+        workspace-status)
+            shift || true
+            local_workspace_lifecycle status "$@" || LOCAL_EXIT_STATUS=$?
+            ;;
         *)
-            error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run"
+            error_exit "Unknown local subcommand '$LOCAL_SUB'. Use: up, down, status, logs, run, identity, workspace-status, accounting-rebind"
             ;;
     esac
     exit "$LOCAL_EXIT_STATUS"

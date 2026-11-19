@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -74,8 +75,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     accounting = subparsers.add_parser("accounting-reconcile", help="repair one retained accounting commit checkpoint under maintenance")
     accounting.add_argument("--confirm", action="store_true")
-    accounting.add_argument("--period", help="acknowledge only the exact observed current UTC month")
-    accounting.add_argument("--expected-revision", type=int)
     accounting.add_argument("--policy", action="store_true", help="repair interrupted policy publication as revoked")
     rebind = subparsers.add_parser("accounting-rebind", help="retain deployment accounting before adopting a different canonical root")
     rebind.add_argument("--from-root", type=Path, required=True)
@@ -103,6 +102,16 @@ def _blocked_receipt(exc: BaseException) -> dict[str, object]:
         "reason_code": reason_code,
         "secret_values_included": False,
     }
+
+
+_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,80}")
+
+
+def _continuity_reason_code(exc: ProductionWorkspaceError) -> str:
+    # Continuity checks raise with a bare reason code as the message; any other
+    # message is prose and is reduced to the class reason code.
+    message = str(exc)
+    return message if _REASON_CODE.fullmatch(message) else exc.reason_code
 
 
 def _validate_restore_archive(workspace, archive: Path) -> Path:
@@ -236,19 +245,24 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if args.command == "status":
             return _status_receipt(workspace)
         if args.command == "identity":
+            accounting_reason = None
             try:
                 lifecycle_directory = prepare_lifecycle_directory(workspace)
                 from src.workspace.accounting_witness import assert_deployment_binding
                 assert_deployment_binding(workspace)
                 accounting_status = "ready"
-            except ProductionWorkspaceError:
+            except ProductionWorkspaceError as exc:
                 lifecycle_directory, accounting_status = workspace.lifecycle_directory, "blocked"
+                accounting_reason = _continuity_reason_code(exc)
             return {
                 "schema_version": "seraph.production-workspace-bind-identity.v1",
                 "status": "ready",
                 "bind_identity": workspace.bind_identity_digest,
                 "lifecycle_directory": str(lifecycle_directory),
                 "accounting_continuity_status": accounting_status,
+                # A fixed reason code (never a path) so the managed launcher can
+                # name the recovery, e.g. accounting-rebind after a root move.
+                "accounting_continuity_reason_code": accounting_reason,
                 "identity_basis": "resolved_configured_path_plus_device_inode",
                 "secret_values_included": False,
             }
@@ -283,11 +297,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.command == "accounting-reconcile":
                 if not args.confirm:
                     raise WorkspaceLifecycleError("accounting reconciliation requires explicit confirm=True")
-                if args.period:
-                    from src.workspace.accounting_continuity import acknowledge_accounting_period
-                    receipt = acknowledge_accounting_period(root=workspace.host_root, period=args.period,
-                        expected_revision=args.expected_revision, actor="managed_maintenance")
-                elif args.policy:
+                if args.policy:
                     from src.workspace.accounting_witness import reconcile_policy_checkpoint
                     receipt = reconcile_policy_checkpoint(workspace.host_root)
                 else:

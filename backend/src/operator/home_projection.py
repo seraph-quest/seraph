@@ -95,7 +95,6 @@ programme_sources AS (SELECT g.id goal_id,g.revision goal_revision,g.updated_at,
  json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{{}}' END,'$.issuer_principal_id') issuer_principal_id,
  json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{{}}' END,'$.route_epoch') route_epoch,
  json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{{}}' END,'$.route_digest') route_digest,
- json_extract(CASE WHEN p.type='object' THEN p.value ELSE '{{}}' END,'$.budget.max_inference_microusd') budget,
  issuer.id proved_issuer,issuer.operator_identity_id issuer_identity,issuer.is_bearer_tombstone issuer_tombstone,
  issuer.principal_id proved_principal
  FROM readable_goals g JOIN json_each(CASE WHEN json_valid(g.goal_programmes_json)
@@ -113,7 +112,7 @@ programmes AS (SELECT *,CASE
  WHEN {_us('expires_at')}<=:now THEN 'review_due'
  WHEN :policy_blocked IS NOT NULL THEN 'blocked'
  WHEN route_epoch!=:policy_epoch OR route_digest!=:policy_digest THEN 'paused'
- WHEN budget=0 THEN 'blocked' ELSE 'active' END state FROM programme_sources)
+ ELSE 'active' END state FROM programme_sources)
 """
 
 
@@ -263,9 +262,11 @@ PROGRAMME_DIAGNOSTIC = f"""COALESCE(max(CASE WHEN goal_programmes_json IS NULL O
  OR typeof(json_extract(p.value,'$.route_epoch'))!='integer'
  OR json_type(p.value,'$.route_digest') IS NOT 'text'
  OR length(json_extract(p.value,'$.route_digest'))!=64 OR json_extract(p.value,'$.route_digest') GLOB '*[^0-9a-f]*'
- OR json_type(p.value,'$.budget.max_inference_microusd') IS NOT 'integer'
- OR typeof(json_extract(p.value,'$.budget.max_inference_microusd'))!='integer'
- OR json_extract(p.value,'$.budget.max_inference_microusd')<0
+ OR json_type(p.value,'$.budget') IS NOT 'object'
+ OR (json_type(p.value,'$.budget.max_inference_microusd') IS NOT NULL
+   AND json_type(p.value,'$.budget.max_inference_microusd') IS NOT 'null'
+   AND (json_type(p.value,'$.budget.max_inference_microusd') IS NOT 'integer'
+     OR json_extract(p.value,'$.budget.max_inference_microusd')<0))
  OR json_type(p.value,'$.owner_identity_id') IS NOT 'text'
  OR (:identity IS NOT NULL AND json_extract(p.value,'$.owner_identity_id') IS NOT :identity)
  OR json_type(p.value,'$.issuer_root_id') IS NOT 'text'

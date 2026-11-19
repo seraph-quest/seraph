@@ -83,6 +83,8 @@ it("uses actual save, adoption and signed current wire through fresh invocation 
     expected_pointer_revision: wire.post_adopt.pointer_revision, parameters: wire.invoke_request.parameters,
     goal_id: goal.id, goal_revision: goal.revision, inference_egress_acknowledged: false });
   expect(wire.invoke.task_id).not.toBe(task.task_id);
+  expect(invokedBody.limits).not.toHaveProperty("max_cost_microusd");
+  expect(screen.queryByText(/inference budget/i)).toBeNull();
   expect(Object.keys(invokedBody).sort()).toEqual(["digest", "expected_pointer_revision", "goal_id", "goal_revision", "idempotency_key", "inference_egress_acknowledged", "limits", "parameters", "version"]);
 });
 it.each([["method_invocation_pointer_changed", 409], ["method_invocation_noncurrent_version", 409], ["method_current_owner_required", 403], ["method_invocation_binding_missing", 409], ["idempotency_conflict", 409]] as const)("shows %s and requires explicit fresh inspection before another invocation", async (code, status) => {

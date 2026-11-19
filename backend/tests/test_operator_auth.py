@@ -1033,10 +1033,12 @@ async def test_authenticated_operator_can_read_runtime_and_settings_without_prov
     assert fabric["status"] == "blocked"
     assert fabric["inference_readiness"]["status"] == "blocked"
     assert "chat_cloud_consent_missing" in fabric["inference_readiness"]["reasons"]
-    assert fabric["inference_accounting"]["status"] == "blocked"
-    assert fabric["inference_accounting"]["reason_code"] == "accounting_continuity_unavailable"
-    assert fabric["inference_accounting"]["reason_code"] in fabric["inference_readiness"]["reasons"]
-    assert fabric["inference_accounting"]["remaining_microusd"] is None
+    assert fabric["inference_accounting"]["status"] == "unavailable"
+    # No ledger exists yet in a fresh workspace (#1284: created on first request).
+    assert fabric["inference_accounting"]["reason_code"] == "accounting_ledger_uninitialized"
+    # An uninitialized ledger never blocks: the first request creates it.
+    assert fabric["inference_accounting"]["reason_code"] not in fabric["inference_readiness"]["reasons"]
+    assert "remaining_microusd" not in fabric["inference_accounting"]
     # Metadata may expose the boolean ``api_key_configured`` flag; raw key
     # material must never be returned.
     assert "test-key" not in runtime.text

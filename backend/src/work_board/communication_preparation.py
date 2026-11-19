@@ -215,7 +215,7 @@ def check_envelope(envelope):
     if (envelope.task_input.document_source is not None or envelope.task_input.evidence_refs
         or envelope.task_input.inference_egress_acknowledged
         or limits.max_steps != 1 or limits.max_outstanding_children != 1
-        or limits.max_inference_calls != count or (count and limits.max_cost_microusd <= 0)
+        or limits.max_inference_calls != count
         or limits.max_inference_calls > 10 or envelope.plan is None or len(envelope.plan.steps) != 1
         or envelope.descriptors != [contract]
         or envelope.task_input.requested_output != contract.output_schema):
@@ -390,8 +390,12 @@ def verify_source_projection(binding, task, attempt, projection):
         raise BoardError("communication_source_projection_changed", "Exact original source native projection required", status_code=409)
 
 
-async def _assert_source_capacity(db, group, bound, *, source_job_id=None):
-    """Observe the original all-period ledger before any source contact."""
+async def _assert_source_capacity(db, group, *, source_job_id=None):
+    """Observe the original group's call allowance before any source contact.
+
+    ADR-037 (#1284): no dollar allowance is compared, and an ``unknown``
+    (finished, not priced yet) request record does not block.
+    """
     from src.db.models import InferenceCostReservation
     from src.workflows.general_task_accounting import entry_for
     members = []
@@ -400,27 +404,25 @@ async def _assert_source_capacity(db, group, bound, *, source_job_id=None):
         if entry is not None and entry["group_digest"] == digest(group.model_dump(mode="json")):
             members.append(row)
     own = [row for row in members if row.job_id == source_job_id]
-    if len(own) > 1 or any(row.state == "unknown" for row in members):
+    if len(own) > 1:
         raise BoardError("communication_source_unknown", "Original source accounting requires governed recovery", status_code=409)
     if len(members) + (0 if own else 1) > group.max_inference_calls:
         raise BoardError("general_task_group_call_limit", "Original source call allowance exhausted", status_code=409)
-    liability = 0
-    for row in members:
-        if row.state in {"reserved", "contact_started"}:
-            liability += row.bound_microusd
-        elif row.state == "settled" and type(row.actual_cost_microusd) is int and row.actual_cost_microusd >= 0:
-            liability += row.actual_cost_microusd
-        elif row.state != "released":
-            raise BoardError("communication_source_unknown", "Original source accounting requires governed recovery", status_code=409)
-    if liability + (0 if own else bound) > group.max_cost_microusd:
-        raise BoardError("general_task_group_cost_limit", "Original source cost allowance exhausted", status_code=409)
+
+
+def _calls_in_flight(rows):
+    """A source request still reserved or contacted (at-most-once guard).
+
+    An ``unknown`` row is finished, not priced yet (ADR-037, #1284).
+    """
+    return any(row.state in {"reserved", "contact_started"} for row in rows)
 
 
 async def verify_preparation_binding(db, binding, source_run=None, *, allow_succeeded=False):
     from src.db.models import WorkflowRunState, WorkBoardTask, WorkBoardAttempt, WorkBoardInputArtifact
     if type(binding) is not CommunicationPreparationBinding or binding._seal is not _PREPARATION_SEAL:
         raise BoardError("communication_preparation_seal_required", "Original source preparation issuer required", status_code=409)
-    await _assert_source_capacity(db, binding.group, binding.budget_microusd, source_job_id=binding.source_job_id)
+    await _assert_source_capacity(db, binding.group, source_job_id=binding.source_job_id)
     child, native, envelope = await _verify_native_sql(db, binding._physical_witness, binding.child_fence)
     if native != binding.native or child.lease_owner != binding.child_owner:
         raise BoardError("communication_preparation_fence_changed", "Original source producer fence required", status_code=409)
@@ -474,7 +476,9 @@ async def verify_preparation_binding(db, binding, source_run=None, *, allow_succ
             or utc(source_run.deadline_at) != binding.source_deadline_at
             or binding.source_deadline_at > min(binding.group.original_deadline_at, binding.native.native_deadline_at)
             or binding.source_deadline_at <= datetime.now(timezone.utc)
-            or source_run.budget_digest != digest({"budget_microusd": binding.budget_microusd})):
+            # Recorded legacy budget: compared only while the job carries one.
+            or (source_run.budget_digest is not None
+                and source_run.budget_digest != digest({"budget_microusd": binding.budget_microusd}))):
             raise BoardError("communication_original_source_run_changed", "Original source native lineage required", status_code=409)
     return binding
 
@@ -592,29 +596,24 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         from src.model_fabric.near_tee_vertical import near_tee_vertical_route, vertical_inference_policy
         if near_tee_vertical_route("strategist_agent") is not None:
             # #1159: the Mail/Calendar source step runs on the NEAR TEE text
-            # slot; its request bound and the route's reviewed ceiling fund it.
-            from src.model_fabric.configuration import effective_workload_policy
+            # slot. No route amount is read (ADR-037, #1284).
             try:
                 _configured, source_policy_digest, near_setup = vertical_inference_policy("strategist_agent")
             except PermissionError as error:
-                raise BoardError("communication_source_budget_unavailable", "Review source inference policy",
+                raise BoardError("communication_source_policy_unavailable", "Review source inference policy",
                     status_code=409) from error
-            route_bound = near_setup.request_cost_bound_microusd
-            ceiling = getattr(effective_workload_policy("strategist_agent"), "max_cost_microusd", None)
+            del near_setup
         else:
             configured, source_policy_digest = current_inference_policy()
             setup = configured.openrouter_setup
             if setup is None or configured.status != "ready" or configured.egress_revoked:
-                raise BoardError("communication_source_budget_unavailable", "Review source inference policy", status_code=409)
+                raise BoardError("communication_source_policy_unavailable", "Review source inference policy", status_code=409)
             policy = openrouter_policy_for_setup(setup, "strategist_agent")
             route = ((setup.routes or {}).get(route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class))
                 if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup)
             if route is None or getattr(route, "enabled", True) is not True:
-                raise BoardError("communication_source_budget_unavailable", "Current source route required", status_code=409)
-            route_bound = getattr(route, "request_cost_bound_microusd", None) or setup.spend_ceiling_microusd
-            ceiling = getattr(policy, "max_cost_microusd", None)
-        if type(route_bound) is not int or route_bound <= 0 or type(ceiling) is not int or ceiling <= 0:
-            raise BoardError("communication_source_budget_unavailable", "Reviewed finite source route bound required", status_code=409)
+                raise BoardError("communication_source_policy_unavailable", "Current source route required", status_code=409)
+            del policy
         key = "communication:" + digest([child_id, native.creation_digest, ordinal])
         metadata = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id=capability, goal_id=envelope.task_input.goal_ref,
@@ -640,8 +639,9 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         if str(ordinal) in records or any(record.get("phase") in {"reserved", "admitted", "running", "unknown"} for record in records.values()):
             raise BoardError("communication_original_source_pending", "Inspect original source work; do not replay", status_code=409)
         group = current_envelope.proposal_group
-        source_budget = min(route_bound, ceiling, group.max_cost_microusd)
-        await _assert_source_capacity(db, group, source_budget)
+        # Recorded legacy amount only; never compared (ADR-037, #1284).
+        source_budget = group.max_cost_microusd
+        await _assert_source_capacity(db, group)
         mutation = await dispatcher.repository._create_task(db, owner, request,
             staged_text=staged_text, staged_input=staged,
             publication_authority_check=lambda writer: verify_source_publication(writer, witness))
@@ -656,8 +656,6 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
             lease_seconds=120, _communication_publication=witness)
         if claim is None:
             raise BoardError("communication_source_claim_failed", "Review the affected original source", status_code=409)
-        if group.max_cost_microusd <= 0:
-            raise BoardError("communication_source_budget_unavailable", "Review original source inference allowance", status_code=409)
         deadline = min(datetime.now(timezone.utc) + timedelta(seconds=120),
             native.native_deadline_at, group.original_deadline_at)
         job_id = (reply_job_id(owner.principal_id, claim.task.task_id, claim.attempt.attempt_id)
@@ -795,8 +793,7 @@ async def _run_source(principal, child_id, fence, ordinal, dispatcher):
         async with dispatcher.session_provider() as db:
             rows = list((await db.execute(select(InferenceCostReservation).where(
                 InferenceCostReservation.job_id == binding.source_job_id))).scalars())
-            held = any(row.state not in {"settled", "released"}
-                or (row.state == "settled" and row.actual_cost_microusd is None) for row in rows)
+            held = _calls_in_flight(rows)
         if not held and not isinstance(error, asyncio.CancelledError):
             from src.db.models import WorkBoardAttempt, WorkBoardStatus
             with preparation_scope(binding):
@@ -828,9 +825,7 @@ async def _run_source(principal, child_id, fence, ordinal, dispatcher):
                 raise BoardError("communication_source_reservation_changed", "Original source reservation required", status_code=409)
             rows = list((await db.execute(select(InferenceCostReservation).where(
                 InferenceCostReservation.job_id == binding.source_job_id))).scalars())
-            held = any(row.state not in {"settled", "released"}
-                or (row.state == "settled" and row.actual_cost_microusd is None)
-                for row in rows)
+            held = _calls_in_flight(rows)
             record.update(phase="unknown" if held else "blocked", producer_closed=True,
                 failure_code=reason, accounting_liability="held" if held else "known")
             await _write_child_context(db, child, checkpoint, binding._physical_witness)
@@ -901,8 +896,7 @@ async def invoke(principal, job_id, fencing_token, inputs, *, dispatcher):
                 job_id=error.source_job_id, recovery="review_source"))
             continue
         except BoardError as error:
-            if error.code not in {"general_task_group_cost_limit", "general_task_group_call_limit",
-                "communication_source_budget_unavailable"}:
+            if error.code not in {"general_task_group_call_limit", "communication_source_policy_unavailable"}:
                 raise
             questions.append(CommunicationQuestion(source_id=source_id, reason=error.code,
                 recovery="review_source"))
@@ -1177,8 +1171,7 @@ async def cleanup_plan(db, owner, task_id, expected_revision, *, service):
             source_id = record.get("binding", {}).get("source_job_id")
             costs = list((await db.execute(select(InferenceCostReservation).where(
                 InferenceCostReservation.job_id == source_id))).scalars())
-            if any(cost.state not in {"settled", "released"}
-                or (cost.state == "settled" and cost.actual_cost_microusd is None) for cost in costs):
+            if _calls_in_flight(costs):
                 raise BoardError("communication_source_unknown", "Resolve original source accounting first", status_code=409)
         return row, checkpoint, intent
 

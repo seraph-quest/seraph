@@ -1,9 +1,34 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import { appEventBus } from "../../lib/appEventBus";
+import { SETTINGS_OPEN_SECTION_EVENT } from "../../lib/settingsNavigation";
 
 import { MessageBubble } from "./MessageBubble";
 
 describe("MessageBubble", () => {
+  it("offers Open Settings on a blocked-chat error and opens the Model card (#1280)", () => {
+    const listener = vi.fn();
+    appEventBus.on(SETTINGS_OPEN_SECTION_EVENT, listener);
+    try {
+      render(
+        <MessageBubble
+          message={{ id: "error-1", role: "error", content: "Chat is paused until you give your OK. Nothing was sent.",
+            timestamp: Date.now(), code: "provider_policy_revoked", recoveryAction: "give_consent", settingsSection: "model" }}
+        />
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+      expect(listener).toHaveBeenCalledWith({ section: "model", focus: "model-card" });
+    } finally {
+      appEventBus.off(SETTINGS_OPEN_SECTION_EVENT, listener);
+    }
+  });
+
+  it("shows no Open Settings button on an error without a settings section", () => {
+    render(<MessageBubble message={{ id: "error-2", role: "error", content: "Agent error", timestamp: Date.now() }} />);
+    expect(screen.queryByRole("button", { name: "Open Settings" })).toBeNull();
+  });
+
   it("renders clarification options for clarification messages", () => {
     render(
       <MessageBubble

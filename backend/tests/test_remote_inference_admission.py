@@ -10,12 +10,10 @@ import pytest
 
 from src.model_fabric.remote_inference_admission import (
     REMOTE_INFERENCE_ADMISSION_SCHEMA_VERSION,
-    REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON,
     REMOTE_INFERENCE_OWNER_REVOCATION_REASON,
     RemoteInferenceAdmissionBroker,
     RemoteInferenceAdmissionCancelledError,
     RemoteInferenceAdmissionExpiredError,
-    RemoteInferenceAdmissionOwnerBudgetError,
     RemoteInferenceAdmissionOwnerCapacityError,
     RemoteInferenceAdmissionOwnerRevokedError,
     RemoteInferenceAdmissionRequest,
@@ -42,8 +40,6 @@ def _request(
     owner_id: str = "owner-a",
     priority: RemoteInferencePriority = RemoteInferencePriority.REPORTS_RESEARCH_MEMORY,
     deadline_at: float = 1_000.0,
-    estimated_cost_microusd: int | None = None,
-    owner_budget_microusd: int | None = None,
 ) -> RemoteInferenceAdmissionRequest:
     return RemoteInferenceAdmissionRequest(
         operation_id=operation_id,
@@ -54,8 +50,6 @@ def _request(
         runtime_path="openrouter_text",
         session_id="session-a",
         capability_version="text.v1",
-        estimated_cost_microusd=estimated_cost_microusd,
-        owner_budget_microusd=owner_budget_microusd,
     )
 
 
@@ -181,10 +175,10 @@ async def test_owner_revocation_is_scoped_and_cancels_queued_work_before_dispatc
 
 
 @pytest.mark.asyncio
-async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconciled():
+async def test_owner_revocation_holds_the_lane_only_while_the_callback_runs():
     broker = RemoteInferenceAdmissionBroker(clock=_Clock())
     recovery_token = broker.register_recovery_authority("recovery-service")
-    request = _request("owner-revoked-active", estimated_cost_microusd=12)
+    request = _request("owner-revoked-active")
     callback_started = asyncio.Event()
     callback_cancelled = asyncio.Event()
     follow_up_started = False
@@ -231,48 +225,27 @@ async def test_owner_revocation_keeps_active_remote_cost_uncertain_until_reconci
     assert callback_cancelled.is_set()
     assert error.value.receipt.status == "blocked"
     assert error.value.receipt.reason_code == "owner_revoked"
-    assert error.value.receipt.reconciliation_required is True
+    # ADR-037 (#1284): the returned callback frees the lane; no charge has to
+    # be supplied first. The revoked owner's result stays uncertain (blocked)
+    # and adopts nothing, and the other owner's queued work now runs.
+    assert error.value.receipt.reconciliation_required is False
     assert error.value.receipt.callback_completed is True
+    assert await follow_up_task == "follow-up"
+    assert follow_up_started is True
 
     blocked_repeat = await broker.cancel_owner(request.owner_id)
-    assert blocked_repeat[0].status == "blocked"
-    assert blocked_repeat[0].reconciliation_required is True
-
-    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError) as revoked_reconcile:
+    assert [item.status for item in blocked_repeat] == ["blocked"]
+    assert blocked_repeat[0].reconciliation_required is False
+    with pytest.raises(GpuAdmissionLeaseError):
         await broker.reconcile(
             request.operation_id,
             owner_id=request.owner_id,
             job_id=request.job_id,
             fencing_token=error.value.receipt.fencing_token or 0,
-            recovery_authority_token="owner-b",
+            recovery_authority_token=recovery_token,
             outcome="cancelled",
             reason_code="owner_revoked_reconciled",
-            actual_cost_microusd=9,
         )
-    assert revoked_reconcile.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_REVOCATION_REASON
-
-    with pytest.raises(RemoteInferenceAdmissionOwnerRevokedError):
-        await broker.cancel(
-            request.operation_id,
-            owner_id=request.owner_id,
-            fencing_token=error.value.receipt.fencing_token or 0,
-            actual_cost_microusd=9,
-        )
-
-    settled = await broker.reconcile(
-        request.operation_id,
-        owner_id=request.owner_id,
-        job_id=request.job_id,
-        fencing_token=error.value.receipt.fencing_token or 0,
-        recovery_authority_token=recovery_token,
-        outcome="cancelled",
-        reason_code="owner_revoked_reconciled",
-        actual_cost_microusd=9,
-    )
-    assert settled.status == "cancelled"
-    assert settled.cost_settled_microusd == 9
-    assert await follow_up_task == "follow-up"
-    assert follow_up_started is True
 
 
 @pytest.mark.asyncio
@@ -380,223 +353,79 @@ async def test_owner_outstanding_cap_rejects_before_provider_and_is_owner_scoped
 
 
 @pytest.mark.asyncio
-async def test_budget_reservation_and_unknown_cost_fail_closed_before_dispatch():
-    broker = RemoteInferenceAdmissionBroker(clock=_Clock(), max_owner_cost_microusd=100)
-    first = _request("cost-1", estimated_cost_microusd=60)
-    await broker.enqueue(first)
-
-    with pytest.raises(RemoteInferenceAdmissionOwnerBudgetError) as error:
-        await broker.enqueue(_request("cost-2", estimated_cost_microusd=50))
-    assert error.value.receipt.reason_code == "owner_budget_exhausted"
-
-    with pytest.raises(RemoteInferenceAdmissionOwnerBudgetError) as unknown:
-        await broker.enqueue(_request("unknown-cost"))
-    assert unknown.value.receipt.reason_code == REMOTE_INFERENCE_OWNER_COST_UNKNOWN_REASON
-
-    cancelled = await broker.cancel(first.operation_id, owner_id=first.owner_id)
-    assert cancelled.status == "cancelled"
+async def test_no_owner_spend_budget_or_cost_estimate_gates_admission():
+    """ADR-037 (#1284): only the owner's outstanding count is bounded."""
+    broker = RemoteInferenceAdmissionBroker(clock=_Clock(), max_outstanding_per_owner=2)
+    await broker.enqueue(_request("no-cost-1"))
+    await broker.enqueue(_request("no-cost-2"))
+    with pytest.raises(RemoteInferenceAdmissionOwnerCapacityError):
+        await broker.enqueue(_request("no-cost-3"))
+    status = await broker.status()
+    assert "max_owner_cost_microusd" not in status["capacity"]
+    assert status["capacity"]["owners"]["owner-a"] == {"outstanding": 2}
 
 
 @pytest.mark.asyncio
-async def test_server_budget_resolver_is_authoritative_over_request_metadata():
-    broker = RemoteInferenceAdmissionBroker(
-        clock=_Clock(),
-        owner_budget_resolver=lambda owner_id: 100 if owner_id == "owner-a" else 25,
-    )
-
-    with pytest.raises(RemoteInferenceAdmissionOwnerBudgetError):
-        await broker.enqueue(
-            _request(
-                "forged-wider-budget",
-                estimated_cost_microusd=101,
-                owner_budget_microusd=10_000,
-            )
-        )
-
-    with pytest.raises(RemoteInferenceAdmissionOwnerBudgetError):
-        await broker.enqueue(_request("stricter-request-budget", estimated_cost_microusd=30, owner_budget_microusd=25))
-
-
-@pytest.mark.asyncio
-async def test_uncertain_remote_result_retains_cost_until_fenced_reconciliation():
+async def test_late_remote_result_is_uncertain_but_frees_the_lane_without_a_charge():
     clock = _Clock()
-    broker = RemoteInferenceAdmissionBroker(clock=clock, max_owner_cost_microusd=100)
-    request = _request("late", deadline_at=110.0, estimated_cost_microusd=80)
+    broker = RemoteInferenceAdmissionBroker(clock=clock)
+    request = _request("late", deadline_at=110.0)
     await broker.enqueue(request)
     lease = await broker.acquire(request.operation_id)
 
     clock.advance(20)
-    blocked = await broker.release(lease)
-    assert blocked.status == "blocked"
-    assert blocked.reconciliation_required is True
-    assert blocked.cost_reserved_microusd == 80
-    assert (await broker.status())["capacity"]["owners"]["owner-a"]["outstanding"] == 1
-
-    with pytest.raises(ValueError, match="actual_cost_microusd"):
-        await broker.cancel(
-            request.operation_id,
-            owner_id=request.owner_id,
-            fencing_token=lease.fencing_token,
-        )
-    with pytest.raises(ValueError, match="non-negative"):
-        await broker.cancel(
-            request.operation_id,
-            owner_id=request.owner_id,
-            fencing_token=lease.fencing_token,
-            actual_cost_microusd=-1,
-        )
-    assert (await broker.status())["capacity"]["owners"]["owner-a"]["cost_reserved_microusd"] == 80
-
-    settled = await broker.reconcile(
-        request.operation_id,
-        owner_id=request.owner_id,
-        job_id=request.job_id,
-        fencing_token=lease.fencing_token,
-        outcome="succeeded",
-        actual_cost_microusd=70,
-    )
-    assert settled.status == "succeeded"
-    assert settled.cost_settled_microusd == 70
-    assert (await broker.status())["capacity"]["owners"] == {}
-
-    with pytest.raises(GpuAdmissionLeaseError):
-        await broker.reconcile(
-            request.operation_id,
-            owner_id=request.owner_id,
-            job_id=request.job_id,
-            fencing_token=lease.fencing_token,
-            outcome="succeeded",
-            actual_cost_microusd=70,
-        )
+    released = await broker.release(lease)
+    # Still reported as an uncertain outcome, but nothing is held (#1284).
+    assert released.status == "blocked"
+    assert released.reason_code == "deadline_expired_after_callback"
+    assert released.reconciliation_required is False
+    status = await broker.status()
+    assert status["active"] is None
+    assert status["capacity"]["owners"] == {}
+    follow_up = _request("after-late", deadline_at=1_000.0)
+    await broker.enqueue(follow_up)
+    assert (await broker.acquire(follow_up.operation_id)).operation_id == follow_up.operation_id
 
 
 @pytest.mark.asyncio
-async def test_remote_callback_failure_is_uncertain_until_actual_cost_reconciliation():
+async def test_remote_callback_failure_is_uncertain_and_the_next_request_runs():
     broker = RemoteInferenceAdmissionBroker(clock=_Clock())
 
     async def provider() -> None:
         raise RuntimeError("transport lost after dispatch")
 
-    request = _request("transport-lost", estimated_cost_microusd=20)
+    request = _request("transport-lost")
     with pytest.raises(RemoteInferenceAdmissionUncertainError) as error:
         await broker.execute(request, provider)
     assert error.value.receipt.status == "blocked"
-    assert error.value.receipt.reconciliation_required is True
-    assert error.value.receipt.cost_reserved_microusd == 20
+    assert error.value.receipt.reconciliation_required is False
 
-    with pytest.raises(ValueError, match="actual_cost_microusd"):
-        await broker.reconcile(
-            request.operation_id,
-            owner_id=request.owner_id,
-            job_id=request.job_id,
-            fencing_token=error.value.receipt.fencing_token or 0,
-        )
-    settled = await broker.reconcile(
-        request.operation_id,
-        owner_id=request.owner_id,
-        job_id=request.job_id,
-        fencing_token=error.value.receipt.fencing_token or 0,
-        actual_cost_microusd=18,
-    )
-    assert settled.cost_settled_microusd == 18
+    async def next_provider():
+        return "next"
+
+    assert await broker.execute(_request("after-transport-lost"), next_provider) == "next"
 
 
 @pytest.mark.asyncio
-async def test_unknown_settlement_stays_held_until_owner_fenced_reconciliation():
-    clock = _Clock()
-    broker = RemoteInferenceAdmissionBroker(clock=clock, max_owner_cost_microusd=100)
-    request = _request("stale-settlement", estimated_cost_microusd=20)
-    await broker.enqueue(request)
-    lease = await broker.acquire(request.operation_id)
-
-    blocked = await broker.release(lease, uncertain=True)
-    assert blocked.status == "blocked"
-    assert blocked.reconciliation_required is True
-
-    with pytest.raises(GpuAdmissionLeaseError) as stale:
-        await broker.reconcile(
-            request.operation_id,
-            owner_id=request.owner_id,
-            job_id=request.job_id,
-            fencing_token=lease.fencing_token + 1,
-            outcome="succeeded",
-            actual_cost_microusd=20,
-        )
-    assert stale.value.receipt.status == "blocked"
-    assert (await broker.status())["active"]["status"] == "blocked"
-    assert (await broker.status())["capacity"]["owners"][request.owner_id]["outstanding"] == 1
-
-    with pytest.raises(GpuAdmissionLeaseError) as wrong_job:
-        await broker.reconcile(
-            request.operation_id,
-            owner_id=request.owner_id,
-            job_id="job-from-another-attempt",
-            fencing_token=lease.fencing_token,
-            outcome="succeeded",
-            actual_cost_microusd=20,
-        )
-    assert wrong_job.value.receipt.reason_code == "stale_owner_or_fencing_token"
-    assert (await broker.status())["active"]["status"] == "blocked"
-
-    settled = await broker.reconcile(
-        request.operation_id,
-        owner_id=request.owner_id,
-        job_id=request.job_id,
-        fencing_token=lease.fencing_token,
-        outcome="succeeded",
-        actual_cost_microusd=20,
-    )
-    assert settled.status == "succeeded"
-    assert (await broker.status())["active"] is None
-
-
-@pytest.mark.asyncio
-async def test_remote_lease_job_identity_and_reconciliation_reason_are_fenced_and_bounded():
+async def test_stale_lease_identity_still_cannot_release_an_operation():
     broker = RemoteInferenceAdmissionBroker(clock=_Clock())
-    request = _request("lease-job-fence", estimated_cost_microusd=20)
+    request = _request("lease-job-fence")
     await broker.enqueue(request)
     lease = await broker.acquire(request.operation_id)
 
     with pytest.raises(GpuAdmissionLeaseError) as wrong_job:
         await broker.release(replace(lease, job_id="job-from-another-attempt"))
     assert wrong_job.value.receipt.reason_code == "stale_owner_or_fencing_token"
+    with pytest.raises(GpuAdmissionLeaseError) as wrong_fence:
+        await broker.release(replace(lease, fencing_token=lease.fencing_token + 1))
+    assert wrong_fence.value.receipt.reason_code == "stale_owner_or_fencing_token"
     assert (await broker.status())["active"]["operation_id"] == request.operation_id
 
-    blocked = await broker.release(lease, uncertain=True)
-    assert blocked.status == "blocked"
-
-    secret_like_reason = "provider_key=sk-live-secret"
-    with pytest.raises(ValueError, match="bounded reason code") as secret_error:
-        await broker.reconcile(
-            request.operation_id,
-            owner_id=request.owner_id,
-            job_id=request.job_id,
-            fencing_token=lease.fencing_token,
-            reason_code=secret_like_reason,
-            actual_cost_microusd=18,
-        )
-    assert secret_like_reason not in str(secret_error.value)
-    assert (await broker.status())["active"]["status"] == "blocked"
-
-    settled = await broker.reconcile(
-        request.operation_id,
-        owner_id=request.owner_id,
-        job_id=request.job_id,
-        fencing_token=lease.fencing_token,
-        outcome="succeeded",
-        actual_cost_microusd=18,
-    )
-    assert settled.status == "succeeded"
-    assert settled.cost_settled_microusd == 18
-
+    released = await broker.release(lease, uncertain=True)
+    assert released.status == "blocked"
+    assert (await broker.status())["active"] is None
     with pytest.raises(GpuAdmissionLeaseError):
-        await broker.reconcile(
-            request.operation_id,
-            owner_id=request.owner_id,
-            job_id=request.job_id,
-            fencing_token=lease.fencing_token,
-            actual_cost_microusd=18,
-        )
+        await broker.release(lease)
 
 
 @pytest.mark.asyncio

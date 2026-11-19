@@ -209,18 +209,17 @@ def spec_for(task, attempt, inputs: Mapping[str, Any], *, deadline: datetime, st
     model = ResearchDossierInput.model_validate(dict(inputs))
     from src.model_fabric.near_tee_vertical import vertical_inference_policy
     # #1159: the NEAR TEE text slot serving the research child route binds the
-    # reviewed allowance (its request bound under the shared lane ceiling).
+    # reviewed policy. ADR-037 (#1284): research carries no dollar allowance;
+    # the zero amounts keep the stored authority shape and are never compared.
     configured, policy_digest, setup = vertical_inference_policy("readonly_research_child")
-    bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
-    if type(bound) is not int or bound <= 0 or bound*len(model.perspectives) > setup.spend_ceiling_microusd:
-        raise ValueError("fixed research slots exceed the existing reviewed allowance")
+    bound = ceiling = 0
     safe_inputs = input_projection(task, model)
     start, cutoff = utc_time(attempt.started_at), utc_time(deadline)
     seconds = (cutoff-start).total_seconds()
     if not seconds.is_integer() or not 1 <= seconds <= 300:
         raise ValueError("research original attempt window unavailable")
     authority = authority_projection(task, model, policy_digest=policy_digest,
-        policy_revision=configured.egress_revision, bound=bound, ceiling=setup.spend_ceiling_microusd,
+        policy_revision=configured.egress_revision, bound=bound, ceiling=ceiling,
         strategy=strategy if strategy is not None else TaskStrategyBinding(status="none", reason="baseline"),
         original_deadline_at=canonical_time(cutoff), original_runtime_seconds=int(seconds))
     return DurableJobSpec(identity=DurableJobIdentity(job_id=job_id(task, attempt), owner_kind="user",
@@ -326,7 +325,7 @@ async def recheck_native_admission(db, run, proof):
 
 # This branch is selected only by the native public programme owner. Generic
 # Work requests cannot select a service principal or fabricate an issuer Root.
-from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator, field_validator
 from typing import Literal
 from src.goals.contracts import GoalProgrammeAuthorityBinding
 from src.guardian.research_plan_contracts import ArtifactRef
@@ -350,7 +349,9 @@ class GoalDiscoveryAuthority(BaseModel):
     plan_ref: ArtifactRef
     occurrence_day: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     original_job_id: str
-    budget_microusd: int = Field(strict=True, ge=0)
+    # ADR-037 (#1284): legacy amount kept on jobs admitted before the change so
+    # their authority digest still verifies; never compared. New jobs omit it.
+    budget_microusd: int | None = Field(default=None, strict=True, ge=0)
     no_learning: Literal[True]
 
     @field_validator("no_learning", mode="before")
@@ -360,13 +361,19 @@ class GoalDiscoveryAuthority(BaseModel):
             raise ValueError("programme execution never implicitly learns")
         return value
 
+    @model_serializer(mode="wrap")
+    def _omit_absent_amount(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("budget_microusd") is None:
+            data.pop("budget_microusd", None)
+        return data
+
     @model_validator(mode="after")
     def immutable_owner(self):
         binding = self.programme_binding
         if (binding.capability_id != self.capability_id
                 or self.goal_owner_principal_id != binding.issuer_principal_id
-                or self.goal_owner_session_id != binding.issuer_root_id
-                or self.budget_microusd > binding.cost_ceiling_microusd):
+                or self.goal_owner_session_id != binding.issuer_root_id):
             raise ValueError("programme native authority widens or changes its immutable issuer")
         from datetime import date
         date.fromisoformat(self.occurrence_day)

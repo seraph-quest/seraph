@@ -161,7 +161,7 @@ it("withholds and clears answers for unknown cost, with only existing debt settl
   expect(screen.queryByLabelText("Literal NEAR answer")).toBeNull();
   expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();
   expect(screen.getByRole("alert")).toHaveTextContent("discarded");
-  fireEvent.click(screen.getByRole("button", { name: "Open existing cost settlement" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record the charge" }));
   expect(onOpenAccounting).toHaveBeenCalledOnce(); expect(apiFetch).toHaveBeenCalledOnce();
   expect(screen.queryByRole("button", { name: /retry|resend|recover/i })).toBeNull();
 });
@@ -172,14 +172,15 @@ it("shows discarded-answer guidance for the native missing-cost projection befor
   const mounted = render(<NearTextWorkPanel {...props} task={task} onOpenAccounting={onOpenAccounting} />);
   fireEvent.click(screen.getByRole("button", { name: "Read NEAR answer" }));
   await screen.findByLabelText("Literal NEAR answer");
-  const blocked = { ...task, task_revision: 4, status: "blocked", block_kind: "capability", block_reason: "near_cost_readback_required", readback_status: "unknown" } as WorkBoardTask;
+  const blocked = { ...task, task_revision: 4, status: "blocked", block_kind: "capability", block_reason: "near_answer_unavailable", readback_status: "unknown" } as WorkBoardTask;
   mounted.rerender(<NearTextWorkPanel {...props} task={blocked} onOpenAccounting={onOpenAccounting} />);
   expect(screen.queryByLabelText("Literal NEAR answer")).toBeNull();
   expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();
   expect(screen.getByRole("alert")).toHaveTextContent("Any received answer was discarded");
-  expect(screen.getByRole("alert")).toHaveTextContent("Settlement does not resend the question or restore its answer");
-  expect(screen.getByRole("alert")).toHaveTextContent("Inspect the original accounting");
-  fireEvent.click(screen.getByRole("button", { name: "Open existing cost settlement" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("does not resend the question or restore its answer");
+  expect(screen.getByRole("alert")).toHaveTextContent("Its spend may not be priced yet");
+  expect(screen.getByRole("alert")).not.toHaveTextContent(/debt|reserv/i);
+  fireEvent.click(screen.getByRole("button", { name: "Record the charge" }));
   expect(onOpenAccounting).toHaveBeenCalledOnce();
   expect(apiFetch).toHaveBeenCalledOnce();
   expect(screen.queryByRole("button", { name: /retry|resend|recover/i })).toBeNull();
@@ -187,7 +188,7 @@ it("shows discarded-answer guidance for the native missing-cost projection befor
   // Settling the ledger does not change the original blocked task or restore its output.
   mounted.rerender(<NearTextWorkPanel {...props} task={blocked} onOpenAccounting={onOpenAccounting} />);
   expect(screen.getByRole("alert")).not.toHaveTextContent("charge is unresolved");
-  expect(screen.getByRole("alert")).toHaveTextContent("any remaining debt");
+  expect(screen.getByRole("alert")).toHaveTextContent("recording the charge is optional");
   expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();
   expect(screen.queryByLabelText("Literal NEAR answer")).toBeNull();
   expect(apiFetch).toHaveBeenCalledOnce();

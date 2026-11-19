@@ -183,12 +183,10 @@ def ws_turn(env, message, *, message_id="m-1", session_id=None, kind="message",
 
 
 def shape(frames):
-    """Frame identity for parity: type, content and step; loop-naming status text normalized."""
+    """Frame identity for parity: type, content and step (the loop id is the receipt's chat_loop field)."""
     result = []
     for frame in frames:
         content = frame.get("content")
-        if frame["type"] == "status" and "agent loop" in str(content):
-            content = "<loop status>"
         result.append((frame["type"], content, frame.get("step"), frame.get("reason")))
     return result
 
@@ -225,11 +223,17 @@ def test_ws_tool_turn_parse_error_and_final_answer_match_legacy(tmp_path, monkey
 
 
 def test_ws_status_names_the_actual_loop(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    """The receipt frame names the loop that serves the turn; the status line names the model route (#1280)."""
     def drive(env):
-        return [frame["content"] for frame in ws_turn(env, "hi there, tell me a joke please now") if frame["type"] == "status"]
-    legacy, cordis = both(tmp_path, monkeypatch, lambda: [final("ok")], drive)
-    assert any("legacy agent loop (legacy.smolagents)" in item for item in legacy)
-    assert any("Cordis agent loop (cordis.agent-loop.v1)" in item for item in cordis)
+        frames = ws_turn(env, "hi there, tell me a joke please now")
+        receipt = next(frame for frame in frames if frame["content"] == "Seraph received the message.")
+        return receipt["chat_loop"], [frame["content"] for frame in frames if frame["type"] == "status"]
+    (legacy_loop, legacy), (cordis_loop, cordis) = both(tmp_path, monkeypatch, lambda: [final("ok")], drive)
+    assert legacy_loop == "legacy.smolagents"
+    assert cordis_loop == "cordis.agent-loop.v1"
+    for statuses in (legacy, cordis):
+        assert any(item.startswith("Chat is using ") and item.endswith(" via NEAR.") for item in statuses)
+        assert not any("agent loop" in item for item in statuses)
 
 
 def test_ws_direct_chat_streams_deltas_then_settles_through_cordis(tmp_path, monkeypatch, real_auth):  # noqa: F811
@@ -635,5 +639,8 @@ def test_a_cutover_between_the_route_read_and_the_legacy_gate_uses_the_new_route
         raced.clear()
         frames = ws_turn(env, "what do my notes say?", message_id="race-2")
         assert frames[-1]["type"] == "final" and frames[-1]["content"] == "WS on Cordis."
-        assert any("Cordis agent loop" in str(frame.get("content")) for frame in frames if frame["type"] == "status")
+        # #1280: the status line names the model route; the loop that served the
+        # turn is the receipt frame's structured chat_loop field.
+        receipt = next(frame for frame in frames if frame["content"] == "Seraph received the message.")
+        assert receipt["chat_loop"] == "cordis.agent-loop.v1"
         assert env.turns() == [("succeeded", None)] * 2 and legacy_turns.active.get(AGENT_LOOP, 0) == 0

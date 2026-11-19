@@ -39,7 +39,10 @@ from .contracts import (
 from .near_client import NO_ALIASING_HEADER, near_request_headers
 
 
-NEAR_TEE_BILLING_RESERVE_SECONDS = 16.0
+# Extra time a caller adds to a request's own deadline so the best-effort
+# billing lookup after it usually fits. Sizing only: nothing is denied for it
+# (#1284), and the lookup is skipped when no time is left.
+NEAR_TEE_BILLING_LOOKUP_SECONDS = 16.0
 NEAR_TEE_RESPONSE_CAP = 262144
 NEAR_TEE_REQUEST_CAP = 4 * 1024 * 1024
 NEAR_TEE_ANSWER_CAP = 262144
@@ -76,7 +79,6 @@ class NearTeeCall:
     body: dict[str, object] = field(repr=False)
     key: str = field(repr=False)
     slot_name: str = "text"
-    request_cost_bound_microusd: int = 0
     inference_timeout_seconds: float = 0.0
     headers: dict[str, str] = field(default_factory=dict, repr=False)
     # PR3c: streaming answer deltas, or one agent message that may carry
@@ -443,10 +445,10 @@ async def prepare_near_tee_call(
         raise NearTeeDenied("near_tee_request_too_large")
     bound = bind_final_inference_payload(context, body)
     checked = time.time() if now is None else now
-    inference_timeout = min(float(slot.timeout_seconds),
-        bound.deadline_at - checked - NEAR_TEE_BILLING_RESERVE_SECONDS)
+    inference_timeout = min(float(slot.timeout_seconds), bound.deadline_at - checked)
     if inference_timeout < 1:
-        # The billing window is reserved out of the original deadline.
+        # Less than one second is left for the request itself (#1284: no
+        # billing window is reserved; the billing lookup uses what is left).
         raise NearTeeDenied("near_tee_deadline_insufficient")
     candidate = candidate_from_profile(profile)
     proofs = []
@@ -464,7 +466,7 @@ async def prepare_near_tee_call(
         raise NearTeeDenied(reason, decision)
     headers = near_request_headers(key=key, no_aliasing=True, json_body=True)
     call = NearTeeCall(context=bound, decision=decision, proof_hashes=decision.proof_hashes, body=body,
-        key=key, slot_name=slot_name, request_cost_bound_microusd=slot.request_cost_bound_microusd,
+        key=key, slot_name=slot_name,
         inference_timeout_seconds=inference_timeout, headers=headers, stream=bool(stream),
         tool_names=tool_names, tool_choice=tool_choice)
     from .near_tee_egress import near_tee_egress_reason
@@ -490,8 +492,7 @@ def precontact_reason(*, headers: dict[str, str], deadline_at: float, inference_
     """Checks that must hold when bytes would leave; run under the contact writer.
 
     Evaluated before contact is recorded, so a failure is a durable
-    never-contacted denial (reservation released, lease not blocked), never
-    an Unknown liability.
+    never-contacted denial (request record released, lease not blocked).
     """
     from .accounting import assert_current_inference_policy
     try:
@@ -503,8 +504,8 @@ def precontact_reason(*, headers: dict[str, str], deadline_at: float, inference_
     except Exception as exc:
         return getattr(exc, "code", None) or "provider_policy_revision_changed"
     checked = time.time() if now is None else now
-    if min(inference_timeout_seconds, deadline_at - checked - NEAR_TEE_BILLING_RESERVE_SECONDS) < 1:
-        # Admitted too late to leave the billing window inside the deadline.
+    if min(inference_timeout_seconds, deadline_at - checked) < 1:
+        # Admitted with less than one second left for the request itself.
         return "near_tee_deadline_insufficient"
     return None
 
@@ -524,8 +525,7 @@ async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
     async with near_http_client() as client:
         # The guard proved >= 1s at contact; never let elapsed contact
         # bookkeeping turn into a zero/negative pre-send timeout.
-        timeout = max(0.5, min(call.inference_timeout_seconds,
-            deadline - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS))
+        timeout = max(0.5, min(call.inference_timeout_seconds, deadline - time.time()))
         raw, headers = await read_near_response(client, "/chat/completions", body=encoded, key=call.key,
             timeout=timeout, cap=NEAR_TEE_RESPONSE_CAP, no_aliasing=True, error=NearTeeError, prefix="near_tee")
         try:
@@ -555,15 +555,12 @@ async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
         evidence = await read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
             deadline_at=deadline, no_aliasing=True, error=NearTeeError, prefix="near_tee",
             capture=capture_near_billing_evidence)
-    if evidence is None:
-        # Contact happened and no authoritative cost arrived: Unknown liability.
-        raise NearTeeError("near_tee_cost_liability")
-    if failure is None and evidence.cost_microusd > call.request_cost_bound_microusd:
-        failure = "near_tee_cost_overrun"
+    # ADR-037 (#1284): the answer is delivered whatever NEAR reports. No
+    # charge recorded means the request is "not priced yet" (cost None).
     if failure is not None:
         text = message = None
     return NearTeeOutcome(text=text, failure_code=failure, provider_request_id=identity.provider_request_id,
-        cost_microusd=evidence.cost_microusd, message=message)
+        cost_microusd=evidence.cost_microusd if evidence is not None else None, message=message)
 
 
 class _StreamReader:
@@ -650,17 +647,17 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
     """The admitted streaming callback; runs only inside the broker lease.
 
     Answer deltas are yielded as they arrive. The stream is ended no later
-    than ``NEAR_TEE_BILLING_RESERVE_SECONDS`` before the original deadline,
-    then NEAR billing is read back inside the same lease. A failure after
-    contact with an authoritative cost is recorded on ``state`` (deltas
-    already delivered stay delivered); no authoritative cost raises an
-    Unknown liability and the serial lease stays blocked.
+    than the original deadline, then NEAR billing is read back, best effort,
+    inside the same lease with whatever time is left. A failure after contact
+    is recorded on ``state`` (deltas already delivered stay delivered). No
+    reported charge leaves the request "not priced yet" (#1284); it never
+    holds the lane.
 
     Caller stop or cancellation once the response exists is not an
     uncertain outcome: the HTTP stream is closed, billing is read back
     (shielded, within the original deadline) and ``near_tee_stream_cancelled``
-    is recorded so the known cost settles and the lease is released. A
-    cancellation is flagged on ``state`` for the caller to re-raise.
+    is recorded and the lease is released. A cancellation is flagged on
+    ``state`` for the caller to re-raise.
     """
     from .accounting import capture_near_billing_evidence, current_near_accounting_operation_id
     from .near_client import near_http_client, read_near_billing
@@ -674,8 +671,7 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
     opened: list = []
     failure = None
     async with near_http_client() as client:
-        stream_seconds = max(0.5, min(call.inference_timeout_seconds,
-            deadline - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS))
+        stream_seconds = max(0.5, min(call.inference_timeout_seconds, deadline - time.time()))
         try:
             async with aclosing(_near_tee_stream_deltas(client, body=call.body, key=call.key,
                     stream_seconds=stream_seconds, reader=reader, opened=opened)) as deltas:
@@ -706,25 +702,18 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
         billing = read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
             deadline_at=deadline, no_aliasing=True, error=NearTeeError, prefix="near_tee",
             capture=capture_near_billing_evidence)
-        # Shielded: a further cancellation cannot abandon the readback; if it
-        # interrupts this await anyway, the outcome stays an Unknown liability.
-        # Shield the readback whenever the caller stopped or cancelled: a second
-        # cancel (e.g. task cleanup after a WS send failure) must not leave an
-        # Unknown liability that blocks the whole lane.
+        # Shielded whenever the caller stopped or cancelled, so a second cancel
+        # (e.g. task cleanup after a WS send failure) cannot abandon it.
         evidence = (await asyncio.shield(billing)) if (state.caller_cancelled or state.stop_requested) else await billing
-    if evidence is None:
-        raise NearTeeError("near_tee_cost_liability")
     if failure is None and not state.delivered:
         # Nothing delivered because the output bound ended the stream (e.g.
         # reasoning used max_tokens) is a truncation, not an empty answer.
         failure = "near_tee_output_truncated" if reader.finish_reason == "length" else "near_tee_empty_output"
     if failure is None and reader.finish_reason not in ("stop", "length"):
         failure = "near_tee_stream_incomplete"
-    if failure is None and evidence.cost_microusd > call.request_cost_bound_microusd:
-        failure = "near_tee_cost_overrun"
     state.failure_code = failure
     state.provider_request_id = identity.provider_request_id
-    state.cost_microusd = evidence.cost_microusd
+    state.cost_microusd = evidence.cost_microusd if evidence is not None else None
 
 
 # Capability checks each chat-completions slot may run (mechanics only,
@@ -742,8 +731,8 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
     """Operator-triggered capability check mechanics for a NEAR TEE slot.
 
     Runs inside the probe's broker lease with its reservation; request and
-    response mechanics only (no quality score, corpus or judge). Missing
-    billing is an Unknown liability (raised); known-cost failures are failed
+    response mechanics only (no quality score, corpus or judge). A missing
+    charge leaves the request "not priced yet" (#1284); failures are failed
     observations.
     """
     from .accounting import capture_near_billing_evidence, current_near_accounting_operation_id
@@ -756,11 +745,11 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
     if (capability not in allowed or body.get("model") != profile.model
             or bool(body.get("stream")) != streaming or bool(body.get("tools")) != (capability == "tool_use")):
         raise NearTeeError("near_tee_capability_check_unsupported")
-    # Header, policy and billing-window checks run as the precontact guard
+    # Header, policy and deadline checks run as the precontact guard
     # bound by the capability-check endpoint, before contact is recorded.
     operation_id = current_near_accounting_operation_id()
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
-    window = max(0.5, deadline_at - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS)
+    window = max(0.5, deadline_at - time.time())
     async with near_http_client() as client:
         started = time.monotonic()
         if streaming:
@@ -814,8 +803,7 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
         evidence = await read_near_billing(client, key=key, identity=identity, operation_id=operation_id,
             deadline_at=deadline_at, no_aliasing=True, error=NearTeeError, prefix="near_tee",
             capture=capture_near_billing_evidence)
-    if evidence is None:
-        raise NearTeeError("near_tee_cost_liability")
+    del evidence  # recorded by the capture hook when NEAR reported a charge
     vision_mode = None
     if capability == "structured_output" and profile.id == "near_tee.vision":
         from .near_tee_vision import structured_check_mode

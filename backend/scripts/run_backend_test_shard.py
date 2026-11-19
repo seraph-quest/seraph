@@ -15,9 +15,36 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 try:
-    from scripts.backend_test_shards import shard_for_index
+    from scripts.backend_test_shards import load_measured_durations, shard_for_index
 except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
-    from backend_test_shards import shard_for_index
+    from backend_test_shards import load_measured_durations, shard_for_index
+
+
+# A file whose passing runtime grew past both bounds no longer matches the
+# measurement the shard plan was built from (#1274).
+STALE_DURATION_FACTOR = 3.0
+STALE_DURATION_MIN_EXTRA_SECONDS = 120.0
+
+
+def stale_duration_warnings(observed: dict[str, float], measured: dict[str, float]) -> list[str]:
+    """GitHub warning lines for files far slower than their recorded duration.
+
+    The shard plan balances by ``backend_test_durations.json``; a file that
+    silently grew (34 s recorded, ~500 s actual) stacks onto one shard until
+    it hits the step timeout. Name it in the job instead of waiting for that.
+    """
+    warnings = []
+    for path, seconds in sorted(observed.items()):
+        recorded = measured.get(path)
+        if recorded is None:
+            continue
+        if seconds > recorded * STALE_DURATION_FACTOR and seconds - recorded > STALE_DURATION_MIN_EXTRA_SECONDS:
+            warnings.append(
+                f"::warning title=Stale backend test duration::{path} ran {seconds:.0f}s against a recorded "
+                f"{recorded:.0f}s, so the shard plan underweights it; refresh "
+                "backend/scripts/backend_test_durations.json with "
+                "`uv run python scripts/backend_test_shards.py --update-durations-from <shard logs>`")
+    return warnings
 
 
 CANCELLED_EVAL_CONSUMER_NODES: dict[str, list[str]] = {'tests/test_always_available_reach_media.py': ['tests/test_always_available_reach_media.py::test_always_available_reach_media_report_exposes_ci_gated_posture'],
@@ -660,6 +687,8 @@ def run_shard_files(
         return 0
 
     failures: list[tuple[str, int]] = []
+    observed: dict[str, float] = {}
+    failed_paths: set[str] = set()
     extra_args = list(pytest_args or [])
     if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
         extra_args.append("--no-cov")
@@ -701,11 +730,15 @@ def run_shard_files(
                 )
                 if report_path is not None:
                     write_timeout_junit(report_path, label, timeout_seconds, duration_s)
+                failed_paths.add(path)
                 if not keep_going:
                     return 124
                 failures.append((label, 124))
                 continue
             duration_s = time.perf_counter() - started_at
+            observed[path] = observed.get(path, 0.0) + duration_s
+            if completed.returncode != 0:
+                failed_paths.add(path)
             print(
                 f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)"
                 f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
@@ -725,6 +758,9 @@ def run_shard_files(
                 if not keep_going:
                     return completed.returncode
                 failures.append((label, completed.returncode))
+    passing = {path: seconds for path, seconds in observed.items() if path not in failed_paths}
+    for line in stale_duration_warnings(passing, load_measured_durations()):
+        print(line)
     if failures:
         print(f"[backend-shard] {len(failures)} failing invocation(s):")
         for label, code in failures:

@@ -95,7 +95,8 @@ def verified_reserved_output(child, cost, creation, now):
         ready = checkpoint(_serialize(child), "research:prompt-ready")
         if (child.status != "running" or child.lease_expires_at is None
             or child.lease_expires_at.replace(tzinfo=timezone.utc) > now or not output or not ready or not cost
-            or cost.state != "settled" or cost.actual_cost_microusd is None or cost.contact_started_at is None
+            or cost.state not in {"settled", "unknown"} or cost.contact_started_at is None
+            or (cost.state == "settled" and cost.actual_cost_microusd is None)
             or cost.operation_id != "remote:"+child.run_identity or cost.job_id != child.run_identity
             or cost.owner_id != child.owner_principal_id or cost.payload_digest != ready["payload_digest"]
             or cost.policy_digest != ready["policy_digest"] or output["job_id"] != child.run_identity

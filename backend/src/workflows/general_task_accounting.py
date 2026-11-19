@@ -22,7 +22,8 @@ class RepositoryIterationEvidenceV1(ClosedTaskModel):
     iteration_id: TaskDigest
     operation_id: NativeInvocationIdentity
     original_deadline_at: datetime
-    original_max_cost_microusd: int = Field(ge=0)
+    # Recorded legacy amount (ADR-037, #1284): parsed, never compared.
+    original_max_cost_microusd: int = Field(default=0, ge=0)
     source_checkpoint_digest: TaskDigest
 
     _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
@@ -50,7 +51,8 @@ class CommunicationPreparationEvidenceV1(ClosedTaskModel):
     input_artifact_digest: TaskDigest
     source_job_id: NativeInvocationIdentity
     source_deadline_at: datetime
-    budget_microusd: int = Field(ge=1)
+    # Recorded legacy amount (ADR-037, #1284): parsed, never compared.
+    budget_microusd: int = Field(default=0, ge=0)
     policy_digest: TaskDigest
 
     _utc_timestamp = field_validator("source_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
@@ -178,40 +180,33 @@ async def validate_group(db, run, group):
 
 
 def reservation_liability(row):
-    """Whole original liability, independent of accounting-period rollover."""
-    if type(row.bound_microusd) is not int or row.bound_microusd <= 0:
-        raise InferenceAccountingError("general_task_group_unknown")
-    if row.state in {"reserved", "contact_started", "unknown"}:
-        return row.bound_microusd
-    if row.state == "settled":
-        actual = row.actual_cost_microusd
-        if type(actual) is not int or actual < 0:
-            raise InferenceAccountingError("general_task_group_unknown")
-        if actual > row.bound_microusd:
-            raise InferenceAccountingError("general_task_group_cost_limit")
-        return actual
+    """Recorded spend of one request record, for display and stop evidence.
+
+    ADR-037 (#1284): never compared with an allowance. A legacy in-flight row
+    counts its recorded bound (new rows carry 0); an ``unknown`` row is
+    finished and counts its charge if one was recorded, else 0.
+    """
+    bound = row.bound_microusd if type(row.bound_microusd) is int and row.bound_microusd >= 0 else 0
+    actual = row.actual_cost_microusd if type(row.actual_cost_microusd) is int and row.actual_cost_microusd >= 0 else None
+    if row.state in {"reserved", "contact_started"}:
+        return bound
+    if row.state in {"settled", "unknown"}:
+        return actual or 0
     if row.state == "released" and row.contact_started_at is None:
         return 0
     raise InferenceAccountingError("general_task_group_unknown")
 
 
-def _validate_specialist_limits(members, binding, limits, *, new_bound=None):
-    """Narrow request allowance inside, never instead of, the original group."""
+def _validate_specialist_limits(members, binding, limits, *, new_call=False):
+    """Narrow call allowance inside, never instead of, the original group.
+
+    ADR-037 (#1284): no dollar allowance is compared.
+    """
     own = [row for row in members if entry_for(row).get("role") == "specialist"
         and entry_for(row).get("delegation_invocation_id") == binding["delegation_invocation_id"]
         and entry_for(row).get("delegation_request_digest") == binding["delegation_request_digest"]]
-    if len(own) + (new_bound is not None) > limits.max_inference_calls:
+    if len(own) + new_call > limits.max_inference_calls:
         raise InferenceAccountingError("general_task_specialist_call_limit")
-    liability = new_bound or 0
-    for row in own:
-        if row.state in {"reserved", "contact_started"}:
-            liability += row.bound_microusd
-        elif row.state == "settled" and row.actual_cost_microusd is not None:
-            liability += row.actual_cost_microusd
-        elif row.state != "released":
-            raise InferenceAccountingError("general_task_group_unknown")
-    if liability > limits.max_cost_microusd:
-        raise InferenceAccountingError("general_task_specialist_cost_limit")
 
 
 async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_path, deadline_at=None, policy_digest=None, payload_digest=None):
@@ -231,10 +226,8 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
             members.append(row)
     if len(members) >= group.max_inference_calls:
         raise InferenceAccountingError("general_task_group_call_limit")
-    if any(row.state == "unknown" for row in members):
-        raise InferenceAccountingError("general_task_group_unknown")
-    if sum(reservation_liability(row) for row in members) + bound > group.max_cost_microusd:
-        raise InferenceAccountingError("general_task_group_cost_limit")
+    # ADR-037 (#1284): an ``unknown`` (finished, not priced yet) record does
+    # not block the next call and no dollar amount is compared.
     role = binding.get("role")
     repository = preparation = None
     expected_route = "strategist_agent" if role in {"repository_iteration", "communication_preparation"} else "general_task_planner"
@@ -250,7 +243,7 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
         if role == "specialist":
             from src.workflows.specialist_delegation import validate_specialist_accounting
             context = await validate_specialist_accounting(db, group, binding, initial)
-            _validate_specialist_limits(members, binding, context.request.limits, new_bound=bound)
+            _validate_specialist_limits(members, binding, context.request.limits, new_call=True)
         else:
             await validate_continuation(db, group, binding, initial)
     elif role == "repository_iteration":
@@ -319,7 +312,7 @@ async def validate_preparation(db, run, group, binding, *, bound):
         raise InferenceAccountingError("general_task_group_binding_invalid")
     prepared = await verify_preparation_binding(db, binding["preparation_binding"], source_run=run)
     if (prepared.group != group or binding.get("group") != group
-        or bound > prepared.budget_microusd or prepared.source_deadline_at <= datetime.now(timezone.utc)
+        or prepared.source_deadline_at <= datetime.now(timezone.utc)
         or _utc(run.deadline_at) > group.original_deadline_at):
         raise InferenceAccountingError("general_task_group_authority_invalid")
     return CommunicationPreparationEvidenceV1.model_validate(binding_payload(prepared)).model_dump(mode="json")
@@ -394,11 +387,6 @@ async def validate_contact(db, run, row, rows, *, binding=None):
             or entry_for(member).get("group_digest") != digest(group.model_dump(mode="json"))
             for member in members)):
         raise InferenceAccountingError("general_task_group_conflict")
-    if any(member.state == "unknown" for member in members):
-        raise InferenceAccountingError("general_task_group_unknown")
-    liability = sum(reservation_liability(member) for member in members)
-    if liability > group.max_cost_microusd:
-        raise InferenceAccountingError("general_task_group_cost_limit")
     if entry.get("role") == "repository_iteration":
         if row.runtime_path != "strategist_agent":
             raise InferenceAccountingError("general_task_group_runtime_invalid")

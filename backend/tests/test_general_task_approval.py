@@ -230,7 +230,7 @@ async def test_api_exact_approval_continues_same_root_attempt_once(approval_jour
     assert journey.tool.calls == 1
     accounting = await journey.jobs.inference_accounting_snapshot()
     assert accounting["operation_count"] == 0
-    assert accounting["committed_microusd"] == accounting["unknown_microusd"] == 0
+    assert accounting["spent_microusd"] == accounting["unpriced_requests"] == 0
 
 
 @pytest.mark.asyncio

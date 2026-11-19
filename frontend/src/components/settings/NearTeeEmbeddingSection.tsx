@@ -9,11 +9,10 @@ interface Props {
   stale: boolean;
   revision?: number;
   policyRevoked?: boolean;
-  laneCeilingMicrousd?: number | null;
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
   onRefreshed?: (next: ModelFabricSettingsStatus) => void;
 }
-interface Draft { enabled: boolean; model: string; maxInput: string; batch: string; timeout: string; reserveUsd: string; ttl: string }
+interface Draft { enabled: boolean; model: string; maxInput: string; batch: string; timeout: string; ttl: string }
 
 const CHECKS = ["embedding", "health", "latency_ms"] as const;
 const EVIDENCE_REASON = "near_tee_embedding_evidence_required";
@@ -21,13 +20,6 @@ const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 
 
 function usd(value: number) { return (value / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, ""); }
 function readable(value: string | null | undefined) { return (value ?? "").replace(/_/g, " "); }
-function money(value: string, label: string): number {
-  if (!/^\d+(?:\.\d{1,6})?$/.test(value)) throw new Error(label + " requires a USD amount with at most six decimal places.");
-  const [whole, fraction = ""] = value.split(".");
-  const parsed = Number(whole) * 1_000_000 + Number(fraction.padEnd(6, "0"));
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1_000_000_000) throw new Error(label + " must be between $0.000001 and $1000.");
-  return parsed;
-}
 function number(value: string, label: string, max: number, integer = true): number {
   const parsed = Number(value);
   if (!value.trim() || !Number.isFinite(parsed) || parsed < 1 || parsed > max || (integer && !Number.isInteger(parsed))) throw new Error(label + " must be between 1 and " + max + (integer ? " as a whole number." : "."));
@@ -36,7 +28,7 @@ function number(value: string, label: string, max: number, integer = true): numb
 function draftFrom(slot?: NearTeeSlotStatus | null): Draft {
   return { enabled: slot?.enabled ?? false, model: slot?.model_id ?? "", maxInput: String(slot?.max_input_tokens ?? 8192),
     batch: String(slot?.max_batch_size ?? 16), timeout: String(slot?.timeout_seconds ?? 30),
-    reserveUsd: usd(slot?.request_cost_bound_microusd ?? 5_000), ttl: String(slot?.catalog_ttl_hours ?? 24) };
+    ttl: String(slot?.catalog_ttl_hours ?? 24) };
 }
 function blockedText(reason: string | null | undefined) {
   if (reason === EVIDENCE_REASON) return "Blocked: NEAR embeddings stay off until source evidence shows the embeddings and billing endpoints honour x-no-aliasing (ADR-035). Saving, the catalog check and capability checks cannot clear this. NEAR's catalog record for this model also has no readiness flag, so the catalog check reports it not ready; the ADR amendment must decide how readiness is handled.";
@@ -44,13 +36,12 @@ function blockedText(reason: string | null | undefined) {
 }
 
 /** ADR-035 embedding slot and operator-started re-index (minimal controls). */
-export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked = false, laneCeilingMicrousd, onSave, onRefreshed }: Props) {
+export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked = false, onSave, onRefreshed }: Props) {
   const slot = setup?.slots.embedding ?? null;
   const index = setup?.embedding_index ?? null;
   const job = index?.job ?? null;
   const [draft, setDraft] = useState(() => draftFrom(slot));
   const [acknowledged, setAcknowledged] = useState(false);
-  const [budgetUsd, setBudgetUsd] = useState("0.1");
   const [maxItems, setMaxItems] = useState("1000");
   const [reindexAck, setReindexAck] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -71,8 +62,7 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
   }
   const unchanged = Boolean(slot && draft.enabled === slot.enabled && draft.model === slot.model_id
     && Number(draft.maxInput) === slot.max_input_tokens && Number(draft.batch) === slot.max_batch_size
-    && Number(draft.timeout) === slot.timeout_seconds && Number(draft.ttl) === slot.catalog_ttl_hours
-    && (() => { try { return money(draft.reserveUsd, "Reserve") === slot.request_cost_bound_microusd; } catch { return false; } })());
+    && Number(draft.timeout) === slot.timeout_seconds && Number(draft.ttl) === slot.catalog_ttl_hours);
   const carryConsent = Boolean(slot?.enabled && slot.consent_current && !policyRevoked && unchanged);
   async function detail(response: Response) {
     try { const body = await response.json(); const value = body?.detail; return typeof value === "string" ? value : JSON.stringify(value ?? response.status); }
@@ -92,16 +82,13 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
   }
   const save = () => run("save", async () => {
     if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) throw new Error("Refresh current settings to obtain the policy revision before saving.");
-    if (!laneCeilingMicrousd) throw new Error("Publish the shared inference lane ceiling first.");
     if (!(NEAR_TEE_EMBEDDING_MODELS as readonly string[]).includes(draft.model)) throw new Error("Choose an embedding model from the NEAR TEE allowlist.");
-    const reserve = money(draft.reserveUsd, "Per-request reserve");
-    if (reserve > laneCeilingMicrousd) throw new Error("Per-request reserve cannot exceed the shared lane ceiling.");
     if (draft.enabled && !carryConsent && !acknowledged) throw new Error("Acknowledge that memory text is sent to NEAR in plaintext before enabling or changing this slot.");
     const value: NearTeeSetupInput = { schema_version: "seraph.near.tee.setup.v1", api_base: NEAR_TEE_API_BASE,
       slots: { embedding: { model_id: draft.model, enabled: draft.enabled,
         max_input_tokens: number(draft.maxInput, "Maximum input tokens per request", 32_768),
         max_output_tokens: 1, max_batch_size: number(draft.batch, "Inputs per request", 64),
-        timeout_seconds: number(draft.timeout, "Request timeout", 120, false), request_cost_bound_microusd: reserve,
+        timeout_seconds: number(draft.timeout, "Request timeout", 120, false),
         catalog_ttl_hours: number(draft.ttl, "Catalog refresh hours", 24),
         plaintext_provider_egress_acknowledged: draft.enabled && acknowledged } } };
     const next = await onSave({ expected_policy_revision: revision, near_tee: value });
@@ -124,11 +111,10 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
   });
   const startReindex = () => run("reindex", async () => {
     if (!reindexAck) throw new Error("Acknowledge that canonical memory text is sent to NEAR in plaintext for re-indexing.");
-    const budget = money(budgetUsd, "Re-index budget");
     const items = number(maxItems, "Maximum memories", index?.max_items ?? 10_000);
     const response = await apiFetch(API_URL + "/api/settings/model-fabric/near-tee/embedding-reindex", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expected_policy_revision: revision, budget_microusd: budget, max_items: items,
+      body: JSON.stringify({ expected_policy_revision: revision, max_items: items,
         memory_egress_acknowledged: true, request_uuid: crypto.randomUUID() }) });
     if (!response.ok) throw new Error("Re-index refused: " + readable(await detail(response)));
     setReindexAck(false);
@@ -164,7 +150,6 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
       <label>Maximum input tokens per request<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding maximum input tokens" type="number" min={1} max={32768} value={draft.maxInput} onChange={e => update("maxInput", e.target.value)} /></label>
       <label>Inputs per request<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding batch size" type="number" min={1} max={64} value={draft.batch} onChange={e => update("batch", e.target.value)} /></label>
       <label>Request timeout · seconds<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding request timeout" type="number" min={1} max={120} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
-      <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding per-request reserve USD" inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
       <label>Catalog refresh · every hours (background, never blocks)<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding catalog refresh hours" type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
       {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge NEAR TEE memory plaintext access" checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives memory text in plaintext for embeddings. After indexing, new memories and recall queries are sent to NEAR. Seraph does not verify attestation and there is no end-to-end encryption.</span></label>}
     </fieldset>
@@ -173,10 +158,9 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
       <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current || slot.evidence_required} onClick={() => void capabilityCheck()}>{busy === "capability" ? "Running capability check…" : "Run embedding capability check"}</button>
     </div>
     <div className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2" aria-label="NEAR TEE embedding re-index">
-      <label>Re-index budget · USD<input className={inputClass + " mt-1 w-full"} aria-label="Re-index budget USD" inputMode="decimal" value={budgetUsd} onChange={e => setBudgetUsd(e.target.value)} /></label>
       <label>Maximum memories this run<input className={inputClass + " mt-1 w-full"} aria-label="Re-index maximum memories" type="number" min={1} value={maxItems} onChange={e => setMaxItems(e.target.value)} /></label>
-      <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge re-index memory egress" checked={reindexAck} onChange={e => setReindexAck(e.target.checked)} /><span>Send canonical memory text to NEAR in plaintext to rebuild the embedding index, within this budget. After indexing, new memories and recall queries are sent to NEAR.</span></label>
-      {job && <p className="sm:col-span-2 text-[9px]" role="status" aria-label="Re-index progress">Re-index {readable(job.status)}: {job.indexed_items} of {job.planned_items ?? "?"} memories indexed, {job.skipped_existing} already current, spent ${usd(job.spent_microusd)}{job.budget_microusd ? ` of $${usd(job.budget_microusd)}` : ""}{job.reason_code ? " · " + readable(job.reason_code) : ""}.</p>}
+      <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge re-index memory egress" checked={reindexAck} onChange={e => setReindexAck(e.target.checked)} /><span>Send canonical memory text to NEAR in plaintext to rebuild the embedding index. After indexing, new memories and recall queries are sent to NEAR.</span></label>
+      {job && <p className="sm:col-span-2 text-[9px]" role="status" aria-label="Re-index progress">Re-index {readable(job.status)}: {job.indexed_items} of {job.planned_items ?? "?"} memories indexed, {job.skipped_existing} already current, spent ${usd(job.spent_microusd)}{job.reason_code ? " · " + readable(job.reason_code) : ""}.</p>}
     </div>
     {error && <div role="alert" className="mt-2 text-[10px] text-red-400">{error}</div>}
     {message && <div role="status" className="mt-2 text-[10px]">{message}</div>}

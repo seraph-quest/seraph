@@ -217,7 +217,9 @@ describe("ArtifactStoragePanel", () => {
     // ADR-035: OpenRouter is retired; its controls are present but cannot activate it.
     for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeDisabled();
     expect(screen.getByTestId("openrouter-retired-banner")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Shared inference lane" })).toBeInTheDocument();
+    // #1284: no lane panel with money inputs; spend history replaces the accounting budget view.
+    expect(screen.queryByRole("region", { name: "Shared inference lane" })).toBeNull();
+    expect(screen.getByLabelText("Spend history")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Canary profile").querySelectorAll("option")).toHaveLength(1));
     expect(screen.getByRole("button", { name: "Run canary" })).toBeDisabled();
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);

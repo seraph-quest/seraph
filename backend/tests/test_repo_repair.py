@@ -132,7 +132,7 @@ async def _configure_governed_near_test_route(monkeypatch):
     ``script`` answers each completion.
     """
     from tests.near_tee_support import prepare_repository_near_route
-    return await prepare_repository_near_route(monkeypatch, ceiling_microusd=25_000)
+    return await prepare_repository_near_route(monkeypatch)
 
 
 async def _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace):

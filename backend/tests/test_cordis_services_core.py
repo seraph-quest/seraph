@@ -600,14 +600,14 @@ async def test_read_job_artifact_readback_journey_records_explicit_no_learning(l
     host, jobs, calls = live_host
     operator = await _operator()
     async with get_session() as db:
-        db.add(Memory(id="owner-memory", content="raw content never crosses", summary="cafe summary 1007",
+        db.add(Memory(id="owner-memory", content="raw content never crosses", summary="kiosk summary 1007",
                       source_session_id=operator.session_id))
-        db.add(Memory(id="foreign-memory", content="foreign", summary="cafe foreign", source_session_id="other-root"))
+        db.add(Memory(id="foreign-memory", content="foreign", summary="kiosk foreign", source_session_id="other-root"))
     _, digest = native_capability_inventory()
     cases = [
         ({"schema_version": 1, "method": "capabilities.list", "cursor": None, "limit": 2,
           "native_inventory_digest": digest}, "list-1"),
-        ({"schema_version": 1, "method": "memory.retrieve", "query": "cafe", "limit": 5, "status": "active"}, "mem-1"),
+        ({"schema_version": 1, "method": "memory.retrieve", "query": "kiosk", "limit": 5, "status": "active"}, "mem-1"),
     ]
     for candidate, key in cases:
         start = len(calls)
@@ -647,14 +647,14 @@ async def test_read_job_artifact_readback_journey_records_explicit_no_learning(l
         assert event.event_type == "runtime_service_observed" and json.loads(event.details_json)["no_learning"] is True
         if method == "memory.retrieve":
             assert value["result"]["value"]["records"] == [{
-                "record_ref": "owner-memory", "text": "cafe summary 1007",
-                "text_digest": hashlib.sha256(b"cafe summary 1007").hexdigest()}]
+                "record_ref": "owner-memory", "text": "kiosk summary 1007",
+                "text_digest": hashlib.sha256(b"kiosk summary 1007").hexdigest()}]
             assert sealed["result"]["projection"]["value"] == {"records": [
-                {"record_ref": "owner-memory", "text_mac": _record_mac("cafe summary 1007")}]}
-            assert _persisted_copies("cafe summary 1007") == []
+                {"record_ref": "owner-memory", "text_mac": _record_mac("kiosk summary 1007")}]}
+            assert _persisted_copies("kiosk summary 1007") == []
             # The private query never crossed to the plugin; only a job reference did.
             assert calls[start]["payload"] == {"query_ref": job["job_id"], "limit": 5}
-            assert "cafe" not in json.dumps(job)
+            assert "kiosk" not in json.dumps(job)
         # An exact retry reuses the one job and never re-executes.
         retry = await execute_native_read(operator=operator, candidate=candidate, idempotency_key=key,
                                           host=host, jobs=jobs)
@@ -662,11 +662,11 @@ async def test_read_job_artifact_readback_journey_records_explicit_no_learning(l
         assert len(calls) == start + 5
     async with get_session() as db:
         memory = await db.get(Memory, "owner-memory")
-        assert memory.summary == "cafe summary 1007"  # read is not learning
+        assert memory.summary == "kiosk summary 1007"  # read is not learning
 
 
-_PRIVATE_TEXT = "cafe private 1100"
-_MEMORY_READ = {"schema_version": 1, "method": "memory.retrieve", "query": "cafe", "limit": 5, "status": "active"}
+_PRIVATE_TEXT = "kiosk private 1100"
+_MEMORY_READ = {"schema_version": 1, "method": "memory.retrieve", "query": "kiosk", "limit": 5, "status": "active"}
 
 
 async def _private_memory(operator, memory_id="private-memory"):
@@ -684,7 +684,7 @@ async def _withdraw(case, operator, memory_id):
                              .values(revoked_at=datetime.now(timezone.utc)))
     elif case == "edit":
         async with get_session() as db:
-            await db.execute(update(Memory).where(Memory.id == memory_id).values(summary="cafe edited 1100"))
+            await db.execute(update(Memory).where(Memory.id == memory_id).values(summary="kiosk edited 1100"))
     elif case == "tombstone-reapply-pending":
         # A restored pre-forget row: still active with its text, while the
         # durable tombstone ledger has not yet re-applied the redaction.
@@ -783,7 +783,7 @@ async def test_memory_withdrawn_mid_journey_is_never_served_or_retained(live_hos
             WorkflowRunState.idempotency_key == "late-" + case))).scalar_one()
     assert run.status == "blocked" and run.failure_reason == reason
     assert run.result_digest is None
-    assert _persisted_copies(_PRIVATE_TEXT) == [] and _persisted_copies("cafe edited 1100") == []
+    assert _persisted_copies(_PRIVATE_TEXT) == [] and _persisted_copies("kiosk edited 1100") == []
 
 
 def test_legacy_read_context_with_a_full_payload_fails_closed():

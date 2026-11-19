@@ -1,4 +1,4 @@
-"""Bounded verification for the inference cost ledger (#1086).
+"""Bounded verification for the inference spend ledger (#1086).
 
 Every accounting writer used to load, re-validate and re-hash the whole ledger
 under ``BEGIN IMMEDIATE``, so each writer-lock hold grew with ledger size.
@@ -9,9 +9,8 @@ incremental without weakening what admission trusts:
   must equal the account witness. The ordered root of the stored row digests
   plus the account record (including its running totals) must reproduce the
   account digest. Every row the operation reads to decide, or modifies, must
-  hash to its stored digest. Admission reads only the running totals, so
-  editing an untouched row can neither free capacity nor clear the overrun
-  latch.
+  hash to its stored digest. Decisions read only the running totals, so
+  editing an untouched row cannot change one.
 * **Full verification** (first writer per process and deployment, any writer
   once the last full pass is older than ``2 * FULL_VERIFICATION_INTERVAL``,
   the rare writers, startup recovery, the background verifier, and the
@@ -51,7 +50,6 @@ _SESSION_KEY = "inference_ledger_state"
 # Process-local verification state per (workspace root, deployment id). A
 # fresh process has no entry, so its first writer always verifies in full.
 _verified_at: dict[tuple[str, str], float] = {}
-_latched: dict[tuple[str, str], str] = {}
 # Test-only: also compute every hot-path decision from the full ledger with
 # the pre-#1086 code and fail on any difference.
 SHADOW_FULL_LEDGER = False
@@ -142,15 +140,6 @@ def _key(workspace, account) -> tuple[str, str]:
     return (str(workspace.host_root), str(account.deployment_id))
 
 
-def latched_reason(workspace, account) -> str | None:
-    return _latched.get(_key(workspace, account))
-
-
-def latch(workspace, account, reason: str) -> None:
-    logger.error("inference accounting ledger verification failed (%s); accounting is blocked until restart", reason)
-    _latched[_key(workspace, account)] = reason
-
-
 def record_full_verification(workspace, account) -> None:
     _verified_at[_key(workspace, account)] = time.monotonic()
 
@@ -162,7 +151,6 @@ def full_verification_due(workspace, account) -> bool:
 
 def reset_process_state() -> None:
     _verified_at.clear()
-    _latched.clear()
 
 
 def row_values(row: InferenceCostReservation) -> dict[str, Any]:
@@ -221,9 +209,17 @@ def parse_totals(account) -> dict[str, Any]:
         totals = json.loads(account.ledger_totals_json)
     except (TypeError, ValueError) as exc:
         raise LedgerVerificationError("ledger_totals_unavailable") from exc
-    if not isinstance(totals, dict) or totals.get("schema_version") != 1:
+    if not isinstance(totals, dict) or totals.get("schema_version") not in {1, witness_codec.LEDGER_TOTALS_VERSION}:
         raise LedgerVerificationError("ledger_totals_unavailable")
     return totals
+
+
+def totals_current(account) -> bool:
+    """Sealed totals already use the current schema (else verify in full and reseal)."""
+    try:
+        return parse_totals(account).get("schema_version") == witness_codec.LEDGER_TOTALS_VERSION
+    except LedgerVerificationError:
+        return False
 
 
 def verify_fast(account, receipt_witness, digests: DigestIndex) -> dict[str, Any]:
@@ -265,7 +261,10 @@ def verify_full(account, rows, receipt_witness) -> dict[str, Any]:
             raise LedgerVerificationError("ledger_row_digest_mismatch")
     recomputed = witness_codec.ledger_totals(values)
     if witness_codec.is_v2_digest(account.ledger_digest):
-        if parse_totals(account) != recomputed:
+        # Stored totals verify in the schema they were sealed with; an older
+        # schema is resealed forward by the next persist (#1284).
+        stored = parse_totals(account)
+        if stored != witness_codec.ledger_totals(values, stored["schema_version"]):
             raise LedgerVerificationError("ledger_totals_mismatch")
     return recomputed
 
@@ -346,7 +345,7 @@ def full_state(account, rows) -> LedgerState:
     values = {row.operation_id: row_values(row) for row in ordered}
     computed = {operation_id: witness_codec.row_digest(value) for operation_id, value in values.items()}
     digests = DigestIndex.build(computed.items())
-    backfill = account is None or not witness_codec.is_v2_digest(account.ledger_digest) or any(
+    backfill = account is None or not witness_codec.is_v2_digest(account.ledger_digest) or not totals_current(account) or any(
         row.ledger_row_digest != computed[row.operation_id] for row in ordered)
     return LedgerState(digests=digests, totals=witness_codec.ledger_totals(list(values.values())),
         full=True, rows=list(ordered), pre_images=values, backfill=backfill)
@@ -399,42 +398,12 @@ def verify_offline(database_path) -> tuple[str | None, str | None, int | None]:
             return deployment_id, "ledger_digest_mismatch", revision
         if witness_codec.stored_row_digest_mismatch(rows) or any(row["ledger_row_digest"] is None for row in rows):
             return deployment_id, "ledger_row_digest_mismatch", revision
-        if json.loads(account["ledger_totals_json"]) != witness_codec.ledger_totals(rows):
+        stored = json.loads(account["ledger_totals_json"])
+        if not isinstance(stored, dict) or stored != witness_codec.ledger_totals(rows, stored.get("schema_version")):
             return deployment_id, "ledger_totals_mismatch", revision
     except Exception as exc:  # any evidence/decoding failure is a verification failure
         return deployment_id, f"ledger_evidence_invalid:{type(exc).__name__}", revision
     return deployment_id, None, revision
-
-
-async def shadow_compare_decisions(db, account, totals, period: str, owner_id: str | None) -> None:
-    """Test-only oracle: the pre-#1086 full-ledger admission inputs (R1)."""
-    if not SHADOW_FULL_LEDGER:
-        return
-    from sqlmodel import select
-    from src.workspace import accounting_witness as codec
-    rows = list((await db.execute(select(InferenceCostReservation))).scalars())
-    operations = [row.model_dump(mode="json", exclude={"group_lookup_key", codec.ROW_DIGEST_COLUMN}) for row in rows]
-    owner_data = account.model_dump(mode="json")
-
-    def held(row):
-        if row.state in {"reserved", "contact_started", "unknown"}:
-            return row.bound_microusd
-        return (row.actual_cost_microusd or 0) if row.period_id >= period and row.state == "settled" else 0
-
-    expected = (
-        codec.period_state(owner_data, operations, period),
-        sorted(item["operation_id"] for item in codec.unreviewed_overruns(owner_data, operations)),
-        sum(held(row) for row in rows),
-        sum(held(row) for row in rows if row.owner_id == owner_id) if owner_id is not None else None,
-    )
-    actual = (
-        codec.period_state(owner_data, codec.totals_period_rows(totals), period),
-        sorted(item["operation_id"] for item in codec.unreviewed_overruns(owner_data, codec.totals_overrun_rows(totals))),
-        codec.held_microusd(totals, period),
-        codec.held_microusd(totals, period, owner_id) if owner_id is not None else None,
-    )
-    if expected != actual:
-        raise AssertionError(f"ledger totals decision drift: {actual} != {expected}")
 
 
 async def shadow_compare_helper(scoped, full) -> None:

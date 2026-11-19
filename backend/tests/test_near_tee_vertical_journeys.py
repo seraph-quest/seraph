@@ -124,7 +124,7 @@ async def test_general_task_planning_reaches_near_and_settles_from_near_billing(
     snapshot = await jobs.inference_accounting_snapshot()
     rows = near_settled_rows(snapshot, "general_task_planner")
     assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
-    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unknown_microusd"] == 0
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unpriced_requests"] == 0
     # The durable group/provenance contract is unchanged on NEAR.
     group = TaskProposalGroupV1.model_validate(group_entry(rows[0])["group"])
     assert proposal_provenance(rows[0], group).reservation_sequence == rows[0]["sequence"]
@@ -159,7 +159,7 @@ async def test_general_task_planning_near_echo_mismatch_settles_and_adopts_nothi
     rows = near_settled_rows(snapshot, "general_task_planner")
     # Contact happened: the known NEAR cost settled and the lane is free.
     assert len(rows) == 1 and rows[0]["state"] == "settled"
-    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unknown_microusd"] == 0
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unpriced_requests"] == 0
 
 
 @pytest.mark.asyncio
@@ -181,27 +181,23 @@ async def test_general_task_planning_without_structured_output_proof_is_sealed_p
 
 
 @pytest.mark.asyncio
-async def test_general_task_planning_missing_near_billing_is_unknown_and_blocks_the_lane(accounting_db,
+async def test_general_task_planning_missing_near_billing_is_unpriced_and_adopted(accounting_db,
         monkeypatch, isolated_broker):
-    from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
+    """#1284: no NEAR billing record means "not priced yet": the plan is
+    adopted, the row is unknown and the lane is free for the next request."""
     from src.work_board.general_task_planner import GeneralTaskPlanner
-    from src.work_board.repository import BoardError
     jobs, owner, near = await _planner_world(accounting_db, monkeypatch)
     near.answer = {"role": "assistant", "content": json.dumps(PLAN)}
     near.billing_missing = True
-    with pytest.raises(BoardError) as uncertain:
-        async with accounting_db[2]() as db:
-            await GeneralTaskPlanner().propose(db, owner, task_input(), [descriptor()], 1, "intent")
-    # The existing planner mapping for an uncertain broker outcome; the cause
-    # is the NEAR Unknown liability (no authoritative cost arrived).
-    assert uncertain.value.code == "general_task_planning_admission_blocked"
-    assert isinstance(uncertain.value.__cause__, GpuAdmissionUncertainError)
-    assert uncertain.value.__cause__.__cause__.code == "near_tee_cost_liability"
+    async with accounting_db[2]() as db:
+        plan = await GeneralTaskPlanner().propose(db, owner, task_input(), [descriptor()], 1, "intent")
+    assert plan.steps[0].tool_id == "fixture.read"
     snapshot = await jobs.inference_accounting_snapshot()
     rows = near_settled_rows(snapshot, "general_task_planner")
-    assert len(rows) == 1 and rows[0]["state"] == "unknown" and snapshot["unknown_microusd"] > 0
-    receipt = isolated_broker.receipt_for(rows[0]["operation_id"])
-    assert receipt.status == "blocked" and receipt.active_operation_id == rows[0]["operation_id"]
+    assert len(rows) == 1 and rows[0]["state"] == "unknown" and rows[0]["actual_cost_microusd"] is None
+    assert snapshot["unpriced_requests"] == 1
+    assert (await jobs.get_job(rows[0]["job_id"]))["status"] == "succeeded"
+    await assert_unpriced_answer_frees_lane(snapshot, isolated_broker, "general_task_planner")
 
 
 # ── Work Board card proposals (triage) ───────────────────────────
@@ -274,7 +270,7 @@ async def test_work_board_card_proposal_reaches_near_and_settles_from_near_billi
     snapshot = await jobs.inference_accounting_snapshot()
     rows = near_settled_rows(snapshot, "strategist_agent")
     assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
-    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unknown_microusd"] == 0
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unpriced_requests"] == 0
     async with sessions() as db:
         proposal = (await db.execute(select(WorkBoardProposal))).scalar_one()
         cards = list((await db.execute(select(WorkBoardTask))).scalars())
@@ -634,7 +630,7 @@ async def test_research_dossier_children_reach_near_and_settle_from_near_billing
     assert len(rows) == 2 and {row["state"] for row in rows} == {"settled"}, rows
     assert all(row["profile_id"] == "near_tee.text" and row["actual_cost_microusd"] == NEAR_COST_MICROUSD
         for row in rows)
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 0
     children = [run for run in runs if run.job_kind == "readonly_research_child"]
     parent = next(run for run in runs if run.job_kind == "research_dossier")
     # Each child's stored prompt digest is the canonical digest of the exact
@@ -733,15 +729,17 @@ async def test_mail_reply_truncated_near_answer_is_named_and_settled(accounting_
 
 
 @pytest.mark.asyncio
-async def test_mail_reply_missing_near_billing_is_unknown_and_blocks_the_lane(accounting_db, monkeypatch,
+async def test_mail_reply_missing_near_billing_is_unpriced_and_adopted(accounting_db, monkeypatch,
         isolated_broker):
+    """#1284: no NEAR billing record never withholds the draft."""
+    from src.db.models import WorkBoardStatus
     sessions, jobs, near, task_id, dispatcher, _source = await _mail_world(accounting_db, monkeypatch,
         "reply-near-unknown")
     near.billing_missing = True
     receipt = await dispatcher.run_pass()
     task = await _task(sessions, task_id)
-    assert task.block_kind == "unknown_effect"
-    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+    assert receipt["completed"] == 1 and task.status is WorkBoardStatus.done, (receipt, task.block_reason)
+    await assert_unpriced_answer_frees_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
         "strategist_agent")
 
 
@@ -793,13 +791,15 @@ async def test_mail_reply_near_reservation_resumes_after_crash_before_contact(ac
     assert (rows[0]["operation_id"], rows[0]["sequence"]) == (before[0]["operation_id"], before[0]["sequence"])
 
 
-def assert_unknown_liability_blocks_lane(snapshot, broker, runtime_path):
-    """Contact happened and no NEAR cost arrived: an Unknown liability that
-    keeps the serial lease blocked (never settled, never released)."""
+async def assert_unpriced_answer_frees_lane(snapshot, broker, runtime_path):
+    """Contact happened and no NEAR cost arrived (#1284): the row is unknown
+    ("not priced yet") and the serial lane is released for the next request."""
     rows = near_settled_rows(snapshot, runtime_path)
-    assert len(rows) == 1 and rows[0]["state"] == "unknown" and snapshot["unknown_microusd"] > 0, rows
+    assert len(rows) == 1 and rows[0]["state"] == "unknown", rows
+    assert snapshot["unpriced_requests"] >= 1
     receipt = broker.receipt_for(rows[0]["operation_id"])
-    assert receipt.status == "blocked" and receipt.active_operation_id == rows[0]["operation_id"]
+    assert receipt.status != "blocked", receipt
+    assert (await broker.status())["active"] is None
 
 
 # ── Calendar meeting prep ────────────────────────────────────────
@@ -911,15 +911,17 @@ async def test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing(
 
 
 @pytest.mark.asyncio
-async def test_calendar_meeting_prep_missing_near_billing_is_unknown_and_blocks_the_lane(accounting_db,
+async def test_calendar_meeting_prep_missing_near_billing_is_unpriced_and_adopted(accounting_db,
         monkeypatch, isolated_broker):
+    """#1284: no NEAR billing record never withholds the meeting prep."""
+    from src.db.models import WorkBoardStatus
     sessions, jobs, near, task_id, claim, typed_input, dispatcher, _reads = await _calendar_world(
         accounting_db, monkeypatch, key="calendar-near-unknown")
     near.billing_missing = True
     result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
     task = await _task(sessions, task_id)
-    assert result["completed"] is False and task.block_kind == "unknown_effect", (result, task.block_reason)
-    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+    assert result["completed"] is True and task.status is WorkBoardStatus.done, (result, task.block_reason)
+    await assert_unpriced_answer_frees_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
         "strategist_agent")
 
 
@@ -1095,12 +1097,13 @@ async def test_communication_preparation_mail_source_reaches_near_and_settles(ac
     assert paid[0].actual_cost_microusd == NEAR_COST_MICROUSD
 
 
-# ── Unknown liability (no NEAR billing readback) per vertical ────
+# ── Not priced yet (no NEAR billing readback) per vertical, #1284 ──
 
 
 @pytest.mark.asyncio
-async def test_work_board_card_proposal_missing_near_billing_is_unknown(accounting_db, monkeypatch,
-        isolated_broker):
+async def test_work_board_card_proposal_missing_near_billing_is_unpriced_and_adopted(accounting_db,
+        monkeypatch, isolated_broker):
+    """#1284: no NEAR billing record never withholds the proposal."""
     from src.work_board.contracts import WorkBoardProposalRequest
     from src.work_board import triage as triage_service
     sessions, jobs, operator, owner, task, near = await _card_proposal_world(accounting_db, monkeypatch)
@@ -1108,15 +1111,15 @@ async def test_work_board_card_proposal_missing_near_billing_is_unknown(accounti
     result = await triage_service.create_proposal(owner, task.task_id, kind="specify",
         request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="near-unknown"),
         operator=operator)
-    assert result["status"] == "blocked" and result["provider_contact_state"] == "unknown", result
-    assert result["proposed_tasks"] == []
-    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+    assert result["status"] == "proposed" and result["provider_contact_state"] == "succeeded", result
+    assert result["proposed_tasks"][0]["title"] == "Specified operator task"
+    await assert_unpriced_answer_frees_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
         "strategist_agent")
 
 
 @pytest.mark.asyncio
-async def test_guardian_assessment_missing_near_billing_is_unknown(isolated_runtime, monkeypatch, tmp_path,
-        isolated_broker):
+async def test_guardian_assessment_missing_near_billing_is_unpriced_and_adopted(isolated_runtime, monkeypatch,
+        tmp_path, isolated_broker):
     from src.db.models import GuardianOpportunity
     from src.guardian import opportunity_runtime
     from src.workflows.job_runtime import DurableJobRepository
@@ -1128,16 +1131,18 @@ async def test_guardian_assessment_missing_near_billing_is_unknown(isolated_runt
     await opportunity_runtime.execute_assessment(row.id)
     async with sessions() as db:
         final = await db.get(GuardianOpportunity, row.id)
-    # Contacted uncertainty is retained liability, never a replay.
-    assert final.status == "unknown", (final.status, final.reason_code)
-    assert (await jobs.get_job(final.job_id))["status"] == "unknown_external_effect"
-    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+    # #1284: no NEAR billing record never withholds the assessment.
+    assert final.status == "proposed", (final.status, final.reason_code)
+    assert (await jobs.get_job(final.job_id))["status"] == "succeeded"
+    await assert_unpriced_answer_frees_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
         "strategist_agent")
 
 
 @pytest.mark.asyncio
-async def test_research_missing_near_billing_is_unknown_and_adopts_nothing(accounting_db, monkeypatch,
+async def test_research_missing_near_billing_is_unpriced_and_adopted(accounting_db, monkeypatch,
         isolated_broker):
+    """#1284: no NEAR billing record never withholds the dossier and never
+    holds the lane: both children run and the card completes."""
     from src.db.models import WorkBoardStatus, WorkflowRunState
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.repository import WorkBoardRepository
@@ -1162,14 +1167,15 @@ async def test_research_missing_near_billing_is_unknown_and_adopts_nothing(accou
     snapshot = await jobs.inference_accounting_snapshot()
     rows = near_settled_rows(snapshot, "readonly_research_child")
     contacted = [row for row in rows if row["contact_started_at"] is not None]
-    # Exactly one contact: the serial lane stays blocked by its Unknown cost,
-    # so the sibling is never contacted and no dossier is adopted.
-    assert len(contacted) == 1 and contacted[0]["state"] == "unknown" and snapshot["unknown_microusd"] > 0
-    assert len([r for r in near_inference_requests(near) if r.url.path == "/v1/chat/completions"]) == 1
-    receipt_for = isolated_broker.receipt_for(contacted[0]["operation_id"])
-    assert receipt_for.status == "blocked"
-    assert receipt.get("completed", 0) == 0 and task.status is not WorkBoardStatus.done
-    assert not any(run.job_kind == "readonly_research_child" and run.status == "succeeded" for run in runs)
+    # Both children were contacted (the lane was not held) and neither is priced.
+    assert len(contacted) == 2 and {row["state"] for row in contacted} == {"unknown"}, contacted
+    assert snapshot["unpriced_requests"] == 2
+    assert len([r for r in near_inference_requests(near) if r.url.path == "/v1/chat/completions"]) == 2
+    assert all(isolated_broker.receipt_for(row["operation_id"]).status != "blocked" for row in contacted)
+    assert (await isolated_broker.status())["active"] is None
+    children = [run.status for run in runs if run.job_kind == "readonly_research_child"]
+    assert children == ["succeeded", "succeeded"], [(run.job_kind, run.status) for run in runs]
+    assert receipt.get("completed", 0) == 1 and task.status is WorkBoardStatus.done, (receipt, task.block_reason)
 
 
 @pytest.mark.asyncio

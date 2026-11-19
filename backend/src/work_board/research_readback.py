@@ -34,7 +34,8 @@ def binds(task, attempt, run, *, typed_inputs=None, allow_unlinked_admission=Fal
             or run.max_attempts != 1 or run.budget_digest != _digest({"budget_microusd": 0})
             or json.loads(run.resource_claims_json) != []
             or run.idempotency_scope != "work-board-attempt" or run.idempotency_key != f"{task.task_id}:{attempt.attempt_id}"
-            or type(bound) is not int or bound <= 0 or type(ceiling) is not int or ceiling < bound*len(inputs.perspectives)
+            # Recorded amounts are history only (ADR-037); just their shape is checked.
+            or type(bound) is not int or bound < 0 or type(ceiling) is not int or ceiling < 0
             or type(authority["model_policy_revision"]) is not int or authority["model_policy_revision"] <= 0
             or not re.fullmatch(r"[0-9a-f]{64}", authority["model_policy_digest"])):
             return False
@@ -190,7 +191,7 @@ async def original_group_binds(db, run, *, typed_inputs):
                 or cost.goal_id != run.goal_id or cost.goal_revision != run.goal_revision
                 or cost.runtime_path != "readonly_research_child"
                 or cost.bound_microusd != authority["research_slot_allowance_microusd"]
-                or cost.owner_ceiling_microusd != authority["research_owner_ceiling_microusd"]
+                or cost.owner_ceiling_microusd != (authority["research_owner_ceiling_microusd"] or None)
                 or not any(item.get("kind") == "research_group_reservation"
                     and item.get("creation_digest") == creation["creation_digest"]
                     and item.get("slot") == slot and item.get("group_call_ids") == call_ids
@@ -267,8 +268,9 @@ async def _materialized_dossier(db, task, attempt, run):
                 for effect in json.loads(child.effect_receipts_json))):
             raise ValueError("research exact provider body digest changed")
         row = next((cost for cost in costs if cost.operation_id == "remote:"+child_id), None)
-        if (row is None or row.job_id != child_id or row.owner_id != run.owner_principal_id or row.state != "settled"
-            or row.contact_started_at is None or row.actual_cost_microusd is None
+        if (row is None or row.job_id != child_id or row.owner_id != run.owner_principal_id
+            or row.state not in {"settled", "unknown"} or row.contact_started_at is None
+            or (row.state == "settled" and row.actual_cost_microusd is None)
             or row.payload_digest != ready["payload_digest"] or row.policy_digest != creation["model_policy_digest"]):
             raise ValueError("research actual child settlement readback changed")
         raw = read(output["file_path"], output["content_sha256"], max_bytes=16384)

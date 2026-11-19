@@ -107,11 +107,11 @@ def test_deepseek_record_passes_with_readiness_inferred_from_attestation():
     assert evaluate_catalog(facts, slot_name="text", slot=_slot()) == (None, 7373)
     # 16384 x 0.30/M + 4096 x 1.20/M + 1 image x $0 = 4915.2 + 4915.2 -> 9831
     assert evaluate_catalog(facts, slot_name="vision", slot=_slot(max_input_tokens=16384)) == (None, 9831)
-    # Every other gate is unchanged: unknown output limit, reserve, context, modality.
+    # Every other gate is unchanged: unknown output limit, context, modality.
     assert evaluate_catalog(facts, slot_name="text", slot=_slot(max_output_tokens=8193,
         request_cost_bound_microusd=10**8))[0] == "near_tee_catalog_output_limit_unknown"
-    assert evaluate_catalog(facts, slot_name="text", slot=_slot(request_cost_bound_microusd=7372))[0] \
-        == "near_tee_catalog_cost_bound_too_small"
+    # #1284: a legacy bound below the catalog price no longer refuses the model.
+    assert evaluate_catalog(facts, slot_name="text", slot=_slot(request_cost_bound_microusd=7372)) == (None, 7373)
     text_only = _facts(architecture={"inputModalities": ["text"], "outputModalities": ["text"]})
     assert evaluate_catalog(text_only, slot_name="vision", slot=_slot())[0] == "near_tee_catalog_modality_missing"
     assert evaluate_catalog(_facts(contextLength=4096), slot_name="text", slot=_slot())[0] \
@@ -274,7 +274,7 @@ async def test_deepseek_text_slot_structured_output_needs_a_live_proof(client, m
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     rows = [row for row in snapshot["operations"] if row["runtime_path"] == "session_consolidation"]
     assert len(rows) == 3 and {row["state"] for row in rows} == {"settled"}
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 0
     # Model echo and x-no-aliasing are still enforced for DeepSeek.
     near.finish_reason = "stop"
     near.answer = {"role": "assistant", "content": '{"summary": "alias"}'}

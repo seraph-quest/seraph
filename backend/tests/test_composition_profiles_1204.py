@@ -390,7 +390,7 @@ async def test_the_lifecycle_and_programme_digest_gates_see_the_booted_patch(tmp
     _write_patch(tmp_path, [{"id": SCHEDULER_ROW, "value": False}])
     boot_profile()
     programme = {"state": "active", "reason_code": None, "cadence": "daily"}
-    blocked = source_schedule(programme, [], 1, None)
+    blocked = source_schedule(programme, [], None)
     assert (blocked.next_source_state, blocked.next_source_reason) == ("unavailable", "scheduler_disabled")
     lifecycle = RuntimeLifecycle()
     lifecycle.managed = True

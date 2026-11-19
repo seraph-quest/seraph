@@ -224,7 +224,9 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
             assert rejected.value.code == "general_task_provenance_missing"
             with pytest.raises(RollbackFixture):
                 async with db.begin_nested():
-                    initial.state = "unknown"
+                    # A call still in flight blocks publication; a finished
+                    # call NEAR has not priced yet does not (#1284).
+                    initial.state = "contact_started"
                     await db.flush()
                     with pytest.raises(BoardError) as rejected:
                         await recheck_proposal_publication(db, owner, witness)

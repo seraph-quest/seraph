@@ -713,19 +713,13 @@ def _resolve_readback_observations(
 
 
 def _effect_recovery_state(effects: list[dict[str, Any]]) -> tuple[str, str]:
-    """Classify an unresolved ledger for operator-visible recovery."""
-    for item in effects:
-        if not _effect_is_unresolved(item):
-            continue
-        details = item.get("details") if isinstance(item, dict) else None
-        nested = details.get("receipt") if isinstance(details, dict) else None
-        if (
-            isinstance(details, dict)
-            and details.get("unknown_cost_outstanding")
-        ) or (
-            isinstance(nested, dict) and nested.get("unknown_cost_outstanding")
-        ):
-            return "cost_liability", "cost_liability"
+    """Classify an unresolved ledger for operator-visible recovery.
+
+    ADR-037 (#1284): an unresolved remote call is an uncertain external
+    effect (never replayed); a missing charge no longer parks it in
+    ``cost_liability``. That status stays readable for jobs already in it.
+    """
+    del effects
     return "unknown_external_effect", "unknown_external_effect"
 
 
@@ -1924,22 +1918,14 @@ def _validate_approval_resume_receipt(
             expected = expected_revision
         if actual != expected:
             raise DurableJobTransitionError(f"approval resume {field_name} is stale")
-    expected_budget = _authority_budget_microusd(authority)
-    expected_budget_digest = _digest({"budget_microusd": expected_budget})
-    if _text(raw.get("budget_digest")) != expected_budget_digest:
-        raise DurableJobTransitionError("approval resume budget digest is stale")
-    actual_budget = raw.get("budget_microusd")
-    if actual_budget is not None:
-        if isinstance(actual_budget, bool):
-            raise DurableJobTransitionError("approval resume budget is malformed")
-        try:
-            actual_budget = int(actual_budget)
-        except (TypeError, ValueError) as exc:
-            raise DurableJobTransitionError("approval resume budget is malformed") from exc
-        if actual_budget < 0:
-            raise DurableJobTransitionError("approval resume budget is malformed")
-    if actual_budget != expected_budget:
-        raise DurableJobTransitionError("approval resume budget is stale")
+    # ADR-037 (#1284): a declared budget is never compared, so an approval is
+    # not stale because of it. The recorded values are carried unchanged so
+    # the approval row still matches the binding it was granted under.
+    expected_budget = raw.get("budget_microusd")
+    if isinstance(expected_budget, bool) or (expected_budget is not None and not isinstance(expected_budget, int)):
+        expected_budget = None
+    expected_budget_digest = _text(raw.get("budget_digest")) or _digest(
+        {"budget_microusd": _authority_budget_microusd(authority)})
     try:
         expires_at = float(raw.get("expires_at"))
     except (TypeError, ValueError, OverflowError) as exc:
@@ -7521,7 +7507,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.db.models import InferenceCostReservation
         async with self._session() as accounting_db:
             accounting_row = await accounting_db.get(InferenceCostReservation, str(safe_receipt["operation_id"]))
-            unknown_cost = accounting_row is not None and accounting_row.state in {"contact_started", "unknown"}
+            # Only a call still in flight is an unresolved effect. A finished
+            # call NEAR has not priced yet ("unknown") never withholds the
+            # result (ADR-037, #1284); an uncertain broker receipt still maps
+            # to an unknown effect through its own status.
+            unknown_cost = accounting_row is not None and accounting_row.state == "contact_started"
         return await self.record_effect(
             job_id,
             effect_type="remote_inference_admission",
@@ -8022,20 +8012,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     and _text(item.get("effect_type")) == receipt_effect_type
                     and _text(item.get("status")) in {"unknown", "intent", "dispatched"}
                 ):
-                    receipt_status = _text(receipt_payload.get("status"))
-                    details = item.get("details") if isinstance(item.get("details"), dict) else {}
-                    nested_receipt = details.get("receipt") if isinstance(details, dict) else None
-                    cost_outstanding = bool(
-                        details.get("unknown_cost_outstanding")
-                        or (
-                            isinstance(nested_receipt, dict)
-                            and nested_receipt.get("unknown_cost_outstanding")
-                        )
-                    )
-                    if cost_outstanding and receipt_status != "settled":
-                        raise DurableJobTransitionError(
-                            "cost liability requires a settled receipt with actual cost and operation binding"
-                        )
+                    # A charge is never required to resolve the effect (#1284).
                     _reconciliation_matches_effect(item, receipt_payload)
                     matched_effect = True
                     item = {

@@ -17,7 +17,7 @@ const pendingCreates = new Map<string, CommunicationCreate>();
 const button = "cockpit-feedback-button";
 export function CommunicationPlanPanel({ ownerPrincipalId, ownerSessionId, goals = [], task, selection, deadlineAt, onCreated, onClose }: Props) {
   const scope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}\u0000${ownerSessionId}` : null;
-  const [goalId, setGoalId] = useState(""); const [cost, setCost] = useState("0"); const [ack, setAck] = useState(false);
+  const [goalId, setGoalId] = useState(""); const [ack, setAck] = useState(false);
   const [pending, setPending] = useState<CommunicationCreate | null>(null);
   const [read, setRead] = useState<CommunicationPlanRead | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -44,7 +44,7 @@ export function CommunicationPlanPanel({ ownerPrincipalId, ownerSessionId, goals
     setRead(null); setSelected([]); setApprovals({}); setOutcomes({}); setBusy(false); setMessage(null); setAck(false);
     setPendingCleanup(null); setCleanupResult(null);
     const retained = scope ? pendingCreates.get(scope) ?? null : null;
-    setPending(retained); setGoalId(retained?.goal_id ?? ""); setCost(String(retained?.max_cost_microusd ?? 0));
+    setPending(retained); setGoalId(retained?.goal_id ?? "");
     return () => { ++generation.current; controller.current?.abort(); };
   }, [scope, task?.task_id, task?.task_revision, task?.goal_revision, owned, revisionKey]);
   useEffect(() => {
@@ -69,7 +69,7 @@ export function CommunicationPlanPanel({ ownerPrincipalId, ownerSessionId, goals
   }
   async function create(signal: AbortSignal, version: number) {
     if (!scope || !ownerPrincipalId || !ownerSessionId || (!pending && (!goal?.revision || !ack))) return;
-    const body = pending ?? { goal_id: goal!.id, goal_revision: goal!.revision!, max_cost_microusd: Number(cost), wall_seconds: 900,
+    const body = pending ?? { goal_id: goal!.id, goal_revision: goal!.revision!, wall_seconds: 900,
       idempotency_key: `communication:${crypto.randomUUID()}`, selection: { ...chosen, acknowledge_private_review: true as const } };
     pendingCreates.set(scope, body); setPending(body);
     const result = await createCommunicationTask(body, ownerPrincipalId, ownerSessionId, signal);
@@ -130,11 +130,10 @@ export function CommunicationPlanPanel({ ownerPrincipalId, ownerSessionId, goals
       <p>Selected sources: {chosen.reply_inputs.length} replies · {chosen.meeting_inputs.length} meetings · {chosen.reschedule_inputs.length} reschedule proposals.</p>
       {selection && ([...selection.reply_inputs.map(v => ({ key: `reply:${v.message_binding_id}`, label: `Reply source ${v.message_binding_id}` })), ...selection.meeting_inputs.map(v => ({ key: `meeting:${v.event_binding_id}`, label: `Meeting source ${v.event_binding_id}` })), ...selection.reschedule_inputs.map(v => ({ key: `reschedule:${v.event_binding_id}`, label: `Reschedule proposal ${v.event_binding_id}` }))]).map(source => <label key={source.key}><input type="checkbox" checked={!excludedSources.includes(source.key)} disabled={busy || Boolean(pending)} onChange={e => { setAck(false); setExcludedSources(values => e.target.checked ? values.filter(v => v !== source.key) : [...values, source.key]); }} />{source.label}</label>)}
       <p className="text-xs">Add sources through their existing private Mail review or Calendar event selection. Existing source-specific model consent must still be current.</p>
-      <label>Maximum communication cost (microusd)<input className="cockpit-input" type="number" min="0" step="1" value={cost} disabled={busy || Boolean(pending)} onChange={e => setCost(e.target.value)} /></label>
-      <label><input type="checkbox" checked={ack} disabled={busy || Boolean(pending)} onChange={e => setAck(e.target.checked)} />I reviewed these selected sources, finite cost limit and private preparation.</label>
+      <label><input type="checkbox" checked={ack} disabled={busy || Boolean(pending)} onChange={e => setAck(e.target.checked)} />I reviewed these selected sources and private preparation.</label>
       {goal && !selectionMatches && <p role="alert">Selected sources must match this Goal revision, and each reschedule requires its selected meeting. Review the affected sources again.</p>}
       {pending && <p role="status">Original communication admission is unconfirmed. The exact request and idempotency key remain in this owner session's memory.</p>}
-      <button type="button" className={button} disabled={busy || !owned || (!pending && (!goal || !ack || !selectionMatches || !Number.isSafeInteger(Number(cost)) || Number(cost) < 0))} onClick={() => void run(create)}>{pending ? "Reconcile exact communication request" : "Prepare one communication task"}</button>
+      <button type="button" className={button} disabled={busy || !owned || (!pending && (!goal || !ack || !selectionMatches))} onClick={() => void run(create)}>{pending ? "Reconcile exact communication request" : "Prepare one communication task"}</button>
     </div> : <>
       <p role="status">Original task {task.task_id} · {task.status}. Blocked or Unknown work retains its original recovery path on this Work card.</p>
       <button type="button" className={button} disabled={busy || !owned} onClick={() => void run(open)}>Open current private communication plan</button>
@@ -171,7 +170,7 @@ export function CommunicationPlanPanel({ ownerPrincipalId, ownerSessionId, goals
       </div>}
       {(plan || pendingCleanup) && <button type="button" className={button} disabled={busy || !owned || (pendingCleanup?.expected_task_revision ?? task.task_revision) !== task.task_revision}
         onClick={() => void cleanup()}>{pendingCleanup ? "Reconcile exact communication cleanup" : "Clean up aggregate private plan"}</button>}
-      {pendingCleanup && <p role="status">Original aggregate cleanup is unconfirmed at task revision {pendingCleanup.expected_task_revision}. Reconcile this exact request explicitly; no new task, budget or native action is authorized.</p>}
+      {pendingCleanup && <p role="status">Original aggregate cleanup is unconfirmed at task revision {pendingCleanup.expected_task_revision}. Reconcile this exact request explicitly; no new task or native action is authorized.</p>}
       {cleanupResult && <p role="status" aria-label="Aggregate private plan cleanup result">{cleanupResult.absent
         ? "Aggregate private plan absence verified. Source artifacts and approval/effect history remain with their original owners; no learning occurred."
         : "Aggregate private plan cleanup unresolved. Physical absence is not verified; no learning occurred."}</p>}

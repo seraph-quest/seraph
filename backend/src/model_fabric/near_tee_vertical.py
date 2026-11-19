@@ -43,8 +43,6 @@ class NearTeeVerticalRoute:
     profile_id: str
     profile_contract_hash: str
     model_id: str
-    request_cost_bound_microusd: int
-    spend_ceiling_microusd: int
     max_output_tokens: int
     timeout_seconds: float
 
@@ -68,8 +66,6 @@ def near_tee_vertical_route(runtime_path: str, configured: Any = None) -> NearTe
         return None
     return NearTeeVerticalRoute(runtime_path=runtime_path, profile_id=profile.id,
         profile_contract_hash=profile.contract_hash, model_id=slot.model_id,
-        request_cost_bound_microusd=int(slot.request_cost_bound_microusd),
-        spend_ceiling_microusd=int(configured.inference_lane.spend_ceiling_microusd),
         max_output_tokens=int(slot.max_output_tokens), timeout_seconds=float(slot.timeout_seconds))
 
 
@@ -77,16 +73,14 @@ def near_tee_vertical_route(runtime_path: str, configured: Any = None) -> NearTe
 class VerticalRouteSetup:
     """The reviewed route bounds a vertical binds into its durable authority.
 
-    For NEAR TEE: the text slot's model, request cost bound, output bound,
-    timeout and temperature, under the shared lane's spend ceiling. In the
-    explicit legacy test mode the retained OpenRouter setup is used instead.
+    For NEAR TEE: the text slot's model, output bound, timeout and
+    temperature. No amount is carried (ADR-037, #1284). In the explicit legacy
+    test mode the retained OpenRouter setup is used instead.
     """
 
     near_tee: bool
     profile_id: str
     model_id: str
-    request_cost_bound_microusd: int
-    spend_ceiling_microusd: int
     max_output_tokens: int
     timeout_seconds: float
     temperature: float
@@ -111,9 +105,7 @@ def vertical_inference_policy(runtime_path: str) -> tuple[Any, str, VerticalRout
         configured, digest = current_near_tee_policy("text")
         slot = near_tee_slot(configured, "text")
         return configured, digest, VerticalRouteSetup(near_tee=True,
-            profile_id=route.profile_id, model_id=route.model_id,
-            request_cost_bound_microusd=route.request_cost_bound_microusd,
-            spend_ceiling_microusd=route.spend_ceiling_microusd, max_output_tokens=route.max_output_tokens,
+            profile_id=route.profile_id, model_id=route.model_id, max_output_tokens=route.max_output_tokens,
             timeout_seconds=route.timeout_seconds,
             temperature=float(slot.temperature) if slot.temperature is not None else 0.0)
     from .retirement import openrouter_retired
@@ -125,8 +117,7 @@ def vertical_inference_policy(runtime_path: str) -> tuple[Any, str, VerticalRout
     configured, digest = inference_policy_from_configuration(configured)
     setup = configured.openrouter_setup
     return configured, digest, VerticalRouteSetup(near_tee=False, profile_id=setup.profile_id,
-        model_id="", request_cost_bound_microusd=setup.request_cost_bound_microusd,
-        spend_ceiling_microusd=setup.spend_ceiling_microusd, max_output_tokens=setup.max_output_tokens,
+        model_id="", max_output_tokens=setup.max_output_tokens,
         timeout_seconds=setup.timeout_seconds, temperature=setup.temperature)
 
 
@@ -216,7 +207,7 @@ def repository_iteration_near_transport(messages: list[dict[str, Any]], *, tempe
     target = repository_repair_near_target(profile_id=route.profile_id,
         profile_contract_hash=route.profile_contract_hash, model_id=slot.model_id)
     return {"body": body, "route_digest": transport_route_digest(target, REPOSITORY_REPAIR_RUNTIME_PATH),
-        "profile_id": route.profile_id, "request_cost_bound_microusd": route.request_cost_bound_microusd}
+        "profile_id": route.profile_id}
 
 
 def is_near_tee_context(context: Any) -> bool:

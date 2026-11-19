@@ -343,7 +343,7 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
     if (plan.programme_id.hex != binding.programme_id or plan.goal_id != binding.goal_id
             or plan.programme_revision != binding.grant_revision or plan.goal_revision != binding.goal_revision
             or plan.public_brief_digest != binding.brief_digest or plan.route_epoch != binding.route_epoch
-            or plan.deadline_at != deadline or plan.limits.cost_limit_microusd > binding.cost_ceiling_microusd
+            or plan.deadline_at != deadline
             or plan.steps[0].input_refs != [brief_ref]):
         raise ValueError("programme plan aliases, original deadline or first input changed")
     raw_brief = read_discovery(inputs["public_brief_file_path"], brief_ref.digest, programme_id=binding.programme_id, max_bytes=8000)

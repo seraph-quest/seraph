@@ -56,6 +56,7 @@ from src.model_fabric.configuration import (
     NEAR_TEE_IMPLEMENTED_SLOTS,
     NEAR_TEE_SLOT_ALLOWLISTS,
     NEAR_TEE_VAULT_KEY,
+    carry_near_tee_consents as _carry_near_tee_consents,
     near_tee_profile_for_slot,
     near_tee_slot_block_reason,
     near_tee_policy_for_runtime,
@@ -63,10 +64,8 @@ from src.model_fabric.configuration import (
     InferenceLaneConfig,
     INFERENCE_LANE_SCHEMA_VERSION,
     effective_inference_lane,
-    migrate_inference_lane,
     retire_openrouter_setup,
     validate_inference_lane,
-    deployment_spend_ceiling,
     validate_near_text_setup,
     WorkloadPolicy,
     credential_ref_allowed,
@@ -198,7 +197,8 @@ class OpenRouterRouteInput(BaseModel):
     max_output_tokens: int = Field(ge=1, le=131_072)
     timeout_seconds: float = Field(ge=1, le=120, allow_inf_nan=False)
     zero_data_retention: bool
-    request_cost_bound_microusd: int = Field(ge=1, le=1_000_000_000)
+    # Legacy (#1284): accepted from an older client, never compared.
+    request_cost_bound_microusd: int | None = Field(default=None, ge=1, le=1_000_000_000)
     # Optional for older clients; an unset window uses the documented default
     # instead of being derived from the output cap.
     context_window_tokens: int | None = Field(default=None, ge=1_024, le=2_097_152)
@@ -304,8 +304,9 @@ class NearTextSetupInput(BaseModel):
     api_base: Literal["https://cloud-api.near.ai/v1"] = "https://cloud-api.near.ai/v1"
     max_output_tokens: int = Field(default=1024, strict=True, ge=1, le=1024)
     timeout_seconds: float = Field(default=45, ge=1, le=45, allow_inf_nan=False)
-    request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
-    spend_ceiling_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    # Accepted from a browser tab loaded before #1284 and dropped.
+    request_cost_bound_microusd: int | None = Field(default=None, strict=True, ge=1, le=1_000_000_000)
+    spend_ceiling_microusd: int | None = Field(default=None, strict=True, ge=1, le=1_000_000_000)
     plaintext_provider_egress_acknowledged: bool = Field(default=False, strict=True)
     api_key: SecretStr | None = Field(default=None, repr=False)
 
@@ -327,7 +328,9 @@ class NearTeeSlotInput(BaseModel):
     max_output_tokens: int = Field(strict=True, ge=1, le=65_536)
     timeout_seconds: float = Field(default=30, ge=1, le=120, allow_inf_nan=False)
     temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
-    request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    # Accepted from a browser tab loaded before #1284 and dropped; a stored
+    # slot keeps its legacy value only to keep its proofs and consent bound.
+    request_cost_bound_microusd: int | None = Field(default=None, strict=True, ge=1, le=1_000_000_000)
     # Background catalog refresh cadence hint in hours (#1178); not an expiry.
     catalog_ttl_hours: int = Field(default=24, strict=True, ge=1, le=24)
     # Embedding slot only (1-64 inputs per request).
@@ -370,11 +373,12 @@ class NearTeeCatalogCheckInput(BaseModel):
 
 
 class InferenceLaneInput(BaseModel):
-    """Provider-neutral shared-lane limits and deployment ceiling (ADR-035)."""
+    """Provider-neutral shared-lane queue bounds (ADR-035); no money (ADR-037)."""
 
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal["seraph.inference.lane.v1"] = INFERENCE_LANE_SCHEMA_VERSION
-    spend_ceiling_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    # Accepted from an older client and dropped (#1284).
+    spend_ceiling_microusd: int | None = Field(default=None, strict=True, ge=1, le=1_000_000_000)
     max_queued: int = Field(default=64, strict=True, ge=1, le=64)
     max_inflight: int = Field(default=1, strict=True, ge=1, le=1)
     max_outstanding_per_owner: int = Field(default=16, strict=True, ge=1, le=16)
@@ -649,37 +653,20 @@ def _carry_near_consent(setup, persisted, revision):
     if setup is None:
         return None
     prior = persisted.near_text
-    unchanged = prior is not None and replace(prior, spend_ceiling_microusd=setup.spend_ceiling_microusd,
-        plaintext_egress_consent_revision=None) == replace(setup, plaintext_egress_consent_revision=None)
+    # Legacy amounts (#1284) never decide whether the route changed.
+    ignored = dict(spend_ceiling_microusd=None, request_cost_bound_microusd=None, plaintext_egress_consent_revision=None)
+    unchanged = prior is not None and replace(prior, **ignored) == replace(setup, **ignored)
     current = prior is not None and prior.enabled and not persisted.egress_revoked and prior.plaintext_egress_consent_revision == persisted.egress_revision
     return replace(setup, plaintext_egress_consent_revision=revision if setup.enabled and unchanged and current else None)
 
 
 def _consented_near_tee_slots(setup, revision):
     """Enabled NEAR TEE slots whose purpose consent is current at ``revision``;
-    only these can contact NEAR, so only they count toward reserve review."""
+    only these can contact NEAR."""
     if setup is None:
         return []
     return [slot for slot in (setup.slots or {}).values()
         if slot is not None and slot.enabled and slot.purpose_consent_revision == revision]
-
-
-def _carry_near_tee_consents(setup, persisted, revision):
-    """Carry a current, unchanged slot consent to the final revision; never resurrect."""
-    if setup is None:
-        return None
-    prior_setup = persisted.near_tee
-    slots = {}
-    for name, slot in (setup.slots or {}).items():
-        prior = (prior_setup.slots or {}).get(name) if prior_setup is not None else None
-        if slot is None:
-            slots[name] = None
-            continue
-        unchanged = prior is not None and replace(prior, purpose_consent_revision=None) == replace(slot, purpose_consent_revision=None)
-        current = (prior is not None and prior.enabled and not persisted.egress_revoked
-            and prior.purpose_consent_revision == persisted.egress_revision)
-        slots[name] = replace(slot, purpose_consent_revision=revision if slot.enabled and unchanged and current else None)
-    return replace(setup, slots=slots)
 
 
 async def _put_near_tee(body, persisted):
@@ -692,9 +679,6 @@ async def _put_near_tee(body, persisted):
         raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
     if {"profiles", "workload_policies"}.intersection(body.model_fields_set):
         raise HTTPException(status_code=422, detail="NEAR TEE owns its slot routes")
-    lane = persisted.inference_lane
-    if lane is None:
-        raise HTTPException(status_code=409, detail="inference_lane_required")
     incoming = body.near_tee
     prior = persisted.near_tee
     sent = incoming.slots.model_fields_set
@@ -721,8 +705,14 @@ async def _put_near_tee(body, persisted):
         if name != "vision" and slot_input.screenshot_plaintext_egress_acknowledged:
             raise HTTPException(status_code=422, detail="near_tee_screenshot_consent_vision_only")
         fields = slot_input.model_dump(exclude={"plaintext_provider_egress_acknowledged",
-            "screenshot_plaintext_egress_acknowledged"})
-        slots[name] = NearTeeSlot(**fields)
+            "screenshot_plaintext_egress_acknowledged", "request_cost_bound_microusd"})
+        # A sent amount is dropped (#1284). The stored slot's legacy amount is
+        # carried while its model is unchanged, so its profile contract (and
+        # the proofs and consent bound to it) stay exactly as they were.
+        prior_slot = (prior.slots or {}).get(name) if prior is not None else None
+        legacy = (prior_slot.request_cost_bound_microusd
+            if prior_slot is not None and prior_slot.model_id == slot_input.model_id else None)
+        slots[name] = NearTeeSlot(**fields, request_cost_bound_microusd=legacy)
         acknowledged[name] = slot_input.plaintext_provider_egress_acknowledged and (
             name != "vision" or slot_input.screenshot_plaintext_egress_acknowledged)
         if (name == "vision" and "screenshot_plaintext_egress_acknowledged" in slot_input.model_fields_set
@@ -762,7 +752,7 @@ async def _put_near_tee(body, persisted):
         consented[name] = slot
     setup = replace(setup, slots=consented)
     # Only enabled slots with current consent can contact NEAR: they alone
-    # lift a revocation and count toward the reserve review.
+    # lift a revocation.
     usable = [slot for slot in consented.values() if slot is not None and slot.enabled
         and slot.purpose_consent_revision == final_revision]
     any_enabled = bool(usable)
@@ -776,11 +766,6 @@ async def _put_near_tee(body, persisted):
         validate_active_model_fabric_configuration(target)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    bounds = [slot.request_cost_bound_microusd for slot in usable]
-    if near_text is not None and near_text.enabled:
-        bounds.append(near_text.request_cost_bound_microusd)
-    review = max(bounds, default=None)
-    await _require_review_covers_overrun(review)
     previous_key = await vault_repository.get(NEAR_TEE_VAULT_KEY) if raw_key.strip() else None
     if setup.credential_fingerprint and setup.credential_fingerprint != (prior.credential_fingerprint if prior else None):
         # ADR-035 amendment #1178: capability checks are a one-time setup gate
@@ -802,16 +787,7 @@ async def _put_near_tee(body, persisted):
                     mutated = True
                     await vault_repository.store(NEAR_TEE_VAULT_KEY, raw_key,
                         description="Seraph NEAR TEE key (write-only settings input)")
-                ceiling = deployment_spend_ceiling(target)
-                configured = await durable_job_repository.configure_inference_accounting(ceiling,
-                    reserve_review_microusd=review, continuity_workspace=workspace)
-                accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
-                retained_review = accounting.get("request_reserve_review")
-                exact_review = review is None or isinstance(retained_review, dict) and retained_review.get("bound_microusd") == review and retained_review.get("settings_revision") == accounting.get("settings_revision") and retained_review.get("accounting_revision") == configured.get("revision", 0) - 1
-                if (accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != ceiling
-                        or accounting.get("overrun_max_cost_microusd", 0) or not exact_review
-                        or any(accounting.get(field) != configured.get(field) for field in ("deployment_id", "revision", "ledger_digest"))):
-                    raise RuntimeError("accounting_settings_revision_unavailable")
+                await _ensure_spend_ledger(durable_job_repository, workspace)
                 write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
             except Exception:
                 if mutated:
@@ -842,7 +818,9 @@ async def _put_near_text(body, persisted):
     if {"profiles", "workload_policies"}.intersection(body.model_fields_set):
         raise HTTPException(status_code=422, detail="NEAR owns its fixed dedicated route")
     incoming = body.near_text
-    fields = incoming.model_dump(exclude={"api_key", "plaintext_provider_egress_acknowledged"})
+    # Sent amounts are dropped (#1284).
+    fields = incoming.model_dump(exclude={"api_key", "plaintext_provider_egress_acknowledged",
+        "request_cost_bound_microusd", "spend_ceiling_microusd"})
     prior = persisted.near_text
     setup = NearTextSetup(**fields, credential_fingerprint=prior.credential_fingerprint if prior else None)
     raw_key = incoming.api_key.get_secret_value() if incoming.api_key is not None else ""
@@ -851,13 +829,8 @@ async def _put_near_text(body, persisted):
             raise HTTPException(status_code=422, detail="NEAR API key contains unsafe characters")
         setup = replace(setup, credential_fingerprint=_fingerprint_secret(raw_key))
     validate_near_text_setup(setup)
-    # NEAR text mirrors the provider-neutral lane ceiling and never funds its
-    # own. Before the lane is published, a retained OpenRouter ceiling is the
-    # legacy owner; a NEAR-only deployment seeds the lane from this save.
-    lane = (persisted.inference_lane or migrate_inference_lane(persisted.openrouter_setup, None)
-        or InferenceLaneConfig(spend_ceiling_microusd=setup.spend_ceiling_microusd))
-    if setup.spend_ceiling_microusd != lane.spend_ceiling_microusd:
-        raise HTTPException(status_code=409, detail="deployment_spend_ceiling_mismatch")
+    # The lane holds queue bounds only (#1284); a NEAR text save leaves it as is.
+    lane = persisted.inference_lane
     final_revision = revision + 2
     setup = _carry_near_consent(setup, persisted, final_revision)
     if setup.enabled and setup.plaintext_egress_consent_revision is None:
@@ -879,13 +852,6 @@ async def _put_near_text(body, persisted):
         egress_revision=final_revision, egress_revoked=persisted.egress_revoked and not setup.enabled,
         egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
     validate_active_model_fabric_configuration(target)
-    planned_bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
-    planned_bounds.extend(slot.request_cost_bound_microusd for slot in _consented_near_tee_slots(target.near_tee, final_revision))
-    if old_or is not None:
-        planned_bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
-        if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
-            planned_bounds.append(old_or.request_cost_bound_microusd)
-    await _require_review_covers_overrun(max(planned_bounds, default=None))
     previous_key = await vault_repository.get("near_text_api_key") if raw_key.strip() else None
     mutated = False
     root = Path(settings.workspace_dir).resolve()
@@ -897,21 +863,7 @@ async def _put_near_text(body, persisted):
                 if raw_key.strip():
                     mutated = True
                     await vault_repository.store("near_text_api_key", raw_key, description="Seraph NEAR key (write-only settings input)")
-                bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
-                bounds.extend(slot.request_cost_bound_microusd for slot in _consented_near_tee_slots(target.near_tee, final_revision))
-                if old_or is not None:
-                    bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
-                    if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
-                        bounds.append(old_or.request_cost_bound_microusd)
-                review = max(bounds, default=None)
-                ceiling = deployment_spend_ceiling(target)
-                configured = await durable_job_repository.configure_inference_accounting(ceiling,
-                    reserve_review_microusd=review, continuity_workspace=workspace)
-                accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
-                retained_review = accounting.get("request_reserve_review")
-                exact_review = review is None or isinstance(retained_review, dict) and retained_review.get("bound_microusd") == review and retained_review.get("settings_revision") == accounting.get("settings_revision") and retained_review.get("accounting_revision") == configured.get("revision", 0) - 1
-                if accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != ceiling or accounting.get("overrun_max_cost_microusd", 0) or not exact_review or any(accounting.get(field) != configured.get(field) for field in ("deployment_id", "revision", "ledger_digest")):
-                    raise RuntimeError("accounting_settings_revision_unavailable")
+                await _ensure_spend_ledger(durable_job_repository, workspace)
                 write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
             except Exception:
                 if mutated:
@@ -941,20 +893,21 @@ def _retired_profiles(profiles):
 
 
 async def _put_inference_lane(body, persisted):
-    """Publish the provider-neutral lane: witnessed revoke→accounting→activate.
+    """Publish the provider-neutral lane: witnessed revoke→ledger→activate.
 
-    Copies nothing from a request into OpenRouter; the same save publishes the
-    ADR-035 route-scoped revoke of stored OpenRouter routes. It preserves the
-    deployment ledger, reservations and Unknown liabilities: accounting is
-    only reconfigured through ``configure_inference_accounting``, which never
-    resets rows. Global egress revocation is neither set nor cleared.
+    The lane holds queue and concurrency bounds only (ADR-037); any sent
+    amount is dropped. Copies nothing from a request into OpenRouter; the same
+    save publishes the ADR-035 route-scoped revoke of stored OpenRouter
+    routes. The spend ledger is only ensured, never reset. Global egress
+    revocation is neither set nor cleared.
     """
     from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict
     from src.workflows.job_runtime import durable_job_repository
     revision = persisted.egress_revision
     if body.expected_policy_revision != revision or persisted.status == "degraded":
         raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
-    lane = InferenceLaneConfig(**body.inference_lane.model_dump())
+    lane = InferenceLaneConfig(**body.inference_lane.model_dump(
+        exclude={"spend_ceiling_microusd", "request_reserve_review_microusd"}))
     try:
         validate_inference_lane(lane)
     except ValueError as exc:
@@ -962,11 +915,6 @@ async def _put_inference_lane(body, persisted):
     final_revision = revision + 2
     near = persisted.near_text
     if near is not None:
-        near = replace(near, spend_ceiling_microusd=lane.spend_ceiling_microusd)
-        try:
-            validate_near_text_setup(near)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail="near_text_request_reserve_exceeds_lane_ceiling") from exc
         near = _carry_near_consent(near, persisted, final_revision)
     old_or = retire_openrouter_setup(persisted.openrouter_setup) if openrouter_retired() else persisted.openrouter_setup
     target = replace(persisted, inference_lane=lane, near_text=near, openrouter_setup=old_or,
@@ -978,30 +926,12 @@ async def _put_inference_lane(body, persisted):
         validate_active_model_fabric_configuration(target)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    review = near.request_cost_bound_microusd if near is not None and near.enabled else None
-    if lane.request_reserve_review_microusd is not None:
-        review = max(review or 0, lane.request_reserve_review_microusd)
-    if target.near_tee is not None:
-        tee_bounds = [slot.request_cost_bound_microusd for slot in _consented_near_tee_slots(target.near_tee, final_revision)]
-        review = max([*tee_bounds, *([review] if review else [])], default=None)
-    if old_or is not None and not openrouter_retired():
-        bounds = [route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled]
-        review = max([*bounds, *([review] if review else [])], default=None)
-    await _require_review_covers_overrun(review)
     root = Path(settings.workspace_dir).resolve()
     try:
         with maintenance_accounting_lock(root) as workspace:
             write_model_fabric_configuration(replace(target, egress_revision=revision + 1, egress_revoked=True),
                 expected_revision=revision, publication_workspace=workspace)
-            configured = await durable_job_repository.configure_inference_accounting(lane.spend_ceiling_microusd,
-                reserve_review_microusd=review, continuity_workspace=workspace)
-            accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
-            retained_review = accounting.get("request_reserve_review")
-            exact_review = review is None or isinstance(retained_review, dict) and retained_review.get("bound_microusd") == review and retained_review.get("settings_revision") == accounting.get("settings_revision") and retained_review.get("accounting_revision") == configured.get("revision", 0) - 1
-            if (accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != lane.spend_ceiling_microusd
-                    or accounting.get("overrun_max_cost_microusd", 0) or not exact_review
-                    or any(accounting.get(field) != configured.get(field) for field in ("deployment_id", "revision", "ledger_digest"))):
-                raise RuntimeError("accounting_settings_revision_unavailable")
+            await _ensure_spend_ledger(durable_job_repository, workspace)
             write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
     except PolicyRevisionConflict as exc:
         raise HTTPException(status_code=409, detail="provider_policy_revision_changed") from exc
@@ -1026,15 +956,16 @@ def _apply_openrouter_retirement(status_payload):
 
 
 def _inference_lane_status(configured):
+    """The lane's queue and concurrency bounds (#1284: no amount is shown)."""
     try:
         lane = effective_inference_lane(configured)
     except ValueError:
-        return {"status": "blocked", "reason_code": "inference_lane_unreadable", "published": False}
+        return {"status": "blocked", "reason_code": "inference_lane_unreadable"}
     if lane is None:
         return None
-    from dataclasses import asdict
-    return {**asdict(lane), "published": configured.inference_lane is not None,
-        "status": "published" if configured.inference_lane is not None else "migration_pending"}
+    return {"schema_version": lane.schema_version, "max_queued": lane.max_queued,
+        "max_inflight": lane.max_inflight, "max_outstanding_per_owner": lane.max_outstanding_per_owner,
+        "max_retries": lane.max_retries}
 
 
 def _provider_retirement_status():
@@ -1110,13 +1041,6 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
                 policies=body.workload_policies,
             )
             validate_active_model_fabric_configuration(configuration)
-            # The legacy v1 save reviews overruns up to its explicit bound too;
-            # refuse a too-low bound before the credential is touched.
-            await _require_review_covers_overrun(
-                (setup.request_cost_bound_microusd or setup.spend_ceiling_microusd)
-                if "request_cost_bound_microusd" in setup_input.model_fields_set else None,
-                review_required=False,
-            )
             raw_key = (
                 setup_input.api_key.get_secret_value()
                 if setup_input.api_key is not None
@@ -1153,9 +1077,7 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
             egress_revoked=False, egress_revocation_key=None)
         if configuration.openrouter_setup is not None:
             from src.workflows.job_runtime import durable_job_repository
-            review = (configuration.openrouter_setup.request_cost_bound_microusd or configuration.openrouter_setup.spend_ceiling_microusd) if setup_input is not None and "request_cost_bound_microusd" in setup_input.model_fields_set else None
-            await durable_job_repository.configure_inference_accounting(configuration.openrouter_setup.spend_ceiling_microusd,
-                reserve_review_microusd=review)
+            await durable_job_repository.ensure_inference_ledger()
         write_model_fabric_configuration(configuration)
     except Exception as exc:
         if credential_mutated:
@@ -1176,30 +1098,17 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
     return await model_fabric_settings_payload()
 
 
-async def _require_review_covers_overrun(review: int | None, *, review_required: bool = True) -> None:
-    """Refuse, before any mutation, a save whose bound cannot review the overrun.
+async def _ensure_spend_ledger(repository, workspace) -> None:
+    """Create or verify the spend ledger inside a settings save (ADR-037).
 
-    Saving reviews unreviewed overruns only up to the largest enabled request
-    bound; a lower bound would otherwise fail late with a generic accounting
-    error after the policy was already revoked for the save. A legacy v1 save
-    that does not set a bound (``review_required=False``) records no review
-    and leaves the latch in place, so it is not refused.
+    It holds no amount. The readback only proves the witness the save just
+    persisted is the one the snapshot verifies; no figure is compared.
     """
-    from src.agent.direct_chat import microusd_dollars
-    from src.workflows.job_runtime import durable_job_repository
-
-    snapshot = await durable_job_repository.inference_accounting_snapshot()
-    minimum = snapshot.get("overrun_max_cost_microusd")
-    if review is None and not review_required:
-        return
-    if type(minimum) is int and minimum > 0 and (review is None or review < minimum):
-        raise HTTPException(status_code=409, detail={
-            "code": "request_bound_below_overrun",
-            "minimum_request_bound_microusd": minimum,
-            "message": (f"The request cost bound must be at least ${microusd_dollars(minimum)} "
-                f"({minimum:,} µUSD) to review the unreviewed overrun. Raise it and save again, "
-                "then press Prove route (billed canaries)."),
-        })
+    configured = await repository.ensure_inference_ledger(continuity_workspace=workspace)
+    accounting = await repository.inference_accounting_snapshot(continuity_workspace=workspace)
+    if (accounting.get("status") != "ready"
+            or any(accounting.get(field) != configured.get(field) for field in ("deployment_id", "revision", "ledger_digest"))):
+        raise RuntimeError("accounting_continuity_unavailable")
 
 
 async def _put_openrouter_v2(body, setup_input, persisted):
@@ -1245,15 +1154,8 @@ async def _put_openrouter_v2(body, setup_input, persisted):
         updated_at=datetime.now(timezone.utc).isoformat(),
         v1_rollback_snapshot=snapshot)
     if persisted.near_text is not None:
-        near = replace(persisted.near_text, spend_ceiling_microusd=setup.spend_ceiling_microusd)
-        target = replace(target, near_text=_carry_near_consent(near, persisted, final_revision))
+        target = replace(target, near_text=_carry_near_consent(persisted.near_text, persisted, final_revision))
     validate_active_model_fabric_configuration(target)
-    planned_review = max((route.request_cost_bound_microusd for route in (setup.routes or {}).values() if route is not None and route.enabled), default=None)
-    if setup.routes is None:
-        planned_review = setup.request_cost_bound_microusd
-    if target.near_text is not None and target.near_text.enabled:
-        planned_review = max(planned_review or 0, target.near_text.request_cost_bound_microusd)
-    await _require_review_covers_overrun(planned_review)
     previous_process_value = str(settings.openrouter_api_key or "")
     previous_vault_value = await _snapshot_setup_credential() if raw_key.strip() else None
     credential_mutated = False
@@ -1269,26 +1171,7 @@ async def _put_openrouter_v2(body, setup_input, persisted):
                     stored = await _store_setup_credential(setup, setup_input.api_key)
                     if stored != setup:
                         raise RuntimeError("credential target changed")
-                review = max((route.request_cost_bound_microusd for route in (setup.routes or {}).values() if route is not None and route.enabled), default=None)
-                if setup.routes is None:
-                    review = setup.request_cost_bound_microusd
-                if target.near_text is not None and target.near_text.enabled:
-                    review = max(review or 0, target.near_text.request_cost_bound_microusd)
-                configured_accounting = await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd,
-                    reserve_review_microusd=review, continuity_workspace=workspace)
-                accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
-                persisted_review = accounting.get("request_reserve_review")
-                exact_review = review is None or (
-                    isinstance(persisted_review, dict)
-                    and persisted_review.get("settings_revision") == accounting.get("settings_revision")
-                    and persisted_review.get("bound_microusd") == review
-                    and type(persisted_review.get("accounting_revision")) is int
-                    and persisted_review["accounting_revision"] == configured_accounting.get("revision", 0) - 1
-                )
-                exact_witness = all(accounting.get(field) == configured_accounting.get(field)
-                    for field in ("deployment_id", "revision", "ledger_digest"))
-                if accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != setup.spend_ceiling_microusd or accounting.get("overrun_max_cost_microusd", 0) or not exact_review or not exact_witness:
-                    raise InferenceAccountingError("accounting_settings_revision_unavailable")
+                await _ensure_spend_ledger(durable_job_repository, workspace)
                 write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
             except Exception:
                 if credential_mutated:
@@ -1331,27 +1214,6 @@ async def get_inference_accounting(job_id: str | None = Query(default=None, min_
     return await durable_job_repository.inference_accounting_snapshot(job_id=job_id)
 
 
-class InferencePeriodReviewInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    period_id: str = Field(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")
-    expected_revision: int = Field(strict=True, ge=1)
-
-
-@router.post("/settings/model-fabric/accounting/period")
-async def acknowledge_inference_period(body: InferencePeriodReviewInput, request: Request):
-    from src.auth.service import authenticate_principal
-    from src.workspace.accounting_continuity import acknowledge_accounting_period
-    principal = getattr(getattr(request.state, "operator", None), "principal", None)
-    if principal is None or not principal.authenticated or not _is_local_request(request):
-        raise HTTPException(status_code=403, detail="Authenticated deployment accounting owner required")
-    await authenticate_principal(principal.principal_id)
-    try:
-        return await asyncio.to_thread(acknowledge_accounting_period, root=Path(settings.workspace_dir).resolve(),
-            period=body.period_id, expected_revision=body.expected_revision, actor=principal.principal_id)
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
 @router.post("/settings/model-fabric/accounting/settle")
 async def settle_inference_accounting(body: InferenceSettlementInput, request: Request):
     from src.auth.service import authenticate_principal
@@ -1368,17 +1230,6 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
         raise HTTPException(status_code=409, detail=exc.code) from exc
     result = {"status": row["state"], "operation": row, "memory_status": "no_learning",
         "authority_scope": "deployment_accounting", "job_authority_changed": False}
-    from src.model_fabric.accounting import near_tee_profile_slot
-    if (row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text"
-            or near_tee_profile_slot(row.get("runtime_path"), row.get("profile_id")) is not None):
-        try:
-            result["lane_recovery"] = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
-                operation_id=row["operation_id"], job_id=row["job_id"],
-                expected_revision=row["revision"], operator=getattr(request.state, "operator", None),
-            )
-        except Exception:
-            # Debt settlement already committed; local lane recovery cannot undo it.
-            result["lane_recovery"] = {"status": "deferred", "reason_code": "lane_recovery_unavailable"}
     return result
 
 
@@ -1556,10 +1407,8 @@ async def _near_tee_setup_status(configured, accounting):
         reason = near_tee_slot_block_reason(configured, name)
         if reason is None and not key_present:
             reason = "near_tee_credential_unavailable" if key_unavailable else "near_tee_credential_required"
-        if reason is None and (accounting.get("status") != "ready"
-                or configured.inference_lane is None
-                or accounting.get("ceiling_microusd") != configured.inference_lane.spend_ceiling_microusd):
-            reason = accounting.get("reason_code") or "inference_accounting_unavailable"
+        if reason is None:
+            reason = _accounting_block_reason(accounting)
         receipt = receipts.get(name)
         catalog_reason = catalog_receipt_block_reason(name, profile, receipts=receipts,
             revision=configured.egress_revision)
@@ -1642,7 +1491,8 @@ async def _near_tee_setup_status(configured, accounting):
                     continue
                 chat_capabilities[capability] = ("ready" if proof is not None and proof_is_fresh(proof)
                     else f"proof_missing:{capability}")
-        slots[name] = {**slot.__dict__, "profile_id": profile.id, "profile_hash": profile.contract_hash,
+        slots[name] = {**{key: value for key, value in slot.__dict__.items() if key not in _LEGACY_AMOUNT_KEYS},
+            "profile_id": profile.id, "profile_hash": profile.contract_hash,
             "chat_capabilities": chat_capabilities,
             # "catalog" (vision only), "capability_proof" or None (#1167).
             "structured_output_basis": structured_basis,
@@ -1989,7 +1839,6 @@ def _static_profile_route_reasons(
     credential_present: bool | None = None,
 ) -> list[str]:
     """Return non-proof guardrail failures that a bootstrap probe may not bypass."""
-    checked_at = time.time() if now is None else now
     reasons: list[str] = []
     if profile.schema_version != MODEL_FABRIC_SCHEMA_VERSION:
         reasons.append("profile_schema_unknown")
@@ -2027,21 +1876,7 @@ def _static_profile_route_reasons(
     if not (profile.task_classes or ((profile.task_class,) if profile.task_class else ())):
         reasons.append("profile_task_unknown")
     if candidate.endpoint_class.value == "remote":
-        if policy.max_cost_microusd is None or profile.cost_microusd is None:
-            reasons.append("profile_cost_unknown")
-        elif profile.cost_microusd > policy.max_cost_microusd:
-            reasons.append("profile_cost_noncompliant")
-        if profile.provider_kind == "near_tee":
-            # Price freshness is the catalog receipt, checked by the caller.
-            if profile.cost_source != "near_tee_catalog_receipt":
-                reasons.append("profile_cost_source_missing_or_stale")
-        elif (
-            not profile.cost_source
-            or profile.cost_source_updated_at is None
-            or profile.cost_source_updated_at < checked_at - 2_592_000
-            or profile.cost_source_updated_at > checked_at
-        ):
-            reasons.append("profile_cost_source_missing_or_stale")
+        pass  # ADR-037 (#1284): no remote route is unready for a cost reason.
     elif profile.local_resource_ms is None or profile.local_resource_ms > timeout_ms:
         reasons.append("profile_local_resource_unknown_or_noncompliant")
     return list(dict.fromkeys(reasons))
@@ -2070,7 +1905,7 @@ async def model_fabric_settings_payload() -> dict[str, object]:
     near_status = await _near_text_setup_status(configured, accounting)
     near_tee_status = await _near_tee_setup_status(configured, accounting)
     tee_active = near_tee_status.get("status") == "ready"
-    if openrouter_setup_status is not None and (configured.egress_revoked or not configured.openrouter_setup.cloud_egress_acknowledged or accounting["status"] != "ready"):
+    if openrouter_setup_status is not None and (configured.egress_revoked or not configured.openrouter_setup.cloud_egress_acknowledged or _accounting_block_reason(accounting)):
         openrouter_setup_status["status"] = "blocked"
         openrouter_setup_status["error_code"] = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else "openrouter_egress_acknowledgement_required" if not configured.openrouter_setup.cloud_egress_acknowledged else accounting.get("reason_code")
         status = "blocked"
@@ -2133,14 +1968,28 @@ async def _near_text_setup_status(configured, accounting):
     elif not key_present:
         status = "configuration_required"
         reason = "near_text_credential_unavailable" if key_unavailable else "near_text_credential_required"
-    elif accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != setup.spend_ceiling_microusd:
+    elif accounting_reason := _accounting_block_reason(accounting):
         status = "blocked"
-        reason = accounting.get("reason_code") or "inference_accounting_unavailable"
+        reason = accounting_reason
     else:
         status = "configured"
-    return {**setup.__dict__, "key_present": key_present, "consent_current": consent,
+    shown = {key: value for key, value in setup.__dict__.items() if key not in _LEGACY_AMOUNT_KEYS}
+    return {**shown, "key_present": key_present, "consent_current": consent,
         "status": status, "reason_code": reason, "tls_transport": True, "tee_verified": False,
         "e2ee": False, "provider_plaintext_disclosure": "NEAR receives the question in plaintext over HTTPS."}
+
+
+_LEGACY_AMOUNT_KEYS = frozenset({"spend_ceiling_microusd", "request_cost_bound_microusd",
+    "request_reserve_review_microusd", "max_cost_microusd"})
+
+
+def _accounting_block_reason(accounting) -> str | None:
+    """Ledger continuity only (no amount, ADR-037); a ledger not yet created
+    is made on the first save or request and blocks nothing."""
+    from src.workflows.inference_accounting import ACCOUNTING_LEDGER_UNINITIALIZED
+    if accounting.get("status") == "ready" or accounting.get("reason_code") == ACCOUNTING_LEDGER_UNINITIALIZED:
+        return None
+    return accounting.get("reason_code") or "inference_accounting_unavailable"
 
 
 def _block_setup_slots(payload, reason):
@@ -2254,7 +2103,7 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
     openrouter_setup_status = await _openrouter_setup_status(configured.openrouter_setup, configuration=configured)
     from src.workflows.job_runtime import durable_job_repository
     accounting = await durable_job_repository.inference_accounting_snapshot()
-    accounting_reason = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else accounting.get("reason_code") if accounting["status"] != "ready" else None
+    accounting_reason = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else _accounting_block_reason(accounting)
     if openrouter_setup_status is not None and accounting_reason:
         openrouter_setup_status["status"] = "blocked"
         openrouter_setup_status["error_code"] = accounting_reason
@@ -2384,8 +2233,6 @@ def _active_profile_readiness(
         reasons.append("chat_cloud_egress_not_allowed")
     if not policy.cloud_egress_acknowledged:
         reasons.append("chat_cloud_consent_missing")
-    if policy.max_cost_microusd is None:
-        reasons.append("chat_cost_ceiling_missing")
     if set(policy.allowed_provider_kinds) != {"openrouter"}:
         reasons.append("chat_provider_policy_missing")
 
@@ -2735,12 +2582,7 @@ def _operator_profile_statuses(proofs) -> list[dict[str, object]]:
         if not (profile.task_classes or ((profile.task_class,) if profile.task_class else ())):
             non_routable.append("task_class_missing")
         if candidate is not None and candidate.endpoint_class.value == "remote":
-            if profile.cost_microusd is None:
-                non_routable.append("cost_bound_missing")
-            if not profile.cost_source or profile.cost_source_updated_at is None:
-                non_routable.append("cost_source_missing")
-            elif profile.cost_source_updated_at < now - 2_592_000 or profile.cost_source_updated_at > now:
-                non_routable.append("cost_source_stale")
+            pass  # ADR-037 (#1284): cost never makes a remote profile non-routable.
         elif candidate is not None and profile.local_resource_ms is None:
             non_routable.append("local_resource_bound_missing")
         for capability in sorted(

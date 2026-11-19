@@ -315,10 +315,13 @@ async def test_registered_lineage_does_not_protect_unrelated_same_goal_job(
 
 
 @pytest.mark.asyncio
-async def test_startup_retains_real_unknown_provider_debt_after_registered_iteration(
+async def test_unpriced_second_iteration_runs_a_new_third_iteration_and_startup_changes_nothing(
         accounting_db, monkeypatch, repository_admission_signer):
-    # Fail only the second actual intercepted provider billing response, after
-    # the first real failed Python iteration registered and closed its producer.
+    # NEAR's billing readback is missing only for the second actual intercepted
+    # provider response. Since ADR-037 (#1284) that unpriced call is finished,
+    # not a held liability: the repair continues. The third provider POST is a
+    # NEW iteration (its own prepared iteration and operation id), never a
+    # replay of the second, and startup recovery afterwards changes nothing.
     # No reservation or accounting evidence is inserted by this fixture.
     captured, responses = {}, []
     original_grant = source.grant_repository_iteration_consent
@@ -330,8 +333,6 @@ async def test_startup_retains_real_unknown_provider_debt_after_registered_itera
         return await original_grant(service, jobs, **kwargs)
 
     def missing_second_bill(fixture, request):
-        # #1184: NEAR's billing readback is unavailable for the second
-        # iteration's completion, so its cost is an Unknown liability.
         path = request.url.raw_path.decode()
         if request.method == "POST" and path == "/v1/chat/completions":
             responses.append(path)
@@ -340,22 +341,31 @@ async def test_startup_retains_real_unknown_provider_debt_after_registered_itera
 
     monkeypatch.setattr(source, "grant_repository_iteration_consent", capture_grant)
     monkeypatch.setattr(NearFixture, "handler", missing_second_bill)
-    with pytest.raises(Exception):
-        await _actual_source_callback_journey(accounting_db, monkeypatch, True, "test_python")
-    assert len(responses) == 2
+    await _actual_source_callback_journey(accounting_db, monkeypatch, True, "test_python", unpriced_iteration=2)
+    assert len(responses) == 3
     factory, jobs, job_id = accounting_db[2], captured["jobs"], captured["job_id"]
     async with factory() as db:
         root = await jobs._fetch(db, job_id)
-        assert root.status == "unknown_external_effect"
+        assert root.status == "succeeded"
         original, work, _, _, _, _ = source.read_repository_original(root)
-        identity = source.iteration_identity(job_id, original["repository_attempt_id"],
-            source._source_digest(original["original_input"]), 1)
-        assert source._repository_record(root, "repository:producer:" + identity) is not None
-        reservations = list((await db.scalars(select(InferenceCostReservation))).all())
-        debt = next(row for row in reservations if row.state == "unknown")
+        identities = [source.iteration_identity(job_id, original["repository_attempt_id"],
+            source._source_digest(original["original_input"]), index) for index in (1, 2, 3)]
+        assert len(set(identities)) == 3
+        assert source._repository_record(root, "repository:producer:" + identities[0]) is not None
+        reservations = {row.operation_id: row for row in (await db.scalars(select(InferenceCostReservation))).all()
+            if row.operation_id.startswith("remote:repo-work:")}
+        # One contacted request record per provider POST, each a distinct
+        # iteration: a record is contacted at most once, so three contacted
+        # records for three POSTs means no POST replayed an earlier one.
+        assert sorted(reservations) == sorted("remote:repo-work:" + identity for identity in identities)
+        assert all(row.contact_started_at is not None for row in reservations.values())
+        states = [reservations["remote:repo-work:" + identity].state for identity in identities]
+        assert states == ["settled", "unknown", "settled"]
+        unpriced = reservations["remote:repo-work:" + identities[1]]
         from src.workflows.general_task_accounting import reservation_liability
-        assert debt.contact_started_at is not None and debt.actual_cost_microusd is None
-        assert reservation_liability(debt) == debt.bound_microusd > 0
+        assert unpriced.actual_cost_microusd is None
+        # ADR-037 (#1284): the record reserves no amount.
+        assert unpriced.bound_microusd == 0 and reservation_liability(unpriced) == 0
     before = await exact_canonical_bytes(factory)
     observed = datetime.now(timezone.utc) + timedelta(days=1)
     assert await jobs.recover_inference_accounting(now=observed) == []

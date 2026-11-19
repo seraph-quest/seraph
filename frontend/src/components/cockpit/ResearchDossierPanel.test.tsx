@@ -112,3 +112,20 @@ it("disables recovery when a refresh cannot verify current authority", async () 
   expect(screen.getByRole("button", { name: "Cancel original research" })).toBeDisabled();
   expect(vi.mocked(apiFetch).mock.calls.every(([, options]) => options?.method !== "POST")).toBe(true);
 });
+
+it("accepts a research cost row with no reserved amount (ADR-037, #1284)", async () => {
+  const unbounded = { ...state, costs: [{ ...state.costs[0], bound_microusd: 0 }] };
+  vi.mocked(apiFetch).mockImplementation(async () => new Response(JSON.stringify(unbounded)));
+  render(<ResearchDossierPanel {...props} />);
+  expect(await screen.findByRole("button", { name: "Recover original research" })).toBeInTheDocument();
+  expect(screen.queryByText("Research cost readback is incomplete.")).toBeNull();
+});
+
+it("still rejects a negative or fractional research cost amount", async () => {
+  const { validateResearchState } = await import("../../lib/researchDossier");
+  for (const bound of [-1, 0.5, "0"]) {
+    expect(() => validateResearchState({ ...state, costs: [{ ...state.costs[0], bound_microusd: bound }] }, task.task_id))
+      .toThrow("Research cost readback is incomplete.");
+  }
+  expect(validateResearchState({ ...state, costs: [{ ...state.costs[0], bound_microusd: 0 }] }, task.task_id).costs[0].bound_microusd).toBe(0);
+});

@@ -25,7 +25,7 @@ Do not revive cancelled [#771](https://github.com/seraph-quest/seraph/issues/771
 as a learning or activation dependency; the completed
 [#736](https://github.com/seraph-quest/seraph/issues/736) already excludes it.
 This direction does not disable product inference for ordinary operator-
-approved tasks under existing consent, grants, routing, and budget contracts.
+approved tasks under existing consent, grants, and routing contracts.
 Historical receipts and runtime proof interfaces do not authorize an eval or
 an inference call during implementation or acceptance. See the
 [canonical boundary](docs/implementation/00-project-constitution.md#no-evals-and-provider-free-implementation).
@@ -206,7 +206,7 @@ quarantine only through a fix that removes the marker and passes the stress
 job 50 of 50 (`stress --files <file> --runs 50`). There is no calendar expiry.
 
 Core startup does not require a provider key. Inference requires explicit
-configuration, consent, verified capability and budget; a configured route is
+configuration, consent and verified capability; a configured route is
 not proof of live provider availability. The default local browser is
 `http://127.0.0.1:3001`, backend `http://127.0.0.1:8004`. Use managed lifecycle
 commands, not direct `uvicorn`, Vite or `npm run dev`, unless explicitly asked.
@@ -269,10 +269,11 @@ HTTP `local` stack is development-only.
   Providers remain inference-only; no coding-agent runtime may replace
   Seraph authority.
 - Preserve one shared bounded remote-inference lane, highest-priority ready
-  admission, original deadlines/cancellation/idempotency, durable reservations,
-  cost accounting and unknown-liability recovery. Its in-flight bound is one;
-  do not add a lane per plugin/provider. Background analysis must not starve chat
-  and requires its own current consent, budget and capability gates.
+  admission, original deadlines/cancellation/idempotency, durable request
+  records and spend recording. Its in-flight bound is one; do not add a lane per
+  plugin/provider. Background analysis must not starve chat and requires its own
+  current consent and capability gates. Seraph sets no cost limit (ADR-037);
+  spending limits live in the provider account.
 - CPU hosts remain usable without GPU/model services or the VLM wrapper.
   macOS/Linux are peer core-host targets; optional native profiles require their
   own actual platform receipts. Local inference stays inactive/blocked rather

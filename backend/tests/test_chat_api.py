@@ -206,7 +206,7 @@ class TestChatAPI:
         assert detail["code"] == "no_compliant_route"
         assert detail["remote_outcome"] == "not_contacted"
         assert detail["retry_required"] is False
-        assert "No model call was made" in detail["message"]
+        assert "Nothing was sent." in detail["message"]
         mock_should_use_direct.assert_called_once()
         mock_route_error.assert_awaited_once()
         mock_direct_chat.assert_awaited_once()
@@ -241,10 +241,10 @@ class TestChatAPI:
         assert detail["code"] == "no_compliant_route"
         assert detail["route_reason"] == "proof_expired:tool_use"
         assert detail["recovery_action"] == "prove_route"
-        assert "tool use capability proof for the text route expired" in detail["message"]
+        assert detail["message"] == "Chat needs one quick test first. Nothing was sent."
         assert detail["remote_outcome"] == "not_contacted"
         assert detail["retry_required"] is False
-        assert "No model call was made" in detail["message"]
+        assert "Nothing was sent." in detail["message"]
         mock_agent.run.assert_called_once_with("Inspect my priorities")
 
         events = await audit_repository.list_events(limit=10)
@@ -286,7 +286,7 @@ class TestChatAPI:
         assert detail["route_reason"] == "proof_expired:tool_use"
         assert detail["remote_outcome"] == "contacted_before_block"
         assert detail["retry_required"] is False
-        assert "No model call was made" not in detail["message"]
+        assert "Nothing was sent." not in detail["message"]
         assert "Earlier steps of this turn had already called the model" in detail["message"]
 
         events = await audit_repository.list_events(limit=10)
@@ -297,32 +297,6 @@ class TestChatAPI:
             and event["details"]["remote_outcome"] == "contacted_before_block"
             for event in events
         )
-
-    @patch("src.memory.vector_store.search_formatted", return_value="")
-    @patch("src.api.chat.create_onboarding_agent")
-    async def test_chat_agent_unreviewed_overrun_names_review_recovery(
-        self,
-        mock_onboarding,
-        mock_search,
-        client,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.run.side_effect = NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))
-        mock_onboarding.return_value = mock_agent
-
-        from src.workflows.job_runtime import durable_job_repository
-        with patch.object(durable_job_repository, "inference_accounting_snapshot",
-                          AsyncMock(return_value={"status": "blocked", "overrun_max_cost_microusd": 612_340})):
-            response = await client.post("/api/chat", json={"message": "Inspect my priorities"})
-
-        detail = response.json()["detail"]
-        assert response.status_code == 503
-        assert detail["recovery_action"] == "review_cost_overrun"
-        assert "billed above its request cost bound" in detail["message"]
-        assert "Inference accounting" in detail["message"]
-        assert "at least $0.61234" in detail["message"]
-        assert detail["minimum_request_bound_microusd"] == 612_340
-        assert detail["remote_outcome"] == "not_contacted"
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")

@@ -226,7 +226,7 @@ async def _configure_model_route(async_db, monkeypatch, tmp_path):
             status="ready",
         )
     )
-    await DurableJobRepository().configure_inference_accounting(25_000)
+    await DurableJobRepository().ensure_inference_ledger()
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)

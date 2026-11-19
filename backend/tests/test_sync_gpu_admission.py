@@ -241,14 +241,16 @@ def test_bound_sync_uncertain_receipt_is_adopted_before_error_escapes():
         reset_remote_inference_receipt_binding(token)
 
     assert error.value.receipt.status == "blocked"
-    assert error.value.receipt.reconciliation_required is True
+    # A returned uncertain remote callback frees the lane; no charge has to be
+    # supplied to reconcile it (#1284).
+    assert error.value.receipt.reconciliation_required is False
     assert len(repository.calls) == 1
     persisted = repository.calls[0]
     assert persisted["owner"] == "scheduler:strategist_tick"
     assert persisted["fencing_token"] == 8
     payload = persisted["payload"]
     assert payload["status"] == "blocked"
-    assert payload["reconciliation_required"] is True
+    assert payload["reconciliation_required"] is False
     assert current_remote_inference_receipt_binding() is None
 
 

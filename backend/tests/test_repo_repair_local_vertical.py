@@ -284,7 +284,7 @@ def _init_repository(
 async def _configure_near_route(monkeypatch):
     """The intercepted NEAR TEE strategist route and its 25,000 micro-USD lane (#1184)."""
     from tests.near_tee_support import prepare_repository_near_route
-    return await prepare_repository_near_route(monkeypatch, ceiling_microusd=25_000)
+    return await prepare_repository_near_route(monkeypatch)
 
 
 def _install_model_transport(monkeypatch, near, transport_calls: list[dict[str, Any]]) -> None:

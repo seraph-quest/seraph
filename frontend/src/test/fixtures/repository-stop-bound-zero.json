@@ -1,0 +1,22 @@
+{
+  "provenance": "Serialized by backend RepositoryNativeLimitEvidenceV1 and canonical_digest (#1284); pinned by backend/tests/test_no_cost_limits.py. Not a live API capture.",
+  "repository_stop": {
+    "reason": "deadline_exhausted",
+    "pending": false,
+    "limit_evidence": {
+      "cause": "deadline_exhausted",
+      "goal_cutoff_at": null,
+      "group_calls": 1,
+      "group_liability_microusd": 0,
+      "original_deadline_at": "2026-11-19T10:00:00Z",
+      "original_group_max_calls": 5,
+      "original_group_max_cost_microusd": 0,
+      "original_limits_digest": "0b9f675cf02b095f07557055a16c48d0821c20d0393affe7e528df4e4e28ed96",
+      "original_root_max_cost_microusd": 0,
+      "original_server_bound_microusd": 0,
+      "root_liability_microusd": 0,
+      "schema_version": "repository.native_limit_evidence.v1"
+    },
+    "limit_evidence_digest": "c888e63d5f20096fe39a1e9699ee2b943eb67ca14d02b390ed9c35c69ebcb498"
+  }
+}

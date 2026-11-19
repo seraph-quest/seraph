@@ -9,26 +9,12 @@ interface Props {
   stale: boolean;
   policyRevision?: number;
   policyRevoked?: boolean;
-  sharedCeilingMicrousd?: number | null;
-  sharedCeilingLocked?: boolean;
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
 }
-interface Draft { enabled: boolean; maxOutput: string; timeout: string; reserveUsd: string; ceilingUsd: string }
-function usd(value: number) { return (value / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, ""); }
-function draftFrom(setup?: NearTextSetupStatus | null, ceiling?: number | null): Draft {
+interface Draft { enabled: boolean; maxOutput: string; timeout: string }
+function draftFrom(setup?: NearTextSetupStatus | null): Draft {
   return { enabled: setup?.enabled ?? false, maxOutput: String(setup?.max_output_tokens ?? 1024),
-    timeout: String(setup?.timeout_seconds ?? 45), reserveUsd: usd(setup?.request_cost_bound_microusd ?? 1000),
-    ceilingUsd: ceiling ? usd(ceiling) : setup ? usd(setup.spend_ceiling_microusd) : "" };
-}
-function money(value: string, label: string): number {
-  if (!/^\d+(?:\.\d{1,6})?$/.test(value)) throw new Error(label + " requires a USD amount with at most six decimal places.");
-  const [whole, fraction = ""] = value.split(".");
-  const parsed = Number(whole) * 1_000_000 + Number(fraction.padEnd(6, "0"));
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1_000_000_000) throw new Error(label + " must be between $0.000001 and $1000.");
-  return parsed;
-}
-function sameMoney(value: string, amount: number) {
-  try { return money(value, "Per-request reserve") === amount; } catch { return false; }
+    timeout: String(setup?.timeout_seconds ?? 45) };
 }
 function number(value: string, label: string, max: number, integer = false): number {
   const parsed = Number(value);
@@ -37,12 +23,12 @@ function number(value: string, label: string, max: number, integer = false): num
 }
 const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-40";
 
-export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = false, sharedCeilingMicrousd, sharedCeilingLocked = false, onSave }: Props) {
+export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = false, onSave }: Props) {
   const [metadata, setMetadata] = useState(setup);
   const [revision, setRevision] = useState(policyRevision);
   const [revoked, setRevoked] = useState(policyRevoked);
   const [retained, setRetained] = useState(stale);
-  const [draft, setDraft] = useState(() => draftFrom(setup, sharedCeilingMicrousd));
+  const [draft, setDraft] = useState(() => draftFrom(setup));
   const [credential, setCredential] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -59,17 +45,16 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
     setAcknowledged(false);
     setMetadata(setup);
     setRetained(false);
-    if (!dirty.current) setDraft(draftFrom(setup, sharedCeilingMicrousd));
-    else if (sharedCeilingLocked && sharedCeilingMicrousd) setDraft(current => ({ ...current, ceilingUsd: usd(sharedCeilingMicrousd) }));
-  }, [setup, stale, policyRevision, policyRevoked, sharedCeilingMicrousd, sharedCeilingLocked]);
+    if (!dirty.current) setDraft(draftFrom(setup));
+  }, [setup, stale, policyRevision, policyRevoked]);
   function update<K extends keyof Draft>(field: K, value: Draft[K]) {
     dirty.current = true;
     setDraft(current => ({ ...current, [field]: value }));
-    if (field !== "ceilingUsd") setAcknowledged(false);
+    setAcknowledged(false);
   }
   const carryConsent = Boolean(metadata?.enabled && metadata.consent_current && !revoked && !credential.trim()
     && draft.enabled === metadata.enabled && Number(draft.maxOutput) === metadata.max_output_tokens
-    && Number(draft.timeout) === metadata.timeout_seconds && sameMoney(draft.reserveUsd, metadata.request_cost_bound_microusd));
+    && Number(draft.timeout) === metadata.timeout_seconds);
   function safeError(reason: unknown) {
     const text = reason instanceof Error ? reason.message : "NEAR settings could not be saved.";
     return (credential ? text.split(credential).join("[redacted]") : text).slice(0, 512);
@@ -86,8 +71,6 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
       if (!mounted.current) return;
       setMetadata(next.near_text); setRevision(next.egress_revision); setRevoked(next.egress_revoked ?? false);
       setRetained(false); setAcknowledged(false);
-      const laneCeiling = next.inference_lane?.spend_ceiling_microusd ?? next.openrouter_setup?.spend_ceiling_microusd;
-      if (sharedCeilingLocked && laneCeiling) setDraft(current => ({ ...current, ceilingUsd: usd(laneCeiling) }));
       setMessage("Current settings loaded; edits retained. Review plaintext access before saving.");
     } catch (reason) { if (mounted.current) { setRetained(true); setMessage(safeError(reason)); } }
     finally { window.clearTimeout(timeout); if (mounted.current) setRefreshing(false); }
@@ -96,16 +79,12 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
     setBusy(true); setError(null); setMessage(null);
     try {
       if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) throw new Error("Refresh current settings to obtain the policy revision before saving.");
-      const ceiling = money(draft.ceilingUsd, "Shared deployment ceiling");
-      const reserve = money(draft.reserveUsd, "Per-request reserve");
-      if (reserve > ceiling) throw new Error("Per-request reserve cannot exceed the shared deployment ceiling.");
       if (draft.enabled && !carryConsent && !acknowledged) throw new Error("Acknowledge that NEAR receives plaintext before enabling or changing this route.");
       const value: NearTextSetupInput = {
         schema_version: "seraph.near.text.v1", enabled: draft.enabled, profile_id: NEAR_TEXT_PROFILE,
         model_id: NEAR_TEXT_MODEL, api_base: NEAR_TEXT_API_BASE,
         max_output_tokens: number(draft.maxOutput, "Maximum answer tokens", 1024, true),
         timeout_seconds: number(draft.timeout, "Request timeout", 45),
-        request_cost_bound_microusd: reserve, spend_ceiling_microusd: ceiling,
         plaintext_provider_egress_acknowledged: draft.enabled && acknowledged,
         ...(credential.trim() ? { api_key: credential } : {}),
       };
@@ -115,7 +94,7 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
       if (!next.near_text || next.near_text_metadata_unavailable) throw new Error("Settings saved without complete NEAR metadata. Refresh to inspect the result.");
       dirty.current = false; setMetadata(next.near_text); setRevision(next.egress_revision);
       setRevoked(next.egress_revoked ?? false); setRetained(false); setAcknowledged(false);
-      setDraft(draftFrom(next.near_text, next.inference_lane?.spend_ceiling_microusd ?? next.openrouter_setup?.spend_ceiling_microusd));
+      setDraft(draftFrom(next.near_text));
       setMessage("NEAR settings saved. Configuration does not prove provider availability.");
     } catch (reason) { if (mounted.current) setError(safeError(reason)); }
     finally { if (mounted.current) setBusy(false); }
@@ -131,9 +110,7 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
       <label className="sm:col-span-2">NEAR API key · write only<input className={inputClass + " mt-1 w-full"} aria-label="NEAR API key" type="password" autoComplete="new-password" value={credential} onChange={e => { setCredential(e.target.value); setAcknowledged(false); dirty.current = true; }} placeholder="Blank keeps the existing NEAR key" /></label>
       <label>Maximum answer tokens<input className={inputClass + " mt-1 w-full"} aria-label="NEAR maximum answer tokens" type="number" min={1} max={1024} value={draft.maxOutput} onChange={e => update("maxOutput", e.target.value)} /></label>
       <label>Request timeout · seconds<input className={inputClass + " mt-1 w-full"} aria-label="NEAR request timeout" type="number" min={1} max={45} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
-      <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR per-request reserve USD" inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
-      <label>Shared deployment ceiling · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR shared deployment ceiling USD" inputMode="decimal" readOnly={sharedCeilingLocked} value={draft.ceilingUsd} onChange={e => update("ceilingUsd", e.target.value)} /></label>
-      <p className="sm:col-span-2 text-[9px] text-retro-text/60">All providers use one shared budget. {sharedCeilingLocked ? "Change that ceiling under Shared inference lane." : "This funds the shared deployment budget; no OpenRouter key is required."} A reserve is a local admission hold, not a provider-enforced spending maximum.</p>
+      <p className="sm:col-span-2 text-[9px] text-retro-text/60">Spending limits are set in your NEAR account.</p>
       {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge NEAR plaintext access" checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives my question in plaintext over HTTPS. Global revocation affects both OpenRouter and NEAR.</span></label>}
       {draft.enabled && carryConsent && <p className="sm:col-span-2 text-[9px]">Current plaintext consent applies to this unchanged route.</p>}
     </fieldset>

@@ -26,6 +26,7 @@ import hmac
 import json
 import logging
 import secrets
+from types import MappingProxyType
 import threading
 from types import MethodType
 
@@ -271,11 +272,78 @@ async def enter_chat_route() -> tuple[dict, str, bool]:
     return status, "legacy", True
 
 
-def chat_runtime_status_text(loop: str) -> str:
-    """The WS status line names the actual loop and route."""
-    if loop == "cordis":
-        return "Seraph is using the governed OpenRouter chat runtime on the Cordis agent loop (cordis.agent-loop.v1)."
-    return "Seraph is using the governed OpenRouter chat runtime on the legacy agent loop (legacy.smolagents)."
+# Plain names for the NEAR TEE allowlist (#1280); other models show their id tail.
+CHAT_MODEL_NAMES = MappingProxyType({
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": "DeepSeek V4.1 Flash",
+    "z-ai/glm-5.3-flash": "GLM 5.3 Flash",
+    "Qwen/Qwen3.8-27B": "Qwen3.8 27B",
+    "Qwen/Qwen3.6-35B-A3B-FP8": "Qwen3.6 35B A3B",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": "Qwen3 VL 30B A3B",
+})
+_PROVIDER_NAMES = MappingProxyType({"near_tee": "NEAR", "openrouter": "OpenRouter"})
+
+
+def chat_runtime_status_text(route: dict | None) -> str | None:
+    """The chat status line, built from the effective chat route (#1280).
+
+    ``route`` is the ``effective_runtime`` projection of ``/api/runtime/status``.
+    A blocked or unknown route prints nothing: the turn's error explains it.
+    The loop id stays in ``/api/runtime/status.chat_runtime``.
+    """
+    if not isinstance(route, dict) or route.get("mode") == "blocked":
+        return None
+    model = str(route.get("model") or "").strip()
+    provider = str(route.get("provider") or "").strip()
+    if not model or provider in {"", "none"} or route.get("inference_ready") is False:
+        return None
+    name = CHAT_MODEL_NAMES.get(model) or str(route.get("model_label") or "").strip() or model.split("/")[-1]
+    provider_name = _PROVIDER_NAMES.get(provider) or str(route.get("provider_label") or provider)
+    return f"Chat is using {name} via {provider_name}."
+
+
+def _near_chat_blocks(fabric: dict) -> list[str]:
+    """Causes that block a NEAR TEE chat turn beyond the route readiness (#1280).
+
+    The status line is printed only when nothing would block the turn:
+    streaming and tool-use checks present (status-proof blocks already arrive
+    through the slot's own reason). No spend figure blocks a turn (#1284).
+    """
+    near = fabric.get("near_tee") if isinstance(fabric, dict) else None
+    slot = ((near or {}).get("slots") or {}).get("text") if isinstance(near, dict) else None
+    if not isinstance(slot, dict):
+        return ["near_tee_status_unavailable"]
+    blocks = [f"{name}:{value}" for name, value in sorted((slot.get("chat_capabilities") or {}).items())
+              if value != "ready"]
+    return blocks
+
+
+async def current_chat_route() -> dict | None:
+    """The effective chat route with the same full readiness ``/api/runtime/status`` reports.
+
+    Local reads only (configuration, receipts, proofs, accounting); no
+    provider contact. A failure to compute it prints no status line.
+    """
+    from src.api.model_fabric_settings import model_fabric_runtime_status
+    from src.app import (
+        _active_chat_runtime_status,
+        _adr035_chat_identity,
+        _augment_inference_readiness,
+        _effective_runtime_route_status,
+    )
+
+    try:
+        runtime = _active_chat_runtime_status()
+        fabric = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
+        route = _augment_inference_readiness(_effective_runtime_route_status(runtime, {}), fabric)
+        runtime, route = _adr035_chat_identity(runtime, route)
+    except Exception:
+        logger.warning("chat status line route unavailable", exc_info=True)
+        return None
+    if route.get("active_provider_policy") == "near_tee_only" and (blocks := _near_chat_blocks(fabric)):
+        readiness = dict(route.get("inference_readiness") or {})
+        readiness["reasons"] = list(dict.fromkeys([*(readiness.get("reasons") or []), *blocks]))
+        route = {**route, "inference_ready": False, "inference_readiness": readiness}
+    return route
 
 
 def chat_runtime_unavailable_message(status: dict) -> str:

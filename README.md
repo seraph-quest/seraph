@@ -43,15 +43,15 @@ Inbox, follow progress on the Work board, and help Seraph learn what helps you.
 | | What you can do |
 | --- | --- |
 | 🎯 **Keep goals in view** | Bring goals, tasks, conversations, and evidence together; inspect progress and recover interrupted work. |
-| 🔎 **Find relevant signals** | Assess changes from public source watches you select. Review cited opportunities in the Inbox, with attention and spending limits. |
+| 🔎 **Find relevant signals** | Assess changes from public source watches you select. Review cited opportunities in the Inbox, with attention limits. |
 | 🛠️ **Turn evidence into work** | Preview and accept bounded research, browser checks, reports, repository repair, and selected document workflows. |
 | 🌱 **Teach it what helps** | Give explicit Helpful / Not helpful feedback, review preference recommendations, and separately adopt or roll back memory changes. |
 | 🧩 **Extend your workspace** | Use skills, MCP adapters, reviewed procedures, and capability packages, plus optional consented desktop context and integrations. |
 
 Available workflows depend on permissions, configuration, and host support.
 See [Development Status](docs/implementation/STATUS.md) for exact limits and
-[v2026.11.17 release notes](docs/implementation/25-release-2026-11-17.md) for the
-latest test determinism, daemon authentication, screenshot cap and GitHub activity changes.
+[v2026.11.19 release notes](docs/implementation/26-release-2026-11-19.md) for the
+latest Settings Model card, removal of Seraph-side cost limits and upgrade notes.
 
 ## Quick Start
 
@@ -74,15 +74,18 @@ cp env.dev.example .env.dev
 
 Open the **[cockpit](http://127.0.0.1:3001)** or
 [API documentation](http://127.0.0.1:8004/docs). The core starts without a provider
-key. To enable model work, open **Settings → Models & OpenRouter** and configure
-your key, models, allowed upstreams, explicit cloud consent, and a finite budget.
-Text, vision, and embedding have separate controls.
+key. To turn chat on, open **Settings → Model**: the Model card at the top says
+whether chat works and shows the one control that fixes it (a NEAR API key, a
+model, or your explicit OK that NEAR sees messages as plain text). Seraph sets
+no spending limit of its own: set limits in your NEAR account. Vision and embedding have separate controls under **Advanced and
+diagnostics** on the same tab.
 
 **Upgrade note:** chat now runs on the Cordis agent loop by default, so chat
 requires the Cordis runtime (Docker images and `./manage.sh -e dev local up`
 already build it). On the first start after upgrading, Seraph moves chat to the
 Cordis loop once; if the runtime is missing, chat shows as blocked with the exact
-fix instead of falling back. Settings → Cordis runtime host can roll chat back to
+fix instead of falling back. Settings → Model → Advanced and diagnostics → Cordis
+runtime host can roll chat back to
 the legacy loop (and cut it over again); a rollback is never undone by a restart.
 
 Goal discovery (programme research) runs through the reviewed Cordis host. It
@@ -102,7 +105,9 @@ Preserve your existing `.env.dev` when returning to an installed workspace.
 
 Local-first means Seraph owns your canonical goals, memory, jobs, artifacts,
 and history. It does not mean inference is offline. Ordinary text, vision,
-and embedding use governed OpenRouter routes. The optional NEAR HTTPS text
+and embedding use NEAR TEE-hosted models (per NEAR's catalog, not verified by
+Seraph) under ADR-035; NEAR receives requests in plaintext and OpenRouter is
+retired. The optional NEAR HTTPS text
 capability is disabled by default, requires separate setup and consent, and
 sends provider-readable plaintext.
 
@@ -138,7 +143,8 @@ defines this direction and its accepted boundaries.
 <summary><strong>Try the current guardian loop</strong></summary>
 
 1. Choose a Goal, select relevant public source watches, and enable a finite
-   guardian policy with attention and spending limits.
+   guardian policy with attention limits (spending limits are set in your NEAR
+   account).
 2. Inspect a cited opportunity when a qualifying change arrives. Low-confidence
    or irrelevant assessments stay quiet.
 3. Preview and accept a supported browser-check or evidence-report plan in Work.

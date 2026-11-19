@@ -136,12 +136,12 @@ async def test_actual_callback_drift_after_reserve_denies_scripted_contact(task_
             await planner.propose_specialist(db, owner, group=group, binding=binding,
                 task_input=inputs, descriptors=descriptors, original_provenance=provenance, request_key="drift")
         rows = list((await db.execute(select(InferenceCostReservation))).scalars())
-        assert len(rows) == 1 and rows[0].contact_started_at is None and rows[0].bound_microusd == 100
+        assert len(rows) == 1 and rows[0].contact_started_at is None and rows[0].bound_microusd == 0
     assert transport["contacts"] == []
 
 
 @pytest.mark.asyncio
-async def test_actual_specialist_child_cap_and_unknown_debt_cannot_reset_group(task_runtime, monkeypatch, native_admission_lifecycle):
+async def test_actual_specialist_child_cap_survives_an_unpriced_call(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, group, binding, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     async with sessions() as db:
         await planner.propose_specialist(db, owner, group=group, binding=binding,
@@ -168,8 +168,10 @@ async def test_actual_specialist_child_cap_and_unknown_debt_cannot_reset_group(t
     async with sessions() as db:
         rows = list((await db.execute(select(InferenceCostReservation))).scalars())
         run = await dispatcher.jobs._fetch(db, rows[0].job_id)
-        with pytest.raises(InferenceAccountingError, match="group_unknown"):
+        # ADR-037 (#1284): an unpriced call never blocks by itself, and it
+        # never resets the call cap either.
+        with pytest.raises(InferenceAccountingError, match="specialist_call_limit"):
             await reserve_entry(db, run, rows, {"group":group,"role":"specialist",**binding},
                 operation_id="forbidden-restart-call", bound=100, runtime_path="general_task_planner")
-        assert len(rows) == 1 and rows[0].state == "unknown" and rows[0].bound_microusd == 100
+        assert len(rows) == 1 and rows[0].state == "unknown" and rows[0].bound_microusd == 0
     assert len(transport["contacts"]) == 1

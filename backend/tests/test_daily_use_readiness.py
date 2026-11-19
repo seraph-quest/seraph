@@ -204,8 +204,9 @@ def test_expired_proof_yields_specific_rejection_and_recovery_message():
     error = NoCompliantModelRouteError(tuple(item.reason_code for item in decision.rejections))
     assert str(error) == "no_compliant_route"
     message = openrouter_route_blocked_message(error)
-    assert "health capability proof for the text route expired" in message
-    assert "Prove route" in message and "billed" in message
+    # #1280: plain, provider-neutral copy; the recovery action is unchanged.
+    assert message == "Chat needs one quick test first. Nothing was sent."
+    assert "OpenRouter" not in message
     assert openrouter_route_block_recovery(openrouter_route_block_reason(error))[1] == "prove_route"
 
     missing = select_route(context, (candidate_from_profile(profile),), (), now=now)
@@ -213,8 +214,77 @@ def test_expired_proof_yields_specific_rejection_and_recovery_message():
     assert openrouter_route_block_recovery("proof_missing:health")[1] == "prove_route"
 
 
+@pytest.mark.parametrize(("reason", "message", "action"), [
+    ("provider_policy_revoked", "Chat is paused until you give your OK. Nothing was sent.", "give_consent"),
+    ("near_tee_purpose_consent_required", "Chat is paused until you give your OK. Nothing was sent.", "give_consent"),
+    ("near_tee_credential_required", "Chat is off: no NEAR key saved. Nothing was sent.", "save_near_key"),
+    ("near_tee_slot_unconfigured", "Chat is off: no chat model is turned on. Pick one in Settings → Model. Nothing was sent.", "choose_model"),
+    ("near_tee_slot_disabled", "Chat is off: no chat model is turned on. Pick one in Settings → Model. Nothing was sent.", "choose_model"),
+    ("near_tee_catalog_receipt_stale", "Chat needs one quick test first. Nothing was sent.", "run_chat_test"),
+    ("near_tee_catalog_receipt_missing", "Chat needs one quick test first. Nothing was sent.", "run_chat_test"),
+    ("proof_missing:streaming", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
+    ("proof_expired:tool_use", "Chat needs one quick test first. Nothing was sent.", "prove_route"),
+    ("something_new", "Chat is blocked. Nothing was sent.", "open_model_settings"),
+])
+def test_route_block_copy_is_plain_and_provider_neutral(reason, message, action):
+    """#1280: each NEAR block reason has its own plain message; none names OpenRouter."""
+    assert openrouter_route_block_recovery(reason) == (message, action)
+    assert "OpenRouter" not in message
+
+
+def test_route_block_frame_fields_carry_code_action_and_section():
+    from src.agent.direct_chat import route_block_frame_fields
+
+    fields = asyncio.run(route_block_frame_fields(NoCompliantModelRouteError(("provider_policy_revoked",))))
+    assert fields == {"content": "Chat is paused until you give your OK. Nothing was sent.",
+                      "code": "provider_policy_revoked", "recovery_action": "give_consent", "settings_section": "model"}
+    mid_turn = asyncio.run(route_block_frame_fields(
+        NoCompliantModelRouteError(("provider_policy_revoked",)), provider_contacted=True))
+    assert mid_turn["content"].startswith("Chat is paused until you give your OK. Earlier steps")
+
+
+def test_chat_status_line_names_the_effective_route_and_is_silent_when_blocked():
+    from src.runtime_plugins.agent_turns import chat_runtime_status_text
+
+    ready = {"mode": "remote_provider", "provider": "near_tee", "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+             "model_label": "DeepSeek-V4.1-Flash-1017", "inference_ready": True}
+    assert chat_runtime_status_text(ready) == "Chat is using DeepSeek V4.1 Flash via NEAR."
+    assert chat_runtime_status_text({**ready, "model": "Qwen/Qwen3.8-27B"}) == "Chat is using Qwen3.8 27B via NEAR."
+    assert chat_runtime_status_text({**ready, "inference_ready": False}) is None
+    assert chat_runtime_status_text({**ready, "mode": "blocked"}) is None
+    assert chat_runtime_status_text({**ready, "provider": "none", "model": ""}) is None
+    assert chat_runtime_status_text(None) is None
+
+
+@pytest.mark.asyncio
+async def test_current_chat_route_runs_the_real_readiness_path(db):
+    """The unpatched route helper imports and computes the full readiness (#1280)."""
+    from src.runtime_plugins.agent_turns import chat_runtime_status_text, current_chat_route
+
+    route = await current_chat_route()
+    assert isinstance(route, dict)
+    assert route["runtime_path"] == "chat_agent"
+    assert "inference_readiness" in route
+    # Nothing is configured in the test workspace, so chat is blocked and no line prints.
+    assert route["inference_ready"] is False
+    assert chat_runtime_status_text(route) is None
+
+
+def test_near_chat_blocks_cover_missing_chat_checks():
+    from src.runtime_plugins.agent_turns import _near_chat_blocks
+
+    def fabric(capabilities):
+        return {"near_tee": {"slots": {"text": {"chat_capabilities": capabilities}}}}
+
+    assert _near_chat_blocks(fabric({"streaming": "ready", "tool_use": "ready"})) == []
+    assert _near_chat_blocks(fabric({"streaming": "proof_missing:streaming", "tool_use": "ready"})) == [
+        "streaming:proof_missing:streaming"]
+    assert _near_chat_blocks({}) == ["near_tee_status_unavailable"]
+
+
 def test_unknown_route_reason_keeps_configuration_guidance():
     assert openrouter_route_blocked_message(NoCompliantModelRouteError()) == OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE
+    assert OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE == "Chat is blocked. Nothing was sent."
     assert openrouter_route_block_recovery("capability_not_declared")[1] == "declare_capability"
     assert openrouter_route_block_recovery("profile_limit_unknown_or_insufficient:context_tokens")[1] == "raise_context_window"
 
@@ -329,30 +399,26 @@ def test_route_error_ignores_an_earlier_handled_denial_in_implicit_context():
         assert route_error_from(unrelated) is None
 
 
-def test_unreviewed_overrun_names_review_recovery_and_mid_turn_is_honest():
-    error = NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))
-    message, action = openrouter_route_block_recovery(openrouter_route_block_reason(error))
-    assert action == "review_cost_overrun"
-    assert "billed above its request cost bound" in message
-    assert "raise the request cost bound to at least the billed charge shown there" in message
-    assert message.endswith("No model call was made.")
+def test_mid_turn_route_block_is_honest():
+    error = NoCompliantModelRouteError(("proof_expired:tool_use",))
+    assert openrouter_route_blocked_message(error).endswith("Nothing was sent.")
 
     mid_turn = openrouter_route_blocked_message(error, provider_contacted=True)
-    assert "No model call was made" not in mid_turn
+    assert "Nothing was sent" not in mid_turn
     assert "Earlier steps of this turn had already called the model" in mid_turn
     generic_mid_turn = openrouter_route_blocked_message(NoCompliantModelRouteError(), provider_contacted=True)
-    assert "before any provider request" not in generic_mid_turn
+    assert "Nothing was sent" not in generic_mid_turn
+    assert "Earlier steps of this turn had already called the model" in generic_mid_turn
 
 
-def test_accounting_overrun_denial_keeps_its_reason_on_the_route_error():
+def test_accounting_denial_keeps_its_reason_on_the_route_error():
     from src.llm_runtime import _route_denial_error
     from src.workflows.inference_accounting import InferenceAccountingError
 
-    accounting = InferenceAccountingError("provider_charge_exceeded_reservation")
+    accounting = InferenceAccountingError("accounting_continuity_unavailable")
     error = _route_denial_error([], accounting)
-    assert error.reason_codes == ("provider_charge_exceeded_reservation",)
+    assert error.reason_codes == ("accounting_continuity_unavailable",)
     assert error.__cause__ is accounting
-    assert openrouter_route_block_recovery(openrouter_route_block_reason(error))[1] == "review_cost_overrun"
     # Selector denials still win, and unrelated errors add no reason.
     assert _route_denial_error(["proof_missing:text"], accounting).reason_codes == ("proof_missing:text",)
     assert _route_denial_error([], RuntimeError("boom")).reason_codes == ()
@@ -410,32 +476,6 @@ async def test_real_direct_chat_stream_requests_what_the_default_text_route_admi
     assert "streaming" in context.requirements.capabilities
     decision = select_route(context, (candidate_from_profile(profile),), tuple(proofs.values()))
     assert decision.allowed, decision.rejections
-
-
-@pytest.mark.asyncio
-async def test_direct_chat_stream_reports_unreviewed_overrun_as_no_contact_block():
-    from src.agent import direct_chat
-    from src.workflows.inference_accounting import InferenceAccountingError
-
-    setup = _setup()
-
-    async def refused(**_kwargs):
-        raise InferenceAccountingError("provider_charge_exceeded_reservation")
-        yield  # pragma: no cover
-
-    with (
-        patch.object(direct_chat, "stream_completion_with_fallback", refused),
-        patch.object(direct_chat, "_uses_openrouter_profile", return_value=True),
-        patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=PRINCIPAL),
-        patch("src.model_fabric.caller_context.effective_workload_policy",
-              return_value=openrouter_policy_for_setup(setup, "chat_agent")),
-        patch("src.agent.session.session_manager.get_task_continuity_context", AsyncMock(return_value="")),
-        pytest.raises(NoCompliantModelRouteError) as raised,
-    ):
-        async for _delta in direct_chat.stream_direct_local_chat(
-                "hello there", runtime_path="chat_agent", is_onboarding=False, session_id=PRINCIPAL.session_id):
-            pass
-    assert raised.value.reason_codes == ("provider_charge_exceeded_reservation",)
 
 
 def test_real_agent_generate_tool_turn_is_admitted_by_the_default_text_route(monkeypatch):
@@ -523,30 +563,3 @@ def test_enabled_memory_consolidation_still_flushes(background_workspace):
         assert asyncio.run(flush.flush_session_memory("session-1", trigger="post_response")) is True
     consolidate.assert_awaited_once()
     flush._reset_memory_flush_state()
-
-
-def test_overrun_message_names_the_minimum_bound_and_reproving():
-    from src.agent.direct_chat import microusd_dollars
-
-    message, action = openrouter_route_block_recovery(
-        "provider_charge_exceeded_reservation", minimum_bound_microusd=612_340)
-    assert action == "review_cost_overrun"
-    assert "at least $0.61234 (612,340 µUSD, the largest unreviewed charge)" in message
-    assert "press Prove route again" in message
-    assert microusd_dollars(1_000_000) == "1" and microusd_dollars(50_000) == "0.05"
-
-
-@pytest.mark.asyncio
-async def test_overrun_minimum_is_read_only_for_overrun_blocks():
-    from src.agent.direct_chat import route_block_overrun_minimum
-    from src.workflows.job_runtime import durable_job_repository
-
-    snapshot = AsyncMock(return_value={"status": "blocked", "overrun_max_cost_microusd": 612_340})
-    with patch.object(durable_job_repository, "inference_accounting_snapshot", snapshot):
-        assert await route_block_overrun_minimum(
-            NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))) == 612_340
-        assert await route_block_overrun_minimum(NoCompliantModelRouteError(("proof_missing:text",))) is None
-    snapshot.assert_awaited_once()
-    with patch.object(durable_job_repository, "inference_accounting_snapshot", AsyncMock(side_effect=RuntimeError("x"))):
-        assert await route_block_overrun_minimum(
-            NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))) is None

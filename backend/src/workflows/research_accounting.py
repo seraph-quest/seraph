@@ -12,7 +12,6 @@ from src.work_board.research_contracts import CHILD_KIND, PARENT_KIND, PROMPT_RE
 from src.workflows.inference_accounting import (InferenceAccountingError, _continuity_lock,
     _json, _operation_payload, _utc, integer_amount, period_id)
 from src.workflows.research_guard import assert_research_parent_current
-from src.workspace.accounting_witness import period_state, unreviewed_overruns
 
 
 def payload_checkpoint(run, identifier):
@@ -31,7 +30,7 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
         await jobs._accounting_begin(db)
         account, rows = await jobs._accounting_rows(db)
         with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-            jobs._assert_accounting_continuity(workspace, account, rows)
+            jobs._assert_accounting_continuity(workspace, account, rows, db=db)
             parent = await jobs._fetch(db, parent_id)
             jobs._assert_lease(parent, owner=owner, fencing_token=fencing_token)
             if parent.status != "running" or parent.job_kind != PARENT_KIND or _utc(parent.deadline_at) <= now:
@@ -45,19 +44,14 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
                 raise InferenceAccountingError("research_funding_phase_invalid")
             authority = json.loads(parent.declared_authority_json)
             configured, policy_digest, setup = vertical_inference_policy("readonly_research_child")
-            bound = integer_amount(setup.request_cost_bound_microusd or setup.spend_ceiling_microusd, positive=True)
-            allowance = integer_amount(authority["research_allowance_microusd"], positive=True)
-            slot_allowance = integer_amount(authority["research_slot_allowance_microusd"], positive=True)
-            owner_ceiling = integer_amount(authority["research_owner_ceiling_microusd"], positive=True)
-            if (policy_digest != creation["model_policy_digest"] or bound > slot_allowance
-                or len(creation["child_ids"]) not in {1, 2} or bound * len(creation["child_ids"]) > allowance
-                or account.ceiling_microusd != setup.spend_ceiling_microusd):
-                raise InferenceAccountingError("research_reviewed_allowance_changed")
+            # ADR-037 (#1284): the recorded amounts are history only. Each
+            # request record carries them exactly as the parent authority
+            # recorded them; nothing is compared with a limit.
+            bound = integer_amount(authority["research_slot_allowance_microusd"])
+            owner_ceiling = integer_amount(authority["research_owner_ceiling_microusd"]) or None
+            if policy_digest != creation["model_policy_digest"] or len(creation["child_ids"]) not in {1, 2}:
+                raise InferenceAccountingError("research_policy_changed")
             period = period_id(now)
-            operations = [_operation_payload(row) for row in rows]
-            period_status = period_state(account.model_dump(mode="json"), operations, period)
-            if period_status["reason_code"] or unreviewed_overruns(account.model_dump(mode="json"), operations):
-                raise InferenceAccountingError(period_status["reason_code"] or "provider_charge_exceeded_reservation")
             candidates = []
             for slot, child_id in enumerate(creation["child_ids"]):
                 child = await jobs._fetch(db, child_id)
@@ -96,23 +90,18 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
             if existing_count:
                 if existing_count != len(candidates):
                     raise InferenceAccountingError("research_group_partial_reservation")
+                from src.workflows.inference_accounting import _RESEAL_PENDING_KEY
+                if db.info.get(_RESEAL_PENDING_KEY):
+                    await jobs._persist_accounting_witness(db, workspace, account, rows)
                 return [_operation_payload(item[3]) for item in candidates]
-            def held(row):
-                return row.bound_microusd if row.state in {"reserved", "contact_started", "unknown"} else (
-                    (row.actual_cost_microusd or 0) if row.state == "settled" and row.period_id >= period else 0)
-            total = bound * len(candidates)
-            if sum(held(row) for row in rows) + total > account.ceiling_microusd:
-                raise InferenceAccountingError("deployment_cost_budget_exhausted")
-            if sum(held(row) for row in rows if row.owner_id == parent.owner_principal_id) + total > owner_ceiling:
-                raise InferenceAccountingError("owner_cost_budget_exhausted")
             created = []
             for child, expected, group_binding, _existing in candidates:
                 row = InferenceCostReservation(operation_id="remote:"+child.run_identity,
                     deployment_id=account.deployment_id, period_id=period, settings_revision=account.settings_revision,
-                    ceiling_microusd=account.ceiling_microusd, sequence=account.revision+len(created)+1,
+                    ceiling_microusd=0, sequence=account.revision+len(created)+1,
                     priority=parent.priority, deadline_at=child.deadline_at,
                     created_at=now.replace(tzinfo=None), updated_at=now.replace(tzinfo=None),
-                    evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}, group_binding]), **expected)
+                    evidence_json=_json([{"kind": "reservation", "memory_status": "no_learning"}, group_binding]), **expected)
                 db.add(row)
                 rows.append(row)
                 created.append(row)
@@ -120,7 +109,7 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
             return [_operation_payload(row) for row in created]
 
 
-async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_digest, profile_id, bound):
+async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_digest, profile_id):
     """Rebind the exact untouched row to a fresh child lease; never reserve again.
 
     Runs on every research child call, so it uses the bounded verification
@@ -153,7 +142,7 @@ async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_dig
                 or row.state != "reserved" or row.contact_started_at is not None or row.recovery_reason
                 or row.job_id != child.run_identity or row.owner_id != request.owner_id
                 or row.payload_digest != request.data_digest or ready["payload_digest"] != request.data_digest
-                or row.policy_digest != policy_digest or row.profile_id != profile_id or row.bound_microusd != bound
+                or row.policy_digest != policy_digest or row.profile_id != profile_id
                 or _utc(row.deadline_at) != _utc(child.deadline_at) or request.deadline_at > _utc(child.deadline_at).timestamp()
                 or not any(item.get("kind") == "research_group_reservation"
                     and item.get("creation_digest") == ready["creation_digest"] and item.get("slot") == ready["slot"]
@@ -201,8 +190,12 @@ async def discovery_accounting_scope(jobs, *, job_id=None, operation_id=None):
         yield policy
 
 
-async def discovery_generation_budget(jobs, db, run, rows, *, new_bound=0, operation_id=None, payload_digest=None):
-    """All-period generation spend and liabilities in the sole cost writer."""
+async def discovery_generation_budget(jobs, db, run, rows, *, operation_id=None, payload_digest=None):
+    """A programme's request lineage and prompt checks in the sole ledger writer.
+
+    ADR-037 (#1284): nothing here reads a dollar amount. The four-request
+    limit, the original lineage and the exact prompt readback stay.
+    """
     from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE, discovery_authority
     from src.workflows.research_guard import assert_discovery_authority
     from src.db.models import WorkflowRunState
@@ -228,7 +221,6 @@ async def discovery_generation_budget(jobs, db, run, rows, *, new_bound=0, opera
     ids = {row.job_id for row in rows}
     runs = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity.in_(ids)))).scalars()) if ids else []
     parents = {parent.run_identity: parent for parent in runs}
-    used = 0
     for row in rows:
         parent = parents.get(row.job_id)
         if parent is None:
@@ -246,16 +238,5 @@ async def discovery_generation_budget(jobs, db, run, rows, *, new_bound=0, opera
                 or row.goal_revision != original.goal_revision
                 or row.operation_id not in {"remote:" + parent.run_identity + ":" + str(i) for i in range(4)}):
             raise InferenceAccountingError("programme_cost_original_lineage_changed")
-        if row.state in {"reserved", "contact_started", "unknown"}:
-            used += integer_amount(row.bound_microusd, positive=True)
-        elif row.state == "settled":
-            if row.actual_cost_microusd is None:
-                raise InferenceAccountingError("programme_settlement_cost_missing")
-            used += integer_amount(row.actual_cost_microusd)
-        elif row.state != "released":
-            raise InferenceAccountingError("programme_cost_state_unknown")
-    if used + new_bound > binding.cost_ceiling_microusd:
-        raise InferenceAccountingError("programme_generation_cost_budget_exhausted")
     return {"binding": binding.model_dump(mode="json"), "native_job_id": run.run_identity,
-        "generation_used_microusd": used, "generation_ceiling_microusd": binding.cost_ceiling_microusd,
         "memory_status": "no_learning"}

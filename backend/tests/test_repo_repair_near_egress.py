@@ -45,7 +45,7 @@ async def _consented(async_db, tmp_path, monkeypatch, key):
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
     prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
-    near = await prepare_repository_near_route(monkeypatch, ceiling_microusd=25_000)
+    near = await prepare_repository_near_route(monkeypatch)
     near.script = _proposal
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()

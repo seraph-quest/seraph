@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import { ModelCard } from "./ModelCard";
+import type { ChatRouteReadiness } from "./ModelCard";
 import { InferenceAccountingPanel } from "./InferenceAccountingPanel";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
@@ -19,7 +22,6 @@ import {
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
 import { NearTextPanel } from "./NearTextPanel";
 import { NearTeePanel } from "./NearTeePanel";
-import { InferenceLanePanel } from "./InferenceLanePanel";
 import { CordisRuntimePanel } from "./CordisRuntimePanel";
 
 const PROOF_TTL_CHOICES = [
@@ -639,7 +641,24 @@ function modelFabricProofLabel(runtime: ModelFabricRuntimeStatus | null): string
   return Object.entries(counts).map(([status, count]) => `${count} ${status}`).join(" · ");
 }
 
-export function ArtifactStoragePanel() {
+/** Chat readiness from /api/runtime/status.effective_runtime (#1280). */
+function chatRouteReadiness(value: unknown): ChatRouteReadiness | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const route = value as Record<string, unknown>;
+  const readiness = route.inference_readiness && typeof route.inference_readiness === "object"
+    ? route.inference_readiness as Record<string, unknown> : null;
+  return {
+    inference_ready: route.inference_ready === true,
+    reasons: Array.isArray(readiness?.reasons) ? readiness.reasons.filter((item): item is string => typeof item === "string") : [],
+  };
+}
+
+interface ArtifactStoragePanelProps {
+  /** Further panels that belong in the closed "Advanced and diagnostics" fold. */
+  advanced?: ReactNode;
+}
+
+export function ArtifactStoragePanel({ advanced }: ArtifactStoragePanelProps = {}) {
   const mountedRef = useRef(true);
   const fetchGenerationRef = useRef(0);
   const fallbackRetryRef = useRef(0);
@@ -662,6 +681,8 @@ export function ArtifactStoragePanel() {
   const [screenshotFolderDraft, setScreenshotFolderDraft] = useState("");
   const [modelFabric, setModelFabric] = useState<ModelFabricSettingsStatus | null>(loadRetainedModelFabricSettings);
   const [modelFabricRuntime, setModelFabricRuntime] = useState<ModelFabricRuntimeStatus | null>(null);
+  const [chatRoute, setChatRoute] = useState<ChatRouteReadiness | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [cordisMetadata, setCordisMetadata] = useState<unknown>(null);
   const [modelFabricStale, setModelFabricStale] = useState(() => loadRetainedModelFabricSettings() !== null);
   const [modelFabricError, setModelFabricError] = useState<string | null>(null);
@@ -748,12 +769,15 @@ export function ArtifactStoragePanel() {
       retainModelFabricSettings(nextSettings);
       setModelFabric(nextSettings);
       setModelFabricRuntime(nextRuntime);
+      setChatRoute(chatRouteReadiness(runtimeRecord?.effective_runtime));
       setModelFabricStale(false);
       setProofTtlSeconds((current) => Math.min(current, nextSettings.canary_proof_ttl.max_seconds));
       setModelFabricError(nextRuntime ? null : "Runtime route receipts are unavailable; configuration remains usable.");
       setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     } catch {
       if (isCancelled()) return;
+      // The Model card never shows a last-known route as current (#1280).
+      setChatRoute(null);
       setModelFabricStale(true);
       setModelFabricError("Model-fabric metadata is temporarily unavailable; showing last-known settings.");
     }
@@ -1007,6 +1031,23 @@ export function ArtifactStoragePanel() {
 
   return (
     <div className="px-1">
+      <ModelCard
+        settings={modelFabric}
+        route={chatRoute}
+        stale={modelFabricStale}
+        onSave={saveOpenRouterSetup}
+        onSettings={(next) => { retainModelFabricSettings(next); setModelFabric(next); }}
+        onRefresh={() => fetchModelFabric()}
+        onOpenDiagnostics={() => setAdvancedOpen(true)}
+      />
+      {/* #1280 PR 1: everything this tab showed before sits in one closed fold. */}
+      <details
+        className="mt-1"
+        data-testid="settings-advanced"
+        open={advancedOpen}
+        onToggle={(event) => setAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)}
+      >
+      <summary className="mb-2 cursor-pointer text-[10px] uppercase tracking-wider text-retro-text/60">Advanced and diagnostics</summary>
       <CordisRuntimePanel managed metadata={cordisMetadata} />
       <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
         Screenshot Folder
@@ -1401,14 +1442,6 @@ export function ArtifactStoragePanel() {
                       : "normal"
                 }
               />
-              <InferenceLanePanel
-                lane={modelFabric?.inference_lane}
-                stale={modelFabricStale}
-                onSave={saveOpenRouterSetup}
-                policyRevision={modelFabric?.egress_revision}
-                ledgerCeilingMicrousd={modelFabric?.inference_accounting?.ceiling_microusd}
-                laneReason={modelFabric?.inference_lane_reason}
-              />
               <OpenRouterSetupPanel
                 setup={modelFabric?.openrouter_setup}
                 stale={modelFabricStale}
@@ -1423,8 +1456,6 @@ export function ArtifactStoragePanel() {
                 onSave={saveOpenRouterSetup}
                 policyRevision={modelFabric?.egress_revision}
                 policyRevoked={modelFabric?.egress_revoked}
-                sharedCeilingMicrousd={modelFabric?.inference_lane?.spend_ceiling_microusd ?? modelFabric?.near_text?.spend_ceiling_microusd ?? modelFabric?.inference_accounting?.ceiling_microusd}
-                sharedCeilingLocked={Boolean(modelFabric?.inference_lane?.published || modelFabric?.openrouter_setup)}
               />
               <NearTeePanel
                 setup={modelFabric?.near_tee}
@@ -1433,7 +1464,6 @@ export function ArtifactStoragePanel() {
                 onRefreshed={() => { void fetchModelFabric(); }}
                 policyRevision={modelFabric?.egress_revision}
                 policyRevoked={modelFabric?.egress_revoked}
-                laneCeilingMicrousd={modelFabric?.inference_lane?.published ? modelFabric.inference_lane.spend_ceiling_microusd : null}
               />
               <InferenceAccountingPanel accounting={modelFabric?.inference_accounting} stale={modelFabricStale} onRefresh={fetchModelFabric} />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">
@@ -1704,6 +1734,8 @@ export function ArtifactStoragePanel() {
           </>
         )}
       </div>
+      {advanced}
+      </details>
     </div>
   );
 }

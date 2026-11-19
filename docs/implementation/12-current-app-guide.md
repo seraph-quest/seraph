@@ -303,10 +303,19 @@ and [ADR-027](./decisions/027-standing-public-goal-programmes.md) are available
 on `develop` revisions containing the independently reviewed implementation
 merge. This section describes that post-merge control scope, which does not
 include discovery or digest execution. Supply a separate public
-brief locally, preview the exact public-web/local-artifact/inference ceiling,
-and explicitly accept a daily programme lasting at most seven days. Private goal
-text is never copied into this brief automatically. No query, URL or output path
-is required. Zero budget or missing provider policy shows a blocked programme.
+brief locally, preview the exact public-web/local-artifact/inference-request
+limits, and explicitly accept a daily programme lasting at most seven days.
+Private goal text is never copied into this brief automatically. No query, URL
+or output path is required. Missing provider policy shows a blocked programme.
+Since #1284 ([ADR-037](./decisions/037-no-local-cost-limits.md)) a programme has
+no inference dollar allowance and a new programme stores none. A one-time
+startup step pauses every programme that is not ended and whose stored
+`max_inference_microusd` is exactly 0 (reason `programme_paused_no_allowance`,
+note "Paused: it had no inference allowance. Resume it to run."); it is keyed on
+the stored value, not a date, and **Resume** lets the programme run. A programme
+saved with a positive allowance keeps running with no limit. The former
+`programme_zero_budget` and `programme_allowance_exhausted` reasons are no
+longer produced.
 
 The original finite grant may outlive browser logout/expiry. Pause/revoke or
 stable identity revocation stops new contacts and adoption; Goal/route correction
@@ -327,10 +336,10 @@ ledger. There is no catch-up after downtime. The fixed path plans at most three
 queries, searches the fixed DuckDuckGo HTML route, selects at most four manifest
 items, and prepares a cited local brief and inert checklist. Each occurrence has
 the original deadline of at most 300 seconds and at most four governed inference
-requests. The programme ceiling includes every daily occurrence and accounting
-period, including unresolved reservations and contacted Unknown work.
-Narrower accepted plan limits apply to the actual query, result, source and
-inference counts and declared output bytes. Search uses each plan's per-request
+requests. Spend across every daily occurrence is recorded for display only
+and is not compared with an allowance (ADR-037). Narrower accepted plan limits
+apply to the actual query, result, source and inference counts and declared
+output bytes. Search uses each plan's per-request
 time and response-byte cap within the original deadline. The fixed four-stage
 graph consumes whole original physical outputs; alternate graphs and JSON
 pointers are unsupported rather than silently ignored. Planning and source
@@ -437,13 +446,13 @@ action-key replay/conflict survive reload. Operator
 disposition receipts are limited to 128 per owner/day and 16 KiB each, without
 evicting history to manufacture capacity.
 
-Home reports actual native run/source/output receipts and remaining finite
-allowance, including unresolved accounting reservations. **Next digest** is the
+Home reports actual native run/source/output receipts. **Next digest** is the
 local 08:00 schedule. **Next source eligibility** shows current eligibility or
-the next UTC daily occurrence when the active grant, allowance and running
-discovery scheduler support it. Native outstanding work and unresolved costs
-show a hold; inactive authority, an unavailable or paused scheduler, exhausted
-allowance and expiry before the next occurrence show an explicit reason.
+the next UTC daily occurrence when the active grant and running discovery
+scheduler support it. Native outstanding work shows a hold; inactive authority,
+an unavailable or paused scheduler and expiry before the next occurrence show
+an explicit reason. Since #1284 there is no remaining-allowance figure and no
+exhausted-allowance or unpriced-cost hold.
 Eligibility is not an execution time: the existing scheduler, native admission
 and current authority determine whether execution proceeds. Pause/review uses
 existing programme controls. No activity
@@ -472,18 +481,22 @@ model is `z-ai/glm-5.3-flash` at `https://cloud-api.near.ai/v1`. The adapter use
 ordinary HTTPS certificate validation; no live provider TLS-handshake proof,
 verified TEE or end-to-end encryption claim is supplied by the local receipts. A local `configured`
 label reports credential, current consent and accounting readiness only.
-The request reserve is a local hold rather than a provider-enforced maximum.
-NEAR shares the deployment ledger, budget ceiling, serial inference lane and
+Seraph sets no request reserve or budget ceiling
+([ADR-037](./decisions/037-no-local-cost-limits.md)); spending limits are set in
+the NEAR account. NEAR shares the deployment ledger, serial inference lane and
 global egress revocation fence with OpenRouter.
 
 Use Work to submit one private text question against an active owned Goal and
 finite purpose authority. The browser does not retain the question for automatic
 replay. Review the native job and open its private result through current-owner
 readback after authoritative billing settlement. The task requires human Review;
-success does not approve it or change memory: the outcome records `no_learning`. Missing or invalid billing
-withholds the answer and keeps the original liability visible. Restart and idempotent
-request recovery preserve the original job without resending inference. Manual debt
-settlement cannot recover discarded output or grant result adoption. Revoke or
+success does not approve it or change memory: the outcome records `no_learning`. Since
+#1284 ([ADR-037](./decisions/037-no-local-cost-limits.md)) a missing billing record
+leaves the request "not priced yet" in **Spend history** and no longer ends the job
+in `cost_liability`; a job already in that status keeps its reconcile control, and
+settling it is optional. Restart and idempotent request recovery preserve the
+original job without resending inference. Manual settlement only records a charge;
+it cannot grant result adoption. Revoke or
 expired authority blocks private reads; configuration alone grants no execution.
 
 ## From a goal to a verified result
@@ -640,17 +653,18 @@ and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
 the single remote-inference broker (`get_remote_inference_admission_broker()`),
 bound to the job's lease.
 Interactive work keeps its priority over queued background work; cancelling a
-queued request releases its reservation without contact; a lost response after
-contact stays an `unknown` cost liability. By broker design that uncertain
-result keeps the serial slot until it is reconciled, so the next request (Cordis
-or chat) waits instead of risking a double charge. Outbound messages are
+queued request releases its request record without contact; a lost response
+after contact is an uncertain outcome that is never replayed and adopts
+nothing. Since ADR-037 (#1284) the returned callback frees the serial slot at
+once (no charge has to be recorded first), so the next request (Cordis or chat)
+runs. Outbound messages are
 Vault-redacted (fail closed) before JSON encoding, and Cordis inference is capped
 at four concurrent requests per operator (`cordis_inference_capacity`) so a burst
 cannot take the broker's per-owner admission slots chat needs. Routes need a
 declared and proven streaming capability, as chat does. Python returns bounded frames, the sealed
 receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
 and no service returns secrets. A changed attempt, deadline or Root never seals
-output, and unloading the host leaves the job's intent and cost liability for
+output, and unloading the host leaves the job's intent and request record for
 recovery while a re-admission reuses the held job.
 `connections.invokeBoundAdapter` (#1092) admits one governed job for an operation
 from a closed table with closed per-operation arguments, and runs it through the
@@ -719,8 +733,14 @@ agent loop; a Cordis owner that is not ready, a host that is not admitting, or
 (`delegation_owner_not_ready`, #1020 part 2) blocks chat visibly with the exact
 fix and never falls back to legacy. Rollback is another higher epoch.
 `/api/runtime/status` reports `chat_runtime {loop, route, owner_epoch, reason,
-recovery}`, the Settings Cordis panel shows it, and the WS status line names the
-loop (`cordis.agent-loop.v1` or `legacy.smolagents`).
+recovery}` and the Settings Cordis panel shows it. The WS status line names the
+effective chat route, not the loop: "Chat is using DeepSeek V4.1 Flash via
+NEAR." (#1280). It is built from the same full readiness `/api/runtime/status`
+reports (consent, key, catalog receipt, accounting, status proofs) plus the
+`streaming` and `tool_use` checks, and is not sent when any of them would
+block the turn. The loop id stays in
+`chat_runtime.loop` and on each turn's "Seraph received the message." frame as
+the structured `chat_loop` field.
 
 **Default cutover and operator control.** `runtime_plugins/cutover.py` holds an
 ordered manifest of domains whose default owner is Cordis
@@ -1501,7 +1521,8 @@ same Node: when the package is missing or stale it runs `cordis build`; like the
 frontend it never installs dependencies, so a fresh checkout first runs
 `npm ci --prefix runtime/cordis --ignore-scripts`. Otherwise it prints the
 blocked reason (`build_dependencies_missing`, `node_unsupported`, ...) and the
-exact fix while core startup continues. Runtime status (Settings → Cordis runtime host)
+exact fix while core startup continues. Runtime status (Settings → Model →
+Advanced and diagnostics → Cordis runtime host)
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
 and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
 `./manage.sh -e dev cordis build`, then restart. The backend container image
@@ -1718,7 +1739,7 @@ new platform-specific capture or execution readiness; each selected optional
 adapter/profile must report its actual proof and availability. Ordinary
 text, vision, and embedding inference is admitted through the governed
 OpenRouter profile. A missing key, empty upstream allow-list, missing cloud
-consent, absent budget, or unverified capability blocks the request and is
+consent, or unverified capability blocks the request and is
 reported as configuration-required or degraded. Local model servers and the
 VLM wrapper are retained only for historical diagnostics; they are not active
 runtime prerequisites.
@@ -1756,56 +1777,111 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
-### Shared inference lane (ADR-035)
+### Shared inference lane (ADR-035, ADR-037)
 
-The deployment spend ceiling and the shared lane bounds (max queued, one
-in-flight request, per-owner outstanding, retries) belong to a
-provider-neutral `inference_lane` object, edited in **Settings → Shared
-inference lane**. A deployment saved before this change reads the lane through
-a pure migration of the retained OpenRouter (or NEAR text) values and shows
-"migration pending" until an explicit save publishes it. That save uses the
-same witnessed revoke→accounting→activate publication and revision CAS as other
-provider settings, preserves the ledger, reservations and Unknown liabilities,
-and also publishes a route-scoped revoke of the stored OpenRouter routes
-(routes disabled, purpose consents and cloud acknowledgement withdrawn) without
-fencing NEAR. NEAR text mirrors the lane ceiling and never funds its own. An
-optional reserve review on the lane reviews an unreviewed overrun up to that
-amount, so a deployment with only retired OpenRouter routes can still publish
-the lane. Independently of any save, startup publishes the same route-scoped
+The shared lane bounds (max queued, one in-flight request, per-owner
+outstanding, retries) belong to a provider-neutral `inference_lane` object.
+They are queue and concurrency bounds, not cost limits, and have safe
+defaults: a settings file with no `inference_lane` section uses them. Since
+#1284 ([ADR-037](./decisions/037-no-local-cost-limits.md)) the lane has no
+spend ceiling and no reserve review, and there is no **Shared inference lane**
+panel. An older settings file that still carries
+`spend_ceiling_microusd` or `request_reserve_review_microusd` loads unchanged
+(its configuration digest and consent stay current); the fields are ignored and
+dropped on the next ordinary save. A `PUT /api/settings/model-fabric` that
+sends them, or any `request_cost_bound_microusd` or `max_cost_microusd`, is
+accepted and the fields are dropped; they are never echoed back. Spending
+limits are set in the NEAR account. Independently of any save, startup publishes the same route-scoped
 revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
 is shown as `route_revoke: degraded` under Settings and never stops startup.
+
+### The Model card (#1280)
+
+Settings opens on the **Model** tab (formerly "Models & OpenRouter"). Its first
+element is the Model card: one status line saying whether chat works, the model
+in plain words ("DeepSeek V4.1 Flash, hosted by NEAR"), and at most one button.
+Everything the tab showed before (Cordis runtime host, screenshot folder, model
+routes, the shared lane, the retired OpenRouter setup, NEAR text, the detailed
+NEAR TEE panel below, accounting, canaries and background inference) is in one
+closed **Advanced and diagnostics** fold under the card, unchanged.
+
+The card reads `GET /api/settings/model-fabric` and
+`/api/runtime/status.effective_runtime` and shows the first of ten states that
+applies: `loading`; `unreadable`, settings unreadable (**Open Diagnostics**,
+which opens the fold); `missing_key` (one key field, **Save key**);
+`not_set_up` (model picker and consent tick, **Turn on chat**); `needs_ok`
+(**Allow and turn on chat**); `near_down`, NEAR not answering (**Try again**);
+`needs_test`, one quick test left (**Run test**); `route_unknown`, route status
+unreadable (**Try again**); `ready`, chat on (**Change model**); or `blocked`
+for another reason (**Open Diagnostics**). First-time order is key, then model
+and OK, then test; there is no budget step. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) the card has no new-month,
+overrun, no-budget or budget-used state and asks for no dollar amount. "Chat is
+on" needs both `effective_runtime.inference_ready` and a ready text slot with no
+reason code, and reads "&lt;Model&gt;, hosted by NEAR. $3.20 used this month."
+(with "2 requests are not priced by NEAR yet (all months)." when some are
+unpriced, or "Nothing spent this month."). The unpriced count covers every
+month, not only this one. Spend history labels an unpriced request "answered,
+not priced yet" only when NEAR answered; a call that failed after contact reads
+"no answer, not priced", one whose outcome restart recovery lost (reason
+`provider_outcome_unknown`, also shown for such rows recovered before #1284)
+reads "outcome unknown, not priced", and one still running "in progress". "NEAR not answering" is only this session's last
+failed required check. The card adds no time logic of its own.
+
+**Allow and turn on chat** is enabled only after the operator ticks "I
+understand NEAR sees my messages as plain text: no end-to-end encryption, and
+Seraph does not verify NEAR's secure hardware." The tick is never pre-ticked and
+resets after every save. The click saves the stored text slot unchanged with the
+acknowledgement and no `api_key` (the stored key is kept), runs the free catalog
+check at the new revision, then runs only the missing chat checks (`health`,
+`latency_ms`, `text`, `streaming`, `tool_use`, then the optional
+`structured_output`, whose failure never blocks chat). The cost line ("It
+sends 6 tiny paid requests, about $0.02 in total." for example, computed from NEAR's listed
+price) is on screen before the click, and the card never runs more paid checks
+than it showed. Every step uses the existing endpoints; consent and check
+semantics are unchanged. Under the card's own closed **Details** are the slot
+limits, catalog receipt, check results, reason codes, the line "Spending limits
+are set in your NEAR account.", **Run structured output check** and a **Turn
+off chat** link. There is no "Per-request reserve" row.
+
+A blocked chat message is plain and provider-neutral ("Chat is paused until you
+give your OK. Nothing was sent.") and never names a cost reason: a chat turn is
+blocked only for no OK, revoked egress, no key, no model, a missing test or
+capability, a conversation too large for the model, unreadable configuration or
+NEAR not answering. The WebSocket error frame carries `code`,
+`recovery_action` and `settings_section: "model"`; the chat shows an **Open
+Settings** button that opens the Model tab with the card in view.
 
 ### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b/PR3c)
 
 Status: **Partial** until live operator use; nothing is enabled by default.
-In **Settings → NEAR TEE · text slot**:
+The Model card above covers the usual path. The detailed controls are in
+**Settings → Model → Advanced and diagnostics → NEAR TEE · text slot**:
 
-1. Publish the shared inference lane ceiling first; NEAR TEE never funds its
-   own budget.
-2. Enter the NEAR API key (write-only, stored as `vault:near_api_key`, separate
+1. Enter the NEAR API key (write-only, stored as `vault:near_api_key`, separate
    from the NEAR text key; only a fingerprint is shown), pick a text model from
    the allowlist (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
    `deepseek-ai/DeepSeek-V4.1-Flash-1017`, `Qwen/Qwen3.6-35B-A3B-FP8`), set
-   maximum input and output tokens, timeout, per-request reserve and catalog
+   maximum input and output tokens, timeout and catalog
    refresh hours (how often Seraph re-reads NEAR's public catalog in the
    background; not an expiry), tick the plaintext acknowledgement and save. Saving and
    refreshing never call NEAR.
-3. Press **Run catalog check**. It reads NEAR's catalog record for the model
+2. Press **Run catalog check**. It reads NEAR's catalog record for the model
    only (no inference) and passes only for `providerType=vllm`, attestation
-   supported, verifiable, ready, text in/out, enough context and a reserve that
-   covers maximum input and output at the catalog prices. When NEAR's record
+   supported, verifiable, ready, text in/out and enough context. The catalog
+   prices are recorded for display; no cost bound is checked (ADR-037). When NEAR's record
    omits `isReady` (as for `deepseek-ai/DeepSeek-V4.1-Flash-1017`), readiness
    is inferred from the vllm, attested and verifiable fields and the slot
    shows "Readiness inferred"; an explicit not-ready flag still fails. The
    receipt does not expire with time; any later settings save needs the check
    again, so re-run it after saving.
-4. Press **Run capability check**: three billed, mechanics-only requests
+3. Press **Run capability check**: three billed, mechanics-only requests
    (text, health, latency) through the shared lane, producing the proofs that
    dispatch requires. Streaming chat and agent tool turns need their own
    `streaming` and `tool_use` checks (the same endpoint); a tool check is
    refused with `near_tee_model_tools_unsupported` unless the catalog receipt
    lists `tools`.
-5. Press **Run structured output check** (one billed request) before JSON
+4. Press **Run structured output check** (one billed request) before JSON
    callers such as the task planner, strategist and session consolidation use
    the slot; without a current proof they are blocked before contact, whatever
    NEAR's catalog lists.
@@ -1827,9 +1903,8 @@ are not blocked; a request to a model that is really gone fails on its own
 Reasoning models (the receipt lists `reasoning`, e.g. DeepSeek V4.1 Flash,
 GLM 5.3 Flash, Qwen3.8) spend reasoning tokens inside the maximum output:
 set it to at least 4096 (Settings shows this hint below that), and at most
-8192 when the catalog lists no output limit, with a reserve that covers it
-(DeepSeek at $0.30/$1.20 per million: 8192 input + 4096 output needs about
-$0.0074). Capability checks for these models send up to 1024 output tokens.
+8192 when the catalog lists no output limit (DeepSeek at $0.30/$1.20 per
+million: 8192 input + 4096 output costs about $0.0074). Capability checks for these models send up to 1024 output tokens.
 An answer cut off by the output bound fails as `near_tee_output_truncated`
 after its cost settles; raise the maximum output and retry.
 
@@ -1839,10 +1914,10 @@ chat-agent tool turns and Cordis `inference.request`, behind the one serial
 broker with chat priority over background work. `/api/runtime/status`
 `effective_runtime` names `near_tee`, the model and the dated catalog label
 only while the slot is the active chat provider, and lists the `streaming` and
-`tool_use` check state. A streamed reply is cut off at least 16 seconds before
-its deadline so billing can be read back; text already shown stays shown, but
-a cut-off, echo-mismatched or malformed stream fails the turn after its cost
-settles. Closing the chat or a timed-out turn ends the stream but still reads
+`tool_use` check state. Billing is read back after a streamed reply, best
+effort within the time left before its deadline; text already shown stays
+shown, but a cut-off, echo-mismatched or malformed stream fails the turn after
+its cost is recorded. Closing the chat or a timed-out turn ends the stream but still reads
 billing back, so the lane is not left blocked. A lightweight chat turn's
 deadline sits 2 seconds inside its outer timeout (60 seconds or the configured
 chat timeout if lower), shown as `chat_turn_cap` in `/api/runtime/status`; keep
@@ -1852,9 +1927,9 @@ changes the slot's profile hash: re-run **Run catalog check** and each
 capability check before use. Report labels read "TEE-hosted per NEAR catalog as of
 &lt;time&gt;; NEAR gateway receives plaintext; attestation not verified by Seraph; no
 end-to-end encryption". Seraph does not verify attestation and there is no
-end-to-end encryption. A missing NEAR billing record becomes an Unknown
-liability that blocks the whole lane, chat included, until it is settled under
-**Inference accounting**; a model echo mismatch or empty answer is settled and
+end-to-end encryption. A missing NEAR billing record leaves the request "not
+priced yet" in **Spend history**; it blocks nothing and the answer is
+delivered. A model echo mismatch or empty answer has its cost recorded and is
 not adopted. Vision and embeddings are described below.
 
 ### Configure the NEAR TEE vision slot (ADR-035, #1147 PR4)
@@ -1865,7 +1940,7 @@ Status: **Partial** until live operator use; disabled by default. In
 1. Pick a vision model (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
    `Qwen/Qwen3-VL-30B-A3B-Instruct`, `deepseek-ai/DeepSeek-V4.1-Flash-1017`;
    DeepSeek's missing readiness flag is inferred from its attested record), set
-   limits and the per-request reserve, tick **both** the plaintext
+   limits, tick **both** the plaintext
    acknowledgement and the separate screenshot consent ("screenshots are sent
    to the NEAR gateway in plaintext"), and press **Save NEAR TEE vision slot**.
    Saving one slot keeps the others.
@@ -1880,8 +1955,8 @@ Status: **Partial** until live operator use; disabled by default. In
    established JSON schema requests"). If a later JSON-schema check fails,
    JSON schema requests stop and the slot is blocked until a prompt-JSON check
    passes: press **Run vision capability check** (it now runs prompt-JSON) or
-   **Run prompt-JSON check**. The reasoning hint shows the reserve a
-   4096-token maximum output needs at the receipt's catalog prices.
+   **Run prompt-JSON check**. The reasoning hint shows what a 4096-token
+   maximum output costs at the receipt's catalog prices.
 
 Then choose **NEAR TEE vision slot** as the screen-analysis provider (choosing
 "off" keeps background analysis off while the slot stays configured). The vision
@@ -1898,9 +1973,9 @@ conservatively against the input limit) below chat priority, and the validated
 analysis feeds the screenshot digest and the end-of-day report. Until it
 succeeds, a daemon upload's on-device text is the digest content. An invalid
 answer, echo mismatch or empty output is recorded as **failed** (cost
-settled); a missing consent, missing or rebound receipt, missing proof or
+recorded); a missing consent, missing or rebound receipt, missing proof or
 oversized input is **blocked** with its reason and makes no NEAR contact; a missing billing record
-is an Unknown liability that blocks the whole lane until settled. The daemon
+leaves the request "not priced yet" and blocks nothing. The daemon
 makes no cloud call; it reads `daemon_cloud_provider: null` from the screen
 settings and only uploads. Screenshots are plaintext to the NEAR gateway; the
 TEE label is NEAR's dated catalog claim, not Seraph-verified confidentiality.
@@ -1920,17 +1995,17 @@ that amendment must also decide how readiness is handled.
 Once the gate is cleared, the operator flow is:
 
 1. In **Settings → NEAR TEE → embedding slot**, pick `Qwen/Qwen3-Embedding-0.6B`,
-   set maximum input tokens per request, inputs per request (1–64), timeout,
-   per-request reserve and catalog refresh hours, acknowledge that memory text is
+   set maximum input tokens per request, inputs per request (1–64), timeout
+   and catalog refresh hours, acknowledge that memory text is
    sent to NEAR in plaintext and save (saving never calls NEAR).
 2. **Run catalog check** (shared with the text and vision slots), then **Run embedding
    capability check**: three billed mechanics requests that also measure the
    vector dimension.
-3. Enter a re-index budget and a maximum number of memories, acknowledge the
-   memory egress and press **Start re-index**. The run embeds canonical memory
-   in bounded batches at background priority below chat, shows progress
-   (indexed, already current, spent of budget), stops at the budget or on
-   **Cancel re-index** (a batch already sent finishes and is billed), and
+3. Enter a maximum number of memories, acknowledge the memory egress and press
+   **Start re-index** (there is no re-index budget since ADR-037). The run
+   embeds canonical memory in bounded batches at background priority below
+   chat, shows progress (indexed, already current, spent so far), stops at the
+   item count or on **Cancel re-index** (a batch already sent finishes and is billed), and
    **Resume re-index** continues from what is already indexed. Recall switches
    to **semantic** only after a run covers every active canonical memory.
 
@@ -1944,8 +2019,8 @@ slot's consent has lapsed; that slot just shows as blocked.
 Vectors are stored locally in a namespace for this provider, model and measured
 dimension; older OpenRouter vectors are never mixed in or queried. Changing the
 model or dimension needs a new re-index. A missing NEAR billing record during a
-run stops it as a cost liability and blocks the shared lane until settled under
-**Inference accounting**.
+run records that batch as "not priced yet" and the run continues; it no longer
+ends in `cost_liability` and the shared lane is not held (#1284, ADR-037).
 
 ### Configure the OpenRouter route (Epic #736/#775)
 
@@ -1953,9 +2028,12 @@ OpenRouter is retired (ADR-035): the settings panel shows "Retired (ADR-035) —
 no new requests; existing costs can still be settled", every control that could
 activate it is disabled, and the settings API refuses OpenRouter saves and
 capability checks with `openrouter_retired`. The text below records the
-historical setup contract for retained configuration.
+historical setup contract for retained configuration; its request-cost bound,
+deployment ceiling, reserve review and overrun latch no longer exist
+([ADR-037](./decisions/037-no-local-cost-limits.md)).
 
-Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
+Open **Settings → Model → Advanced and diagnostics** (formerly the Models &
+OpenRouter tab, before that Screenshot/VLM) and
 use its **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
 one qualified `provider/model` ID and explicit upstream allow-list for each
@@ -2019,26 +2097,11 @@ costs, and embedding usefulness remain externally unverified.
   next saved, which also requires proving the route again. The window is an
   operator assertion: it is not checked against the model's real context
   length, so a value above the model's limit fails at the provider instead.
-- **Dollar inputs.** The monthly ceiling and per-call request bound are entered
-  in dollars with a micro-USD preview; the request bound is prefilled at $0.50.
-- **Request bound and overrun latch.** The bound is a per-call reservation, not
-  a provider price cap (OpenRouter's `max_price` is a per-token price filter,
-  not a per-request limit, and is not sent; `max_tokens` already caps output at
-  the route's max output tokens). A settled charge above the bound is an
-  unreviewed overrun, and accounting then refuses every further OpenRouter
-  call with `provider_charge_exceeded_reservation` until the operator saves a
-  setup whose bound covers the charge (`request_reserve_review`). The panel
-  shows the worst case per call (declared window + output cap) in tokens, in
-  dollars when the operator enters preview-only $/M prices (otherwise at a
-  $3/$15 reference), and warns when the bound is below it. Chat and agent turns
-  report the latch with `recovery_action: review_cost_overrun` and the minimum
-  bound that reviews it (`minimum_request_bound_microusd`, the snapshot's
-  `overrun_max_cost_microusd`). **Inference accounting** lists up to 16
-  `unreviewed_overruns` (operation, job, runtime path, charge and held bound in
-  $ and µUSD) and the minimum bound. A save whose largest enabled bound is below
-  that minimum is refused before any policy, credential or accounting change
-  with HTTP 409 `request_bound_below_overrun`. A new bound changes the route
-  contract, so Prove route (billed canaries) must run again after the review.
+- **Dollar inputs (removed).** The historical setup took a monthly ceiling and a
+  per-call request bound, and a charge above the bound latched every further
+  call until reviewed. ADR-037 (#1284) removed the inputs, the latch and its
+  review; OpenRouter's `max_price` was never sent and `max_tokens` still caps
+  output at the route's max output tokens.
 - **Proof lifetime and Prove route.** The canary section offers a 1-, 8- or
   24-hour proof lifetime (the backend maximum, published as
   `canary_proof_ttl.max_seconds`). **Prove route** runs one canary per required
@@ -2288,6 +2351,7 @@ Useful probes:
 
 ```bash
 ./manage.sh -e dev local status
+./manage.sh -e dev local workspace-status
 curl -sS http://127.0.0.1:8004/health
 curl -sS http://127.0.0.1:8004/api/runtime/status
 curl -sS http://127.0.0.1:8004/api/settings/artifact-storage
@@ -2542,7 +2606,7 @@ summary cannot complete a card. Expired review cards require the named
 reviewer's renewal path; unknown external effects require reconciliation and
 are never replayed automatically. Manual Specify and Decompose requests are
 provider-governed proposals that remain staged until operator acceptance; a
-missing route, authority, or budget is visible as a blocked recovery state.
+missing route or authority is visible as a blocked recovery state.
 
 #### Typed general tasks (#997)
 
@@ -2555,9 +2619,12 @@ work in [#998](https://github.com/seraph-quest/seraph/issues/998) and
 
 The Work panel accepts ordinary intent, an owned Goal, requested output and
 explicit limits. The operator does not author tool-specific forms to request a
-task. Planning requires separate model-egress acknowledgment, a positive explicit
-cost ceiling and the existing current policy, consent, capability and inference
-admission checks. The canonical `general_task_planner` consumer uses the text
+task. Planning requires separate model-egress acknowledgment and the existing
+current policy, consent, capability and inference admission checks. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) there is no task or group
+dollar allowance: call counts, step limits, deadlines and wall time stay. A
+create request that still sends `max_cost_microusd` is accepted and the field
+is ignored; stored task envelopes keep their recorded values and still verify. The canonical `general_task_planner` consumer uses the text
 purpose, interactive workload and priority, `OPERATOR_INPUT` provenance, and
 `text` plus `structured_output` capabilities. It uses the existing durable
 inference accounting owner. Evidence content, credential references and tool
@@ -2570,7 +2637,7 @@ and input share an immutable private artifact. Repeating the same owner-scoped
 request returns the same card without contacting the planner again. A valid
 proposal remains in Triage for review. Invalid model output remains an editable
 Triage card with a visible proposal error and no task execution Root. Missing
-authority, route, consent or budget returns the current blocked reason rather
+authority, route or consent returns the current blocked reason rather
 than silently selecting a fallback.
 
 `GET /api/work-board/general-tasks/tools` reports descriptors, their digest and
@@ -2659,9 +2726,9 @@ only verified final assembly sends the card to Review. Artifacts remain private,
 and execution records `no_learning` without a canonical-memory write.
 
 Planning and any bounded continuation share the original accepted inference
-group, call/cost allowances and absolute deadline. Only acknowledged,
-budgeted planning can continue after a verified result; manual zero-cost plans
-do not contact a model. Private tool inputs and output bodies do not enter
+group, call allowance and absolute deadline (no dollar allowance since #1284).
+Only acknowledged planning can continue after a verified result; manual
+zero-call plans do not contact a model. Private tool inputs and output bodies do not enter
 continuation messages. A paused edit uses the existing full-Plan replacement
 contract through `/plan/revise`: only unadmitted rows are editable, while every
 admitted, started or completed row must remain unchanged. Editing stays paused
@@ -2737,8 +2804,9 @@ cannot authorize a narrowed plan.
 The original group permits at most two active and four retained specialist
 children and one specialist depth; a specialist cannot delegate recursively.
 Planning and execution share the original task's allowance of at most twelve
-inference calls, explicit cost ceiling and absolute deadline. No child obtains
-a new inference lane, approval, Root or budget from its lineage. Selected
+inference calls and absolute deadline; delegation sums steps and calls, not
+cost (no dollar allowance since #1284). No child obtains a new inference lane,
+approval, Root or call allowance from its lineage. Selected
 execution evidence is copied into a bounded private handoff under current
 producer, Goal and owner checks. The child consumes that sealed copy; it does
 not regain an arbitrary source path or inherit credentials. Changed source or
@@ -2766,30 +2834,57 @@ is ready. Other unexpected columns still fail closed.
 **Ledger verification (#1086).** Reserve, contact, settle and status reads no
 longer load or re-hash the deployment ledger. Each reservation stores a private
 derived `ledger_row_digest` of its financial content. The account record holds
-running totals (open bound by state, settled amount by period, per owner, the
-overrun set and rows per period), and the `v2:` account digest covers that
+running totals (open bound by state, settled amount by period, per owner and
+rows per period; totals schema version 2 dropped the former overrun set, #1284),
+and the `v2:` account digest covers that
 record plus the ordered root of every stored row digest. A hot writer checks the
 external witness, recomputes that root and the account digest, verifies every
 row it reads or changes against its digest before resealing it, and admits only
-against the sealed totals. Editing ledger history therefore cannot free capacity
-or clear the overrun latch. Deleted, inserted or re-sealed rows, totals edits,
-witness rollback and an older database are refused on the next operation.
-A content-only edit to a row no operation touches is found by full
+against the sealed totals. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) ledger continuity is
+display-only: deleted, inserted or re-sealed rows, totals edits and a witness
+rolled back behind the database are detected on the next operation, but do not
+block inference. The writer reseals from the rows present (row digests,
+totals and witness), appends a `history_gap` entry (reason and time) to the
+account's settings history and logs a warning; the request then proceeds. The
+reseal is sealed by that writer's single final persist, so the witness is
+written once per transaction and never ahead of a transaction that rolls back;
+a writer that refuses after resealing discards the reseal, and the next writer
+reseals again. At most 16 gap entries are kept (the first and the latest). The
+accounting snapshot reports `history_verified: false` with `history_gap_since`
+(the first gap), and **Spend history** shows "Spend history may be incomplete
+since &lt;date&gt;". It does not return to `true`. A database behind the witness
+(the witness names a newer revision or another deployment, for example an
+older database restored under a newer witness) is never resealed: its missing
+writes may record a started provider contact, so every writer refuses with
+`accounting_continuity_unavailable` until `accounting-reconcile` replays the
+retained checkpoint for one interrupted commit or the latest ledger is
+restored. A content-only edit to a row no operation touches is found by full
 verification. That re-validates every row's evidence, key, content digest and
 the totals, and runs on the first accounting writer of each process, on any
 writer once the last full pass is over 20 minutes old, on the rare writers
 (recovery, settings saves, denial quiescence, research funding/rebind/cancel,
 research readback), at startup recovery, every 10 minutes from the
-`inference_ledger_verification` scheduler job (a deferred read that latches
-accounting for the process after an in-lock re-check), and in every workspace
-CLI tool. The scoped reads cannot be emptied either: a general-task group read
+`inference_ledger_verification` scheduler job (a deferred read that, after an
+in-lock re-check, reseals and records a history gap instead of latching
+accounting), and in every workspace CLI tool. The scoped reads cannot be emptied either: a general-task group read
 must return exactly the sealed member count for that group, a discovery
 programme read the sealed count of discovery-service rows, and the near-text
-outstanding check reads a sealed per-owner count, so hiding a row by editing its
-lookup key, owner, job, state or runtime path is refused or still counted. Startup recovery
+outstanding check reads a sealed per-owner count of `reserved` and
+`contact_started` rows (an unpriced row no longer counts), so hiding a row by editing its
+lookup key, owner, job, state or runtime path is still counted or recorded as
+a history gap. Startup recovery
 migrates a v1 ledger forward after its full v1 check (checkpoint with no
 operations); v2 is forward-only, and an older build reports
-`accounting_continuity_unavailable` for a v2 ledger. Restored rows without a
+`accounting_continuity_unavailable` for a v2 ledger. Since #1284 startup
+recovery likewise verifies version-1 totals and reseals them as version 2; an
+older build refuses version-2 totals, so rolling the application back needs a
+database from before the upgrade. The deployment binding and the
+provider-policy record are still verified and still block
+(`accounting_deployment_binding_unavailable`,
+`provider_policy_continuity_unavailable`): they are a consent fence, not a cost
+limit. `accounting_continuity_busy` (two writers contending for the lock) stays
+a transient retry. Restored rows without a
 stored digest are fully verified and backfilled before they are trusted.
 
 Private handoff publication discovers at most twelve distinct specialist
@@ -2934,8 +3029,11 @@ alone does not make Mail or Calendar ready.
 
 In the private Mail review or Calendar event selection, explicitly add current
 sources to communication preparation. Choose the same current owned Goal,
-review the selected sources and finite cost limit, then prepare one bounded
-task. Each reschedule candidate requires its selected meeting source. Existing
+review the selected sources, then prepare one bounded task. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) there is no source or
+communication dollar allowance; a request that still sends
+`max_cost_microusd` is accepted and the field is ignored, and the call count
+and cutoff stay. Each reschedule candidate requires its selected meeting source. Existing
 source-specific model consent and grants must remain current. The accepted
 original task invokes the actual native Mail reply-draft and Calendar meeting-
 preparation owners sequentially under its original shared inference group,
@@ -3349,7 +3447,11 @@ validation.
 Bounded iterative repository work is **Partial** under
 [ADR-030](./decisions/030-bounded-iterative-repository-work.md). An accepted
 `repository_work` Task runs up to three manually approved patch iterations within
-its original limits. The plan can be literal or a reviewed planner proposal. Each
+its original limits: calls, iterations, the 900-second limit and the cutoff.
+Since #1284 ([ADR-037](./decisions/037-no-local-cost-limits.md)) there is no
+original-cost or iteration dollar limit and no `cost_exhausted` stop; the shared
+group limit keeps its call and time parts, and a stored `max_cost_usd` is
+ignored. The plan can be literal or a reviewed planner proposal. Each
 iteration returns a local patch and the actual pytest or npm output. A check that
 exits non-zero feeds the next iteration, and base drift or a dirty tree blocks
 execution. One original holds the workspace repository lane, and other repository
@@ -3652,7 +3754,7 @@ completed Board artifacts. Source acknowledgement is separate from the
 existing governed model-egress consent, capability proof and accounting gates.
 Each perspective has one synthesis contact; the parent makes no model call.
 The original parent deadline is at most 300 seconds, further narrowed by the
-Goal, and recovery cannot renew deadlines, attempts or cost allowances.
+Goal, and recovery cannot renew deadlines, attempts or call counts.
 
 Explicit recovery reserves a current phase on the same original Board attempt.
 It can continue the persisted source-ready, prompt-ready or funded queue, or
@@ -3665,7 +3767,7 @@ and unblock cannot create a replacement attempt for an admitted research task.
 Cancellation first fences the original operation. It closes only verified
 lease-free waits or actual owned workers whose awaited completion is recorded.
 An expired lease or an empty process registry does not prove quiescence.
-Completed child outputs and actual overrun charges remain visible. Uncertain
+Completed child outputs and actual charges remain visible. Uncertain
 source or provider work remains Unknown, and missing proof keeps cancellation
 pending. The inspector offers exact retained-request retry and explicit cost
 recovery guidance. Corrupt or unavailable owner/session-scoped session storage
@@ -4586,7 +4688,7 @@ preview with redacted fixtures, not in a live managed cockpit.
   Its popover lists the live link, chat model, tools and approvals, context
   signals, desktop presence, interruption budget and version. Each item names
   its source endpoint. Every state that is not ready says why and links to the
-  fix, usually a Settings section such as Models, Native, Policies or General.
+  fix, usually a Settings section such as Model, Native, Policies or General.
   Expected configuration is labelled **No action needed** and never raises the
   summary. One example is the desktop daemon turned off by `DAEMON_ENABLED=false`.
 - **Observer context.** `/api/observer/state` reports `data_quality_reason`
@@ -4920,59 +5022,93 @@ consent, cancellation, and uncertain remote outcomes remain operator-visible.
 On revisions containing the independently reviewed
 [#1031](https://github.com/seraph-quest/seraph/issues/1031) repair, async,
 synchronous and streaming execution retain that same serial lease after positive
-provider callback completion until charge or liability settlement and canonical
-readback finish. A queued sibling cannot contact while an overrun is still being
-committed. Failed settlement/readback retains the existing reconciliation hold;
-an elapsed deadline or returned coroutine does not release it. Known charges stay
-known when current authority later prevents result adoption. Positive
+provider callback completion until the charge is recorded and canonical
+readback finishes. Since #1284 a missing or high charge no longer holds the
+lease: it is released once the provider callback has finished, whatever the
+billing lookup returned. Known charges stay known when current authority later
+prevents result adoption. Positive
 never-contacted denial proof retains its existing quiescence journal. Isolated
 scripted-transport receipts establish these ownership mechanics, not provider
 availability or model quality.
-The canonical job repository owns deployment accounting reservations and their
-original UTC calendar month and settings revision. The deployment owner does
-not change with login, enrollment, or root identity. Actual OpenRouter account
+Since #1284 ([ADR-037](./decisions/037-no-local-cost-limits.md)) admission
+reads no dollar amount. A request to NEAR goes through these steps, in order:
+
+1. Local checks: configuration readable, egress not revoked, slot configured
+   and enabled, purpose consent current, key present, catalog receipt bound,
+   capability proofs present, request shape and size valid, at least one second
+   left before the deadline.
+2. Broker admission: queue bound, one in flight, per-owner outstanding count,
+   priority order.
+3. Request record: one ledger row with the consent digest, owner, job and UTC
+   month. Its bound and ceiling columns are written as `0` and its owner ceiling
+   as null.
+4. Contact: under the same writer lock the current policy digest is rechecked.
+   A changed or revoked policy produces the durable "never contacted" denial.
+5. Provider call.
+6. Billing lookup, best effort within the remaining deadline. A price sets the
+   row to `settled` with `actual_cost_microusd`; no price sets it to `unknown`
+   ("not priced yet").
+7. The lane is released when the provider callback has finished, whatever step
+   6 returned.
+8. The result is adopted if the policy digest and owner session are unchanged.
+   Cost plays no part.
+
+The canonical job repository owns these request records and their original UTC
+month, which only groups spend for display. The deployment owner does not
+change with login, enrollment, or root identity. Actual OpenRouter account
 `usage.cost` rounds upward to whole micro USD; upstream BYOK charges and credit
-purchase fees are outside this accounting scope. Missing cost remains held,
-including across restart and month rollover. Server-reviewed per-request
-reservations and a monthly admission ceiling bound local admission; they do not
-prove the provider cannot charge more. An over-bound charge is retained in full
-and blocks further admission until an authenticated settings request explicitly
-reviews an adequate request reserve. That review records the exact settled
-operation sequence and settlement revision. Cap edits, unrelated settings
-saves and month rollover cannot clear it, and the review cannot cover an
-unknown operation that settles later.
+purchase fees are outside this accounting scope. There is no spend ceiling,
+per-request reserve, monthly period review, clock-correction review or overrun
+latch: a new month, a charge of any size and an unpriced request all leave the
+next request admitted. Spending limits are set in the NEAR account. Older
+settings history entries for period reviews, reserve reviews and ceilings stay
+in the hashed account record unchanged and are ignored.
 
-Every observed UTC month change, including normal calendar rollover, blocks
-fresh admission until the operator acknowledges the exact server-observed
-month and accounting revision in Settings > Artifacts. This deliberate review
-prevents clock jumps from granting a fresh allowance. Correction preserves the
-trusted month high-water; future-attributed settled charges conservatively
-count against current capacity and original operation months remain unchanged.
-Settlement remains available while the period requires review. The review
-cannot grant provider access, resume a job, or adopt a result.
-
-Settings > Artifacts exposes committed, reserved, unknown, and remaining cost,
-and exact-operation reconciliation with operation/job identity, revision,
-evidence digest, and an idempotency key. Manual declared amounts remain
-externally unverified and cannot revive a grant, resume a job, or adopt output.
+`GET /api/settings/model-fabric` and `/api/settings/model-fabric/accounting`
+return `inference_accounting` with `status` (`ready`, or `unavailable` when the
+ledger is unreadable), `period_id` (the current UTC month), `spent_microusd`
+(settled charges of that month), `unpriced_requests`, `history_verified`,
+`operation_count`, `operations_truncated` and `operations`. The former
+`ceiling_microusd`, `remaining_microusd`, `reserved_microusd`,
+`unknown_microusd`, `committed_microusd`, `authorized_period`,
+`period_high_water`, `period_review`, `request_reserve_review`,
+`overrun_max_cost_microusd`, `unreviewed_overruns` and `settings_revision` keys
+are gone. `inference_lane` in the status keeps `max_queued`, `max_inflight`,
+`max_outstanding_per_owner` and `max_retries`. `/api/runtime/status` no longer
+reports `cost_ceiling_microusd`, and no readiness reason or chat error `code` is
+a cost code. `POST /api/settings/model-fabric/accounting/period` is removed
+(404; a stale tab is fixed by a refresh). `POST
+/api/settings/model-fabric/accounting/settle` stays and only records a charge
+for one request (operation/job identity, evidence digest and an idempotency
+key). A manually declared amount stays externally unverified and cannot revive
+a grant, resume a job, or adopt output; nothing waits on it. Settings shows
+this as **Spend history**: the month total, the request list with state
+`priced`, a not-priced label (answered, no answer, or outcome unknown), `in
+progress` or `not sent`, and the optional **Record the
+charge** control. Once a history gap is recorded (`history_verified` false; it
+does not return to true) it also says "Spend history may be incomplete since
+&lt;date&gt;", dated from `history_gap_since`; nothing is blocked.
 Deployment-wide egress revocation preserves credentials and cost history;
 re-grant requires an explicit current settings revision.
 
 The managed launcher retains one profile descriptor at
 `docker-data/<dev|prod>/workspace-lifecycle`, independent of the configured
 workspace path, outside the restorable root (Docker mounts it at
-`/app/workspace-lifecycle`). A different or empty root cannot initialize a new
-budget under an existing deployment descriptor. Legacy receipt
+`/app/workspace-lifecycle`). A different or empty root cannot initialize a
+second ledger account under an existing deployment descriptor. Legacy receipt
 migration runs under the existing maintenance fence. Restore and rollback must
 retain the latest ledger matching its external high-water witness before
-promotion. Missing mount proof, missing witness, or stale ledger visibly blocks
-billable egress. A crash between witness persistence and SQLite commit also
-blocks pending continuity reconciliation; a new budget cannot repair it. The
+promotion. Missing mount proof or a deployment-binding mismatch visibly blocks
+billable egress; that is a consent fence. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) a missing or rolled-back
+witness, a stale ledger, or a crash between witness persistence and SQLite
+commit no longer blocks inference: the ledger reseals from its current rows and
+records a history gap (see **Ledger verification** above). The
 trusted directory retains one bounded content-free transaction checkpoint.
 With the runtime stopped, `./manage.sh -e prod accounting-reconcile --confirm`
 repairs only the exact base revision and witnessed digest under the existing
-maintenance fence. It retains every unknown/contact liability and changes no
-job execution or grant authority. Arbitrarily older snapshots still require
+maintenance fence. It retains every request record and recorded charge and
+changes no job execution or grant authority. Arbitrarily older snapshots still require
 the latest retained ledger rather than this one-transaction delta. This
 does not claim tamper resistance against a host administrator replacing every
 trusted store.
@@ -4985,28 +5121,65 @@ the archived policy during this reconciliation, and staged bytes must match
 the trusted digest. Every other canonical file and policy field retains its
 archive hash check. `./manage.sh -e prod accounting-reconcile --policy --confirm`
 repairs the latest interrupted publication; a pending active publication
-becomes revoked and needs fresh current-revision settings review. Exact clock
-review is also available under stopped-runtime maintenance with
-`accounting-reconcile --period YYYY-MM --expected-revision N --confirm`, where
-the period must equal the current server-observed UTC month. Managed
+becomes revoked and needs fresh current-revision settings review. The former
+`accounting-reconcile --period` month review is removed with the period gate
+(#1284); `accounting-reconcile` and `accounting-rebind` stay. Managed
 `accounting-rebind --from-root /absolute/prior/root --confirm` fences both roots,
-retains the latest ledger and unresolved liabilities, revokes copied provider
-authority, then changes the descriptor binding. Every ledger-linked job must
+retains the latest ledger and its spend history, revokes copied provider
+authority, then changes the descriptor binding. Restore and rebind still
+refuse a target that would drop or roll back a request record, or that holds a
+foreign or newer ledger (the "liability regression" refusals): since #1284
+those records protect at-most-once execution, not money. Spend history is
+carried. Every ledger-linked job must
 match the source's immutable invocation and authority bindings. Existing and
 missing target rows receive source evidence in a blocked state with no lease
 and a revision/fence newer than both generations; conflicting or missing source
 jobs reject the transaction. Exact interrupted retry retains that fresh fence
 and preserves audit/FK rows. It grants no job execution.
 
+The managed local stack has the same commands under `local`
+([#1277](https://github.com/seraph-quest/seraph/issues/1277)). They resolve
+`LOCAL_WORKSPACE_DIR` and `docker-data/dev/workspace-lifecycle` through the
+same `manage.sh` resolution that `local up` uses and run the backend's own
+interpreter. When `LOCAL_WORKSPACE_DIR` moves (for example from
+`/tmp/seraph-dev-data` to `~/.seraph/dev-data`), the descriptor still names the
+prior root, so chat fails with `accounting_deployment_binding_unavailable` and
+`local up` prints the recovery command. The binding stays a block under ADR-037
+because it is a consent fence: it stops a restored, copied or moved workspace
+from switching a revoked egress consent back on. To recover:
+
+```bash
+./manage.sh -e dev local down
+./manage.sh -e dev local identity            # accounting_continuity_reason_code names the block
+./manage.sh -e dev local accounting-rebind --from-root /absolute/prior/root --confirm
+./manage.sh -e dev local up
+```
+
+Then re-consent to provider policy in Settings. The prior root must still
+exist. The rebind behaves as in production: it retains the ledger and its
+spend history, revokes provider policy and grants no job execution.
+The local backend does not hold the maintenance lease, so `local identity` and
+`local accounting-rebind` refuse while any part of the local backend is still
+up (PID or Seraph listener). `local workspace-status` prints the read-only
+lifecycle receipt at any time. `local status` still reports the stack. The
+production `identity`, `status` and `accounting-rebind` commands stay
+`-e prod` only.
+
 The typed durable job contract persists a monotonic row revision alongside its
 owner fencing token. Claim, heartbeat, expired-lease transfer, and terminal
 transitions are compare-and-swap writes against the expected state, revision,
 and fence. Lease-bound receipt and transition writes also check the expiry in
 the database update predicate. Startup recovery runs before scheduler
-registration and marks work with an unresolved effect or provider cost as
-`unknown_external_effect` or `cost_liability`; an operator must record a typed
-effect-specific destination readback or cost settlement before the job can be
-requeued. Failed jobs with an unresolved effect use the same exact-effect
+registration and marks work with an unresolved effect as
+`unknown_external_effect`; an operator must record a typed effect-specific
+destination readback before the job can be requeued. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) an unpriced provider charge
+no longer produces `cost_liability`. That status stays valid and readable for
+jobs already in it: their reconcile/settle control keeps working, and settling
+is optional (the operator can also retry or dismiss them). Approval resume no
+longer compares the job's declared `budget_digest`; the column is kept, new
+jobs write null, and an approval granted before the upgrade is not refused as
+stale. Failed jobs with an unresolved effect use the same exact-effect
 reconciliation path, while deadline-expired or attempt-exhausted retries are
 rejected. Corrupt or missing effect history on an effect-bound failure blocks
 retry. A concurrent duplicate admission returns the original durable row after

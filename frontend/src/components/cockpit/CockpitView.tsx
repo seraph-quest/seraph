@@ -101,6 +101,7 @@ import { CockpitMoreMenu, type CockpitMenuItem } from "./CockpitMoreMenu";
 import { CockpitConversationDock } from "./CockpitConversationDock";
 import { useGoalsInlineHost } from "../quest/QuestPanel";
 import { openSettingsSection } from "../../lib/settingsNavigation";
+import { CockpitPaneMessage } from "./CockpitPaneMessage";
 import {
   chatFabricRouteDegraded,
   deriveChatRuntimeIdentity,
@@ -149,7 +150,6 @@ interface RuntimeInferenceReadiness {
   active_only?: boolean;
   cloud_egress?: string;
   cloud_consent?: boolean;
-  cost_ceiling_microusd?: number | null;
   profile_id?: string | null;
 }
 
@@ -7759,11 +7759,6 @@ function normalizeRuntimeInferenceReadiness(value: unknown): RuntimeInferenceRea
     active_only: typeof record.active_only === "boolean" ? record.active_only : undefined,
     cloud_egress: typeof record.cloud_egress === "string" ? record.cloud_egress : undefined,
     cloud_consent: typeof record.cloud_consent === "boolean" ? record.cloud_consent : undefined,
-    cost_ceiling_microusd: typeof record.cost_ceiling_microusd === "number" && Number.isFinite(record.cost_ceiling_microusd)
-      ? record.cost_ceiling_microusd
-      : record.cost_ceiling_microusd === null
-        ? null
-        : undefined,
     profile_id: typeof record.profile_id === "string" ? record.profile_id : record.profile_id === null ? null : undefined,
   };
 }
@@ -10673,10 +10668,10 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ?? (chatRuntimeIdentity.lastReceipt ? `Last chat receipt: ${chatRuntimeIdentity.lastReceipt}.` : null),
       source: "/api/runtime/status · effective_runtime",
       action: chatRuntimeIdentity.tone === "ok"
-        ? { kind: "settings", label: "Open Settings → Models", section: "artifacts" }
+        ? { kind: "settings", label: "Open Settings → Model", section: "model" }
         : chatRuntimeIdentity.tone === "unknown"
           ? { kind: "refresh", label: "Check again" }
-          : { kind: "settings", label: "Open Settings → Models", section: "artifacts" },
+          : { kind: "settings", label: "Open Settings → Model", section: "model" },
     };
     return [
       deriveConnectionItem(connectionStatus),
@@ -11464,9 +11459,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         ? `${attemptedFabricRoute.profile_id} · ${attemptedFabricRoute.outcome}`
         : selectedFabricRoute?.profile_id ?? runtimeStatus?.effective_runtime?.active_profile ?? null,
     egress: routeReadiness?.cloud_egress ?? "unknown",
-    budget: typeof routeReadiness?.cost_ceiling_microusd === "number"
-      ? `${routeReadiness.cost_ceiling_microusd} µUSD ceiling`
-      : "cost ceiling unknown",
     queue: runtimeStatus?.effective_runtime?.queue_status_endpoint ? "status endpoint advertised" : "queue status unavailable",
     detail: runtimeBlocked
       ? [
@@ -18420,13 +18412,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
-                    <div key={message.id} className={`cockpit-message cockpit-message--${message.role}`}>
-                      <div className="cockpit-row-header">
-                        <span className="cockpit-role">{labelForRole(message)}</span>
-                        <span className="cockpit-row-age">{formatAge(message.timestamp)}</span>
-                      </div>
-                      <div className="cockpit-message-body">{message.content}</div>
-                    </div>
+                    <CockpitPaneMessage key={message.id} message={message} label={labelForRole(message)} age={formatAge(message.timestamp)} />
                   ))}
                   {isAgentBusy && (
                     <div className="cockpit-message cockpit-message--pending" aria-live="polite">

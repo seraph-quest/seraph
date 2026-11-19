@@ -1735,15 +1735,9 @@ async def _repository_original_accounting_rows(db, context, *, job_id):
         raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
     root_rows = list((await db.scalars(select(InferenceCostReservation).where(
         InferenceCostReservation.job_id == job_id).limit(13))).all())
-    from src.workflows.general_task_accounting import entry_for, reservation_liability
-    from src.workflows.inference_accounting import InferenceAccountingError
-    try:
-        group_cost = sum(reservation_liability(row) for row in rows)
-        root_cost = sum(reservation_liability(row) for row in root_rows)
-    except InferenceAccountingError as exc:
-        raise RepositorySourceRecoveryError("original_producer_accounting_changed") from exc
+    from src.workflows.general_task_accounting import entry_for
+    # ADR-037 (#1284): membership and call counts only; no dollar allowance.
     if (len(rows) > group.max_inference_calls or len(root_rows) > context["work"].limits.max_iterations
-            or group_cost > group.max_cost_microusd or root_cost > context["work"].limits.max_cost_microusd
             or any(row.operation_id not in {item.operation_id for item in rows} for row in root_rows)):
         raise RepositorySourceRecoveryError("original_producer_accounting_changed")
     expected_operations = {}
@@ -1777,7 +1771,7 @@ async def _repository_original_accounting_rows(db, context, *, job_id):
             raise RepositorySourceRecoveryError("original_producer_accounting_changed")
         _, _, response, accounting_record = expected
         if response is not None:
-            if (accounting_record is None or row.state != "settled" or row.contact_started_at is None
+            if (accounting_record is None or row.state not in source._FINISHED_REQUEST_STATES or row.contact_started_at is None
                     or source._source_digest(row.model_dump(mode="json")) != response["accounting_digest"]
                     or accounting_record["accounting_digest"] != response["accounting_digest"]
                     or accounting_record["operation_id"] != row.operation_id

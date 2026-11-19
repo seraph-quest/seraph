@@ -138,7 +138,6 @@ def _near_tee_vision_enabled() -> bool:
         policy.egress_class is EgressClass.CLOUD_ALLOWED_FULL
         and bool(policy.cloud_egress_acknowledged)
         and not policy.fallback_allowed
-        and policy.max_cost_microusd is not None
         and tuple(policy.allowed_provider_kinds) == (NEAR_TEE_SCREEN_ANALYSIS_PROVIDER,)
     )
 
@@ -169,12 +168,10 @@ def _openrouter_vision_enabled() -> bool:
         policy = effective_workload_policy("screenshot_image_analysis")
     except Exception:
         return False
-    now = time.time()
     if (
         policy.egress_class is not EgressClass.CLOUD_ALLOWED_FULL
         or not bool(policy.cloud_egress_acknowledged)
         or policy.fallback_allowed
-        or policy.max_cost_microusd is None
         or set(policy.allowed_provider_kinds) != {"openrouter"}
     ):
         return False
@@ -187,12 +184,6 @@ def _openrouter_vision_enabled() -> bool:
         or profile.context_window_tokens is None
         or profile.max_output_tokens is None
         or profile.max_latency_ms is None
-        or profile.cost_microusd is None
-        or not profile.cost_source
-        or profile.cost_source_updated_at is None
-        or profile.cost_source_updated_at < now - 2_592_000
-        or profile.cost_source_updated_at > now
-        or profile.cost_microusd > policy.max_cost_microusd
         or profile.max_output_tokens < 64
         or profile.max_latency_ms <= 0
     ):
@@ -681,13 +672,14 @@ _dispatch_image: ContextVar[dict[str, Any] | None] = ContextVar("near_tee_vision
 
 def near_tee_vision_max_timeout_seconds() -> float:
     """Largest vision slot timeout the background analysis job can carry:
-    job budget minus the NEAR billing window and a fixed margin."""
-    from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
+    job budget minus the time a request's deadline adds for the best-effort
+    billing lookup (sizing only, never a denial, #1284) and a fixed margin."""
+    from src.model_fabric.near_tee import NEAR_TEE_BILLING_LOOKUP_SECONDS
     try:
         job_budget = float(settings.screenshot_folder_analysis_job_timeout_seconds)
     except (TypeError, ValueError):
         job_budget = float(REMOTE_SCREENSHOT_TIMEOUT_SECONDS)
-    return job_budget - NEAR_TEE_BILLING_RESERVE_SECONDS - NEAR_TEE_VISION_JOB_MARGIN_SECONDS
+    return job_budget - NEAR_TEE_BILLING_LOOKUP_SECONDS - NEAR_TEE_VISION_JOB_MARGIN_SECONDS
 
 
 NEAR_TEE_VISION_MAX_DECODE_PIXELS = 40_000_000

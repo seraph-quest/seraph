@@ -8,6 +8,8 @@ title: "ADR-030: Bounded iterative repository work and original-producer recover
 iterative journey ships, and original-producer crash recovery stays Planned. The public
 Source recovery action is held fail-closed (HTTP 503) pending the tracked follow-up.
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Decision class:** Target architecture
 
 **Owning work:** [#1009](https://github.com/seraph-quest/seraph/issues/1009)
@@ -49,6 +51,10 @@ shared accounting group, fences and cutoff. Intersect the repository ceilings
 of three iterations and 900 seconds with original C1 calls/cost/cutoff and
 current canonical Goal limits. No new ledger, queue, lease or authority renewal
 is introduced. Contacted and Unknown liabilities remain held at their full bound.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the original-cost term from these ceilings and the
+holding of contacted or Unknown amounts. Calls, iterations, the 900-second
+limit and the cutoff stay. Delivered by the second #1284 pull request.
 
 Planning, continuations and repository inference share the original reservation
 writer and serial inference lane. Every model request requires fresh exact
@@ -242,6 +248,9 @@ cutoff/proposal/approval/accounting/reservation vector, then compare that full
 vector exactly against the actual IMMEDIATE-writer rows under the same fence.
 Original group/Root membership, reservation status/cost bounds and full held
 liability remain mandatory. No lease, budget, deadline or approval is renewed.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) cost bounds and held liability drop out of this vector;
+membership and reservation (request record) status stay.
 
 A DISTINCT hash-only verifier recognizes only the exact committed Unknown
 successor: current revision = CAS.post_revision = CAS.before_revision+1 =

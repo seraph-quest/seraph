@@ -241,11 +241,14 @@ async def read_near_billing(
 
     At most two attempts one second apart, within 15 seconds and the original
     deadline. Returns parser-created evidence or ``None`` (an Unknown cost);
-    it never estimates a price or replays inference.
+    it never estimates a price or replays inference. Best effort (#1284): with
+    no time left before the deadline the lookup is skipped.
     """
     from .near_text_billing import NearTextBillingError, parse_near_billing_evidence
 
     billing_deadline = min(deadline_at, time.time() + BILLING_WINDOW_SECONDS)
+    if billing_deadline - time.time() <= 0:
+        return None
     body = json.dumps({"requestIds": [identity.provider_request_id]}, separators=(",", ":")).encode()
     error_type = type(error("probe"))
     for index in range(BILLING_ATTEMPTS):

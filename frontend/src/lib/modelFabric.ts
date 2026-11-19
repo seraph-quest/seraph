@@ -84,7 +84,6 @@ export interface OpenRouterRouteValue {
   max_output_tokens: number;
   timeout_seconds: number;
   zero_data_retention: boolean;
-  request_cost_bound_microusd: number;
   /** Prompt window, independent of max_output_tokens; null uses the backend default. */
   context_window_tokens?: number | null;
 }
@@ -107,7 +106,6 @@ export interface OpenRouterSetupValue {
   cloud_egress_acknowledged: true;
   vision_egress_acknowledged?: true;
   embedding_egress_acknowledged?: true;
-  spend_ceiling_microusd: number;
   max_queued: number;
   max_inflight: 1;
   max_outstanding_per_owner: number;
@@ -131,7 +129,6 @@ export interface OpenRouterSetupStatus {
   data_retention_policy: string;
   egress_class: string;
   cloud_egress_acknowledged: boolean;
-  spend_ceiling_microusd: number | null;
   max_queued: number;
   max_inflight: number;
   max_outstanding_per_owner: number;
@@ -150,49 +147,27 @@ export interface OpenRouterSetupStatus {
 
 export const OPENROUTER_RETIRED_LABEL = "Retired (ADR-035) — no new requests; existing costs can still be settled";
 
-/** Provider-neutral shared-lane limits and deployment ceiling (ADR-035). */
-export interface InferenceLaneValue {
-  spend_ceiling_microusd: number;
+/** Provider-neutral shared-lane queue bounds (ADR-035). Spending limits live in the NEAR account (#1284). */
+export interface InferenceLaneStatus {
   max_queued: number;
   max_inflight: 1;
   max_outstanding_per_owner: number;
   max_retries: number;
-  /** Optional explicit reserve review that reviews an unreviewed overrun up to this bound. */
-  request_reserve_review_microusd?: number | null;
 }
 
-export interface InferenceLaneStatus extends InferenceLaneValue {
-  schema_version: "seraph.inference.lane.v1";
-  /** False until the migrated lane has been published by an explicit save. */
-  published: boolean;
-  status: string;
-}
-
+/** Reads the queue bounds only; any money field an older backend still sends is ignored. */
 export function normalizeInferenceLane(value: unknown): InferenceLaneStatus | null {
   const record = recordOf(value);
-  if (!record || record.schema_version !== "seraph.inference.lane.v1") return null;
+  if (!record) return null;
   const integer = (field: string, min: number, max: number) => {
     const item = record[field];
     return typeof item === "number" && Number.isSafeInteger(item) && item >= min && item <= max ? item : null;
   };
-  const ceiling = integer("spend_ceiling_microusd", 1, 1_000_000_000);
   const queued = integer("max_queued", 1, 64);
   const owner = integer("max_outstanding_per_owner", 1, 16);
   const retries = integer("max_retries", 0, 2);
-  if (ceiling === null || queued === null || owner === null || retries === null || record.max_inflight !== 1) return null;
-  const review = record.request_reserve_review_microusd;
-  if (review != null && !(typeof review === "number" && Number.isSafeInteger(review) && review >= 1 && review <= ceiling)) return null;
-  return {
-    schema_version: "seraph.inference.lane.v1",
-    spend_ceiling_microusd: ceiling,
-    max_queued: queued,
-    max_inflight: 1,
-    max_outstanding_per_owner: owner,
-    max_retries: retries,
-    request_reserve_review_microusd: typeof review === "number" ? review : null,
-    published: record.published === true,
-    status: typeof record.status === "string" ? record.status : "unknown",
-  };
+  if (queued === null || owner === null || retries === null || record.max_inflight !== 1) return null;
+  return { max_queued: queued, max_inflight: 1, max_outstanding_per_owner: owner, max_retries: retries };
 }
 
 export const NEAR_TEXT_PROFILE = "near.text";
@@ -208,8 +183,6 @@ export interface NearTextSetupInput {
   api_base: typeof NEAR_TEXT_API_BASE;
   max_output_tokens: number;
   timeout_seconds: number;
-  request_cost_bound_microusd: number;
-  spend_ceiling_microusd: number;
   plaintext_provider_egress_acknowledged: boolean;
   api_key?: string;
 }
@@ -255,7 +228,6 @@ export interface NearTeeSlotInput {
   max_output_tokens: number;
   timeout_seconds: number;
   temperature?: number | null;
-  request_cost_bound_microusd: number;
   /** Background catalog refresh cadence hint in hours (#1178); not an expiry. */
   catalog_ttl_hours: number;
   /** Embedding slot only: inputs per request (1-64). */
@@ -334,6 +306,8 @@ export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_pro
   structured_output_basis?: string | null;
   /** Text slot: "ready" or the reason response_format callers are blocked. */
   structured_output_capability?: string | null;
+  /** Text slot: streaming and tool_use check state, "ready" or a reason such as proof_missing:streaming. */
+  chat_capabilities?: Record<string, string>;
 }
 
 export interface NearTeeEmbeddingReindexJob {
@@ -347,7 +321,6 @@ export interface NearTeeEmbeddingReindexJob {
   oversize_items: number;
   batches: number;
   spent_microusd: number;
-  budget_microusd: number | null;
 }
 
 export interface NearTeeEmbeddingIndexStatus {
@@ -386,6 +359,8 @@ export interface ModelFabricSettingsStatus {
   schema_version: string;
   status: string;
   error_code: string | null;
+  /** Whether the stored configuration itself could be read ("ready"); absent on older payloads. */
+  configuration_status?: string | null;
   updated_at: string | null;
   profiles: ModelFabricProfileStatus[];
   excluded_profiles: ModelFabricProfileStatus[];
@@ -397,7 +372,6 @@ export interface ModelFabricSettingsStatus {
     allowed_profile_ids: string[];
     allowed_provider_kinds: string[];
     fallback_allowed: boolean;
-    max_cost_microusd: number | null;
   }>;
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
@@ -413,10 +387,8 @@ export interface ModelFabricSettingsStatus {
   inference_accounting?: InferenceAccountingStatus | null;
   egress_revision?: number;
   egress_revoked?: boolean;
-  /** Provider-neutral lane; null when no governed provider was ever configured. */
+  /** Provider-neutral lane queue bounds; null when no governed provider was ever configured. */
   inference_lane?: InferenceLaneStatus | null;
-  /** Reason the backend could not project a lane (e.g. inference_lane_unreadable). */
-  inference_lane_reason?: string | null;
   /** NEAR text readiness, independent of the blocked canonical routes. */
   near_text_ready?: boolean;
   /** ADR-035: true unless the backend reports OpenRouter as active. */
@@ -425,87 +397,72 @@ export interface ModelFabricSettingsStatus {
   inference_block_reason?: string | null;
 }
 
+/** One ledger row: what a request cost, or that NEAR has not priced it yet. */
+export interface InferenceAccountingOperation {
+  operation_id: string; job_id: string; owner_id: string; runtime_path: string;
+  /** reserved | contact_started | settled | unknown | released */
+  state: string; revision: number; period_id: string;
+  /** The charge NEAR reported; null until the row is priced. */
+  actual_cost_microusd: number | null;
+  recovery_reason?: string | null;
+  controls?: Array<{ action: string; endpoint: string; method: string; expected_revision: number; job_id: string; operation_id: string }>;
+}
+
+/**
+ * Spend history (#1284): display only. Seraph keeps no spending limit; NEAR's
+ * account does. "unavailable" means the ledger could not be read.
+ */
 export interface InferenceAccountingStatus {
   status: string;
-  reason_code?: string;
-  accounting_continuity_verified?: boolean;
-  authorized_period?: string;
-  period_high_water?: string;
-  revision?: number;
-  period_review?: { endpoint: string; method: string; period_id: string; expected_revision: number } | null;
   period_id?: string;
-  settings_revision?: number;
-  ceiling_microusd?: number;
-  committed_microusd?: number;
-  reserved_microusd?: number;
-  unknown_microusd?: number;
-  remaining_microusd?: number | null;
+  /** Settled charges in the current UTC month. */
+  spent_microusd?: number;
+  /** Requests NEAR has not priced yet (``unknown``), counted over all months. */
+  unpriced_requests?: number;
+  /** False once a ledger mismatch was resealed from current content; it does not return to true. */
+  history_verified?: boolean;
+  /** When the first resealed mismatch was recorded (ISO timestamp), or null. */
+  history_gap_since?: string | null;
+  revision?: number;
+  deployment_id?: string;
+  ledger_digest?: string;
   operations_truncated?: boolean;
   operation_count?: number;
-  /** Largest unreviewed settled charge; a saved request bound must cover it. */
-  overrun_max_cost_microusd?: number;
-  unreviewed_overruns?: Array<{
-    operation_id: string; job_id: string; runtime_path: string; period_id: string;
-    bound_microusd: number; actual_cost_microusd: number;
-  }>;
-  operations: Array<{
-    operation_id: string; job_id: string; owner_id: string; runtime_path: string;
-    state: string; revision: number; bound_microusd: number; period_id: string;
-    recovery_reason?: string | null;
-    controls?: Array<{ action: string; endpoint: string; method: string; expected_revision: number; job_id: string; operation_id: string }>;
-  }>;
+  operations: InferenceAccountingOperation[];
 }
 
 export function normalizeInferenceAccounting(value: unknown): InferenceAccountingStatus | null {
   const record = recordOf(value);
   if (!record || typeof record.status !== "string") return null;
   const operations = Array.isArray(record.operations) ? record.operations : [];
-  const periodReview = recordOf(record.period_review);
+  const count = (field: unknown) => (typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : undefined);
   return {
     status: record.status,
-    reason_code: typeof record.reason_code === "string" ? record.reason_code : undefined,
-    accounting_continuity_verified: record.accounting_continuity_verified === true,
-    authorized_period: typeof record.authorized_period === "string" ? record.authorized_period : undefined,
-    period_high_water: typeof record.period_high_water === "string" ? record.period_high_water : undefined,
-    revision: typeof record.revision === "number" ? record.revision : undefined,
-    period_review: periodReview && periodReview.endpoint === "/api/settings/model-fabric/accounting/period"
-      && periodReview.method === "POST" && periodReview.period_id === record.period_id
-      && periodReview.expected_revision === record.revision && typeof periodReview.period_id === "string"
-      && /^[0-9]{4}-(0[1-9]|1[0-2])$/.test(periodReview.period_id) && typeof periodReview.expected_revision === "number"
-      && Number.isSafeInteger(periodReview.expected_revision) && periodReview.expected_revision >= 1
-      ? { endpoint: periodReview.endpoint, method: "POST", period_id: periodReview.period_id, expected_revision: periodReview.expected_revision } : null,
     period_id: typeof record.period_id === "string" ? record.period_id : undefined,
-    settings_revision: typeof record.settings_revision === "number" ? record.settings_revision : undefined,
-    ceiling_microusd: typeof record.ceiling_microusd === "number" ? record.ceiling_microusd : undefined,
-    committed_microusd: typeof record.committed_microusd === "number" ? record.committed_microusd : undefined,
-    reserved_microusd: typeof record.reserved_microusd === "number" ? record.reserved_microusd : undefined,
-    unknown_microusd: typeof record.unknown_microusd === "number" ? record.unknown_microusd : undefined,
-    remaining_microusd: typeof record.remaining_microusd === "number" ? record.remaining_microusd : null,
+    spent_microusd: count(record.spent_microusd),
+    unpriced_requests: count(record.unpriced_requests),
+    history_verified: record.history_verified === true,
+    history_gap_since: typeof record.history_gap_since === "string" && record.history_gap_since.length <= 64
+      ? record.history_gap_since : null,
+    revision: typeof record.revision === "number" ? record.revision : undefined,
+    deployment_id: typeof record.deployment_id === "string" ? record.deployment_id : undefined,
+    ledger_digest: typeof record.ledger_digest === "string" ? record.ledger_digest : undefined,
     operations_truncated: record.operations_truncated === true,
-    operation_count: typeof record.operation_count === "number" ? record.operation_count : undefined,
-    overrun_max_cost_microusd: typeof record.overrun_max_cost_microusd === "number" && Number.isSafeInteger(record.overrun_max_cost_microusd)
-      && record.overrun_max_cost_microusd >= 0 ? record.overrun_max_cost_microusd : undefined,
-    unreviewed_overruns: Array.isArray(record.unreviewed_overruns) ? record.unreviewed_overruns.slice(0, 16).flatMap((item) => {
-      const row = recordOf(item);
-      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string"
-        || !Number.isSafeInteger(row.bound_microusd) || !Number.isSafeInteger(row.actual_cost_microusd)) return [];
-      return [{ operation_id: row.operation_id, job_id: row.job_id, runtime_path: String(row.runtime_path ?? ""),
-        period_id: String(row.period_id ?? ""), bound_microusd: row.bound_microusd as number,
-        actual_cost_microusd: row.actual_cost_microusd as number }];
-    }) : [],
+    operation_count: count(record.operation_count),
     operations: operations.flatMap((item) => {
       const row = recordOf(item);
-      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number" || typeof row.bound_microusd !== "number") return [];
+      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number") return [];
       const operationId = row.operation_id;
       const jobId = row.job_id;
       const revision = row.revision;
-      return [{ operation_id: row.operation_id, job_id: row.job_id, owner_id: String(row.owner_id ?? ""),
-        runtime_path: String(row.runtime_path ?? ""), state: String(row.state ?? "unknown"), revision: row.revision,
-        bound_microusd: row.bound_microusd, period_id: String(row.period_id ?? ""),
+      return [{ operation_id: operationId, job_id: jobId, owner_id: String(row.owner_id ?? ""),
+        runtime_path: String(row.runtime_path ?? ""), state: String(row.state ?? "unknown"), revision,
+        period_id: String(row.period_id ?? ""),
+        actual_cost_microusd: count(row.actual_cost_microusd) ?? null,
         recovery_reason: typeof row.recovery_reason === "string" ? row.recovery_reason : null,
         controls: Array.isArray(row.controls) ? row.controls.flatMap((entry) => {
           const control = recordOf(entry);
-          if (!control || control.action !== "settle" || control.endpoint !== "/api/settings/model-fabric/accounting/settle" || control.method !== "POST" || control.operation_id !== row.operation_id || control.job_id !== row.job_id || control.expected_revision !== row.revision) return [];
+          if (!control || control.action !== "settle" || control.endpoint !== "/api/settings/model-fabric/accounting/settle" || control.method !== "POST" || control.operation_id !== operationId || control.job_id !== jobId || control.expected_revision !== revision) return [];
           return [{ action: "settle", endpoint: control.endpoint, method: "POST", expected_revision: revision,
             job_id: jobId, operation_id: operationId }];
         }) : [],
@@ -569,9 +526,6 @@ export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | nu
     || typeof row.enabled !== "boolean" || !integer("max_output_tokens", 1, 1024)
     || typeof row.timeout_seconds !== "number" || !Number.isFinite(row.timeout_seconds)
     || row.timeout_seconds < 1 || row.timeout_seconds > 45
-    || !integer("request_cost_bound_microusd", 1, 1_000_000_000)
-    || !integer("spend_ceiling_microusd", 1, 1_000_000_000)
-    || (row.request_cost_bound_microusd as number) > (row.spend_ceiling_microusd as number)
     || row.credential_ref !== "vault:near_text_api_key" || typeof row.key_present !== "boolean"
     || typeof row.consent_current !== "boolean"
     || !["disabled", "configuration_required", "blocked", "configured"].includes(String(row.status))
@@ -586,8 +540,6 @@ export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | nu
     schema_version: "seraph.near.text.v1", enabled: row.enabled,
     profile_id: NEAR_TEXT_PROFILE, model_id: NEAR_TEXT_MODEL, api_base: NEAR_TEXT_API_BASE,
     max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
-    request_cost_bound_microusd: row.request_cost_bound_microusd as number,
-    spend_ceiling_microusd: row.spend_ceiling_microusd as number,
     credential_ref: "vault:near_text_api_key",
     credential_fingerprint: row.credential_fingerprint as string | null,
     plaintext_egress_consent_revision: row.plaintext_egress_consent_revision as number | null,
@@ -607,7 +559,7 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
     && Number.isSafeInteger(row[field]) && (row[field] as number) >= min && (row[field] as number) <= max;
   if (!row || typeof row.model_id !== "string" || typeof row.enabled !== "boolean"
     || !integer("max_input_tokens", 1, 1_048_576) || !integer("max_output_tokens", 1, 65_536)
-    || typeof row.timeout_seconds !== "number" || !integer("request_cost_bound_microusd", 1, 1_000_000_000)
+    || typeof row.timeout_seconds !== "number"
     || !integer("catalog_ttl_hours", 1, 24) || typeof row.consent_current !== "boolean"
     || !["disabled", "configuration_required", "blocked", "ready"].includes(String(row.status))) return null;
   const receipt = recordOf(row.catalog_receipt);
@@ -616,7 +568,6 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
     model_id: row.model_id, enabled: row.enabled, max_input_tokens: row.max_input_tokens as number,
     max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
     temperature: typeof row.temperature === "number" ? row.temperature : null,
-    request_cost_bound_microusd: row.request_cost_bound_microusd as number,
     catalog_ttl_hours: row.catalog_ttl_hours as number, profile_id: "near_tee." + slotName,
     consent_current: row.consent_current, status: row.status as NearTeeSlotStatus["status"],
     reason_code: text(row.reason_code),
@@ -657,6 +608,12 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
     structured_output_basis: row.structured_output_basis === "catalog" || row.structured_output_basis === "capability_proof"
       ? row.structured_output_basis : null,
     structured_output_capability: text(row.structured_output_capability),
+    chat_capabilities: (() => {
+      const raw = recordOf(row.chat_capabilities);
+      const out: Record<string, string> = {};
+      for (const name of ["streaming", "tool_use"]) if (typeof raw?.[name] === "string") out[name] = raw[name] as string;
+      return out;
+    })(),
   };
 }
 
@@ -678,7 +635,6 @@ function normalizeEmbeddingIndex(value: unknown): NearTeeEmbeddingIndexStatus | 
       live: job.live === true, planned_items: typeof job.planned_items === "number" ? job.planned_items : null,
       indexed_items: count(job.indexed_items), skipped_existing: count(job.skipped_existing),
       oversize_items: count(job.oversize_items), batches: count(job.batches), spent_microusd: count(job.spent_microusd),
-      budget_microusd: typeof job.budget_microusd === "number" ? job.budget_microusd : null,
     } : null,
   };
 }
@@ -727,7 +683,7 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
     if (rawRoutes[slot] != null && (!route || typeof route.model_id !== "string"
       || typeof route.enabled !== "boolean" || !Array.isArray(route.capabilities)
       || !Array.isArray(route.allowed_upstreams)
-      || !["temperature", "max_output_tokens", "timeout_seconds", "request_cost_bound_microusd"].every(
+      || !["temperature", "max_output_tokens", "timeout_seconds"].every(
         (field) => typeof route[field] === "number" && Number.isFinite(route[field]),
       ) || typeof route.zero_data_retention !== "boolean")) return null;
     const rawState = recordOf(rawStatuses?.[slot]) ?? route;
@@ -747,7 +703,6 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
       max_output_tokens: route.max_output_tokens as number,
       timeout_seconds: route.timeout_seconds as number,
       zero_data_retention: route.zero_data_retention as boolean,
-      request_cost_bound_microusd: route.request_cost_bound_microusd as number,
       context_window_tokens: typeof route.context_window_tokens === "number" && Number.isSafeInteger(route.context_window_tokens)
         ? route.context_window_tokens
         : null,
@@ -767,9 +722,6 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
     data_retention_policy: typeof record.data_retention_policy === "string" ? record.data_retention_policy : "unknown",
     egress_class: typeof record.egress_class === "string" ? record.egress_class : "unknown",
     cloud_egress_acknowledged: record.cloud_egress_acknowledged === true,
-    spend_ceiling_microusd: typeof record.spend_ceiling_microusd === "number"
-      ? record.spend_ceiling_microusd
-      : null,
     max_queued: typeof record.max_queued === "number" ? record.max_queued : 64,
     max_inflight: typeof record.max_inflight === "number" ? record.max_inflight : 1,
     max_outstanding_per_owner: typeof record.max_outstanding_per_owner === "number"
@@ -922,6 +874,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     schema_version: record.schema_version,
     status: record.status,
     error_code: typeof record.error_code === "string" ? record.error_code : null,
+    configuration_status: typeof record.configuration_status === "string" ? record.configuration_status : null,
     updated_at: typeof record.updated_at === "string" ? record.updated_at : null,
     profiles: Array.isArray(record.profiles)
       ? record.profiles.flatMap((item) => normalizeProfile(item) ?? [])
@@ -940,7 +893,6 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
         allowed_profile_ids: stringArray(policy.allowed_profile_ids),
         allowed_provider_kinds: stringArray(policy.allowed_provider_kinds),
         fallback_allowed: policy.fallback_allowed === true,
-        max_cost_microusd: typeof policy.max_cost_microusd === "number" ? policy.max_cost_microusd : null,
       }];
     }),
     defaults: {
@@ -961,12 +913,6 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,
     inference_lane: normalizeInferenceLane(record.inference_lane),
-    inference_lane_reason: (() => {
-      const raw = recordOf(record.inference_lane);
-      if (!raw) return null;
-      if (typeof raw.reason_code === "string") return raw.reason_code;
-      return normalizeInferenceLane(raw) ? null : "inference_lane_unreadable";
-    })(),
     near_text_ready: record.near_text_ready === true,
     // Fail closed: only an explicit "active" report un-retires the UI.
     openrouter_retired: recordOf(recordOf(record.provider_retirement)?.openrouter)?.state !== "active",

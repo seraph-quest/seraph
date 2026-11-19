@@ -1,14 +1,14 @@
-"""Operator-started, budgeted re-index of canonical memory into the NEAR TEE
+"""Operator-started, item-bounded re-index of canonical memory into the NEAR TEE
 embedding namespace (ADR-035, PR3d).
 
 Never automatic. An authenticated settings action starts one finite run with
-an explicit memory-egress consent and a spend cap. The run is one durable job
+an explicit memory-egress consent and an item bound (no spend cap, #1284). The run is one durable job
 in the existing workflow job ledger (admit -> queue -> claim -> per-batch
-checkpoint/heartbeat -> succeeded / blocked / cost_liability / cancelled);
+checkpoint/heartbeat -> succeeded / blocked / unknown_external_effect / cancelled);
 every batch is an ordinary ``memory_embedding`` request through the shared
 broker at that route's background priority (below chat), with its own
-reservation and NEAR billing readback inside the lease. There is no new
-scheduler lane, queue, budget or ledger.
+request record and best-effort NEAR billing readback inside the lease. There
+is no new scheduler lane, queue or ledger.
 
 Resumable and idempotent: the target namespace table itself is the
 checkpoint. A later run skips canonical memories already present with the
@@ -53,14 +53,15 @@ STATE_FILE = "near-tee-embedding-index.json"
 LEXICAL_NOTICE = ("Semantic recall is unavailable: memory recall uses lexical search until the NEAR "
     "embedding re-index completes.")
 # Reasons that mean contact happened without an authoritative cost.
-UNKNOWN_REASONS = frozenset({"near_tee_cost_liability", "remote_inference_uncertain"})
+UNKNOWN_REASONS = frozenset({"remote_inference_uncertain"})
 _TERMINAL = {"succeeded", "blocked", "cancelled", "failed", "cost_liability", "degraded", "unknown_external_effect"}
 
 
 class ReindexStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     expected_policy_revision: int = Field(ge=1)
-    budget_microusd: int = Field(ge=1, le=1_000_000_000)
+    # Accepted from an older client and ignored (ADR-037, #1284).
+    budget_microusd: int | None = Field(default=None, ge=0, le=1_000_000_000)
     max_items: int = Field(ge=1, le=MAX_REINDEX_ITEMS)
     memory_egress_acknowledged: bool = False
     request_uuid: str = Field(min_length=36, max_length=36)
@@ -442,7 +443,6 @@ def _job_projection(job: dict[str, Any] | None) -> dict[str, Any] | None:
         "planned_items": progress.get("planned_items"), "indexed_items": progress.get("indexed_items", 0),
         "skipped_existing": progress.get("skipped_existing", 0), "oversize_items": progress.get("oversize_items", 0),
         "batches": progress.get("batches", 0), "spent_microusd": progress.get("spent_microusd", 0),
-        "budget_microusd": (job.get("declared_authority") or {}).get("budget_microusd"),
         "namespace": progress.get("namespace"), "updated_at": job.get("updated_at")}
 
 
@@ -517,10 +517,6 @@ async def start_reindex(principal, request: ReindexStartRequest) -> dict[str, An
         raise ReindexRefused(409, block)
     if metadata is None:
         raise ReindexRefused(409, "near_tee_embedding_dimension_unmeasured")
-    if request.budget_microusd < slot.request_cost_bound_microusd:
-        raise ReindexRefused(422, "near_tee_reindex_budget_below_request_reserve")
-    if configured.inference_lane is None or request.budget_microusd > configured.inference_lane.spend_ceiling_microusd:
-        raise ReindexRefused(422, "near_tee_reindex_budget_exceeds_lane_ceiling")
     if any(runner.task is not None and not runner.task.done() for runner in _runners.values()):
         raise ReindexRefused(409, "near_tee_reindex_already_running")
     await _retire_interrupted(read_index_state().get("last_job_id"))
@@ -529,20 +525,19 @@ async def start_reindex(principal, request: ReindexStartRequest) -> dict[str, An
     job_id = "near-reindex:" + hashlib.sha256(f"{owner}:{request.request_uuid}".encode()).hexdigest()[:40]
     plan = {"namespace": metadata.namespace, "model": metadata.model, "dimension": metadata.dimension,
         "profile_hash": profile.contract_hash, "policy_revision": configured.egress_revision,
-        "budget_microusd": request.budget_microusd, "max_items": request.max_items,
+        "max_items": request.max_items,
         "max_batch_size": slot.max_batch_size, "max_input_tokens": slot.max_input_tokens}
     authority = {"principal": owner, "session_id": principal.session_id, "owner_kind": "user",
         "operator_session_id": principal.session_id, "capability_id": CAPABILITY_ID,
         "permissions": ["canonical_memory_read", "near_tee_embedding_egress", "derived_vector_write"],
-        "memory_egress_acknowledged": True, "budget_microusd": request.budget_microusd,
-        "limits": {"max_items": request.max_items, "max_batch_size": slot.max_batch_size,
-            "request_cost_bound_microusd": slot.request_cost_bound_microusd}}
+        "memory_egress_acknowledged": True,
+        "limits": {"max_items": request.max_items, "max_batch_size": slot.max_batch_size}}
     job = await durable_job_repository.admit_job(DurableJobSpec(
         identity=DurableJobIdentity(job_id, "user", owner, JOB_KIND, CAPABILITY_ID, "near-embedding-reindex",
             request.request_uuid),
         inputs=plan, session_id=principal.session_id, operator_session_id=principal.session_id,
         priority=20, declared_authority=authority, max_attempts=1, max_outstanding_jobs=1,
-        budget_microusd=request.budget_microusd,
+        budget_microusd=0,
         run_fingerprint=hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()))
     if (job.get("receipt") or {}).get("status") == "deduped":
         return await reindex_status()
@@ -581,13 +576,6 @@ async def wait_for_reindex(job_id: str) -> None:
 
 
 # ── Runner ──────────────────────────────────────────────────────────────
-
-
-async def _unknown_embedding_operations() -> set[str]:
-    from src.workflows.job_runtime import durable_job_repository
-    snapshot = await durable_job_repository.inference_accounting_snapshot()
-    return {str(row.get("operation_id")) for row in snapshot.get("operations", [])
-        if row.get("runtime_path") == "memory_embedding" and row.get("state") == "unknown"}
 
 
 async def _finish(job_id, owner, fence, status, *, reason=None, summary, result):
@@ -632,34 +620,24 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         progress["planned_items"] = len(planned)
         from src.model_fabric.near_tee_embeddings import estimate_input_tokens
         progress["oversize_items"] = sum(1 for item in planned if estimate_input_tokens([item[1]]) > plan["max_input_tokens"])
-        bound = plan["budget_microusd"]
         for batch in _batches(planned, max_batch=plan["max_batch_size"], max_tokens=plan["max_input_tokens"]):
             if runner.cancel.is_set():
                 await _finish(job_id, owner, fence, "cancelled", reason="operator_cancelled",
                     summary="Re-index cancelled by the operator", result={**result, **progress})
-                return
-            from src.model_fabric.configuration import near_tee_slot, read_model_fabric_configuration
-            slot = near_tee_slot(read_model_fabric_configuration(), "embedding")
-            reserve = slot.request_cost_bound_microusd if slot is not None else bound + 1
-            if progress["spent_microusd"] + reserve > bound:
-                await _finish(job_id, owner, fence, "blocked", reason="near_tee_reindex_budget_exhausted",
-                    summary="Budget reached; start another run to resume", result={**result, **progress})
                 return
             # Keep the lease live before each (possibly long) broker call and
             # yield so queued chat is admitted first by the broker.
             await durable_job_repository.heartbeat_job(job_id, owner=owner, fencing_token=fence,
                 lease_seconds=LEASE_SECONDS)
             await asyncio.sleep(0)
-            unknown_before = await _unknown_embedding_operations()
             try:
                 vectors, cost, used = await asyncio.to_thread(embed_batch_near_tee, [item[1] for item in batch],
                     principal=principal)
             except EmbeddingError as exc:
                 progress["spent_microusd"] += int(getattr(exc, "cost_microusd", None) or 0)
-                # The accounting ledger, not the error text, decides: a new
-                # Unknown memory_embedding operation is a cost liability.
-                new_unknown = (await _unknown_embedding_operations()) - unknown_before
-                status = "cost_liability" if new_unknown or exc.reason_code in UNKNOWN_REASONS else "blocked"
+                # An uncertain call outcome is never replayed; a request NEAR
+                # has not priced yet is not a liability (#1284).
+                status = "unknown_external_effect" if exc.reason_code in UNKNOWN_REASONS else "blocked"
                 await _finish(job_id, owner, fence, status, reason=exc.reason_code,
                     summary="Re-index stopped: " + exc.reason_code, result={**result, **progress})
                 return

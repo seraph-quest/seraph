@@ -7,6 +7,8 @@ title: "ADR-035: NEAR TEE-hosted inference only"
 
 **Status:** Accepted under [#1148](https://github.com/seraph-quest/seraph/issues/1148), effective on the independently reviewed merge to `develop`; runtime capability **Planned** (implemented by [#1147](https://github.com/seraph-quest/seraph/issues/1147) slices PR3a–PR4). [Development Status](../STATUS.md) owns the effective route until those slices ship. No provider probe, catalog read or inference is authorized by this decision; the 2026-11-14 amendment (#1178) adds only the background, keyless, informational read of NEAR's public catalog record for enabled slots.
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Decision class:** Superseding provider target. Supersedes [ADR-006](./006-openrouter-only-inference-phase.md)'s provider choice and [ADR-024](./024-purpose-specific-openrouter-routes.md)'s OpenRouter route slots for new inference; absorbs [ADR-025](./025-near-https-text-inference.md); amends [ADR-008](./008-portable-core-and-consented-context.md), [ADR-026](./026-all-plugin-cordis-architecture.md) and [ADR-033](./033-governed-optional-audio-route.md). ADR-001's inference-only boundary, ADR-006's accounting continuity (#909), ADR-024's slot, publication, proof-key and namespace mechanics, and ADR-026's composition remain in force except where named below.
 
 ## Context
@@ -79,6 +81,12 @@ priority (chat before background), original deadlines, cancellation,
 idempotency, reservations and the existing ledger. No fallback between slots,
 models or providers, and no new lane, queue, budget, ledger or Cordis package.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the slot's request cost bound. A stored bound is read past
+and never compared. It is carried across saves while the slot's model is
+unchanged, because it is part of the profile contract the slot's proofs and
+consent are bound to, and is dropped when another model is chosen. The ledger
+keeps one request record per call, with no reserved amount.
+
 ### Request contract and trust disclosure
 
 - Send the stored canonical model id with header `x-no-aliasing: true`; a request
@@ -121,6 +129,10 @@ never refreshes the catalog. The receipt is part of the slot's one-time setup
 gate, not a capability proof, and does not expire by age (amendment
 2026-11-14, #1178, below; it replaced an operator-set 1–24 h TTL). Tests
 intercept this transport.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) the cost condition is no longer part of a pass
+(`near_tee_catalog_cost_bound_too_small` is not produced). The receipt still
+records the catalog prices and the most a check request can cost, for display.
 
 **Amendment 2026-11-14 ([#1167](https://github.com/seraph-quest/seraph/issues/1167), operator direction).**
 NEAR's record for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (read 2026-11-14)
@@ -243,6 +255,10 @@ iterative source callback (`repo_repair_source`) and the single-shot
   Goal cost limits must allow that much per repair iteration. This affects
   availability only, not the gates above.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) the slot bound, lane ceiling and Task and Goal cost limits no
+longer exist (the last delivered by the second #1284 pull request); the
+per-request cost above is spend history only.
+
 ### Capability proofs kept
 
 The existing manual capability proof endpoint (`POST /api/settings/model-fabric/canary`,
@@ -286,6 +302,16 @@ already-settled row, today bound to `near_text_native`, and is generalized to
 NEAR TEE runtime paths for that recovery role only. Non-streaming routes follow
 their existing adoption rule; near_text keeps ADR-025's withhold-on-Unknown rule.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the reserve, Unknown liability and held-lease clauses
+of this section. No amount is reserved. Billing readback is best effort inside
+whatever deadline remains, and a request is denied only when less than one
+second remains for the request itself. A missing charge records the request as
+"not priced yet"; the lease is released when the provider callback has
+finished, and the answer is adopted on the policy and owner checks alone. One
+unpriced NEAR request blocks nothing. Settlement only records a charge.
+near_text's withhold-on-Unknown rule and its `cost_liability` status ended with
+the second #1284 pull request.
+
 ### Lane configuration
 
 Lane limits (max in-flight 1, queue and owner bounds, reserve review) and the
@@ -293,6 +319,11 @@ shared spend ceiling move to a provider-neutral `inference_lane` object outside
 `openrouter_setup`. They bind the same deployment ledger and witness; moving them
 is one explicit witnessed save that preserves revision, ledger and liabilities.
 NEAR text and NEAR TEE mirror the lane ceiling, never fund their own.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the shared spend ceiling and reserve review from
+`inference_lane`. It keeps `max_queued`, `max_inflight` (1),
+`max_outstanding_per_owner` and `max_retries`; a missing section means those
+defaults. Nothing is mirrored.
 
 ### Credential and consent
 
@@ -335,6 +366,8 @@ Old OpenRouter vectors are never mixed or queried with a NEAR model. Re-indexing
 is an operator-started job with a finite item count and spend bound, background
 priority on the shared broker, checkpointed, cancellable and resumable, never
 automatic. Until it completes, recall degrades to clearly labeled lexical search.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) re-indexing has no spend bound; `max_items` is its finite bound and progress reports the amount spent. A `budget_microusd` sent by an old client is ignored.
 
 ### Screenshots and the daemon
 
@@ -386,7 +419,8 @@ tests: a failed or rebound catalog receipt blocks the slot (age does not,
 missing `x-no-aliasing`; non-allowlisted model; zero OpenRouter contact on all
 routes; daemon makes no cloud call; global revoke blocks NEAR; missing billing
 becomes Unknown and keeps the lease blocked until fenced settlement, with the
-blocked state visible; billing readback stays within the original lease and
+blocked state visible (superseded by [ADR-037](./037-no-local-cost-limits.md): a missing charge is recorded and the
+lease is released); billing readback stays within the original lease and
 deadline; input over `max_input_tokens` is rejected before contact; serial bound 1 with
 chat priority; reasoning content never reaches answer text. A keyless managed
 run shows NEAR disabled. Live NEAR use comes only after merge with explicit
@@ -402,7 +436,9 @@ Settings warning and fails at request time (echo or HTTP error) rather than
 being blocked in advance. Model choice narrows to the allowlist; since the 2026-11-14 amendment DeepSeek
 passes the catalog check with inferred readiness, and its structured output
 rests on capability proofs, not catalog metadata. One Unknown NEAR cost blocks all inference,
-chat included, until the operator settles it. Semantic recall is lexical until re-indexing.
+chat included, until the operator settles it. **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Superseded by [ADR-037](./037-no-local-cost-limits.md): an
+unpriced NEAR request blocks nothing and spending limits live in the NEAR
+account. Semantic recall is lexical until re-indexing.
 Voice input is retired (#1179). OpenRouter code remains until its liabilities clear.
 STATUS and the Current App Guide change only as slices merge.
 

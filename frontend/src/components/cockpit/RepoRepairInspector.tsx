@@ -492,7 +492,8 @@ function validateRepositoryStatus(value: unknown, jobId: string): RepositorySour
         || !isSha256Digest(stop.limit_evidence_digest) || evidence.cause !== stop.reason || !timestamps(evidence.original_deadline_at)
         || (evidence.goal_cutoff_at !== null && !timestamps(evidence.goal_cutoff_at))
         || ["original_server_bound_microusd", "root_liability_microusd", "group_liability_microusd", "group_calls", "original_root_max_cost_microusd", "original_group_max_cost_microusd", "original_group_max_calls"].some((key) => !isSafeNonNegativeInteger(evidence[key], Number.MAX_SAFE_INTEGER))
-        || Number(evidence.original_server_bound_microusd) === 0 || Number(evidence.original_group_max_calls) > 12
+        // The recorded server bound is 0 on jobs created since ADR-037 (#1284).
+        || Number(evidence.original_group_max_calls) > 12
         || (stop.reason === "goal_limit_exhausted" && (evidence.goal_cutoff_at === null || Date.parse(String(evidence.goal_cutoff_at)) !== Date.parse(String(evidence.original_deadline_at))))) return reject();
     } else if (evidence !== null || stop.limit_evidence_digest !== null) return reject();
   }
@@ -1322,8 +1323,8 @@ export function RepoRepairInspector({
         <div>Stop reason: {current.repository_stop.reason}</div>
         <div role="status">{current.repository_stop.pending ? `Original reservation remains held. ${physicalCleanupStatus}` : "Original repository stop recorded."}</div>
         {current.repository_stop.limit_evidence && <div>
-          <div>Recorded Root cost: {current.repository_stop.limit_evidence.root_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_root_max_cost_microusd} microusd</div>
-          <div>Recorded group cost: {current.repository_stop.limit_evidence.group_liability_microusd} microusd · original limit {current.repository_stop.limit_evidence.original_group_max_cost_microusd} microusd</div>
+          <div>Recorded Root spend: {current.repository_stop.limit_evidence.root_liability_microusd} microusd</div>
+          <div>Recorded group spend: {current.repository_stop.limit_evidence.group_liability_microusd} microusd</div>
           <div>Recorded group calls: {current.repository_stop.limit_evidence.group_calls} · original limit {current.repository_stop.limit_evidence.original_group_max_calls}</div>
           <div>Original cutoff: {current.repository_stop.limit_evidence.original_deadline_at}</div>
           {current.repository_stop.limit_evidence.goal_cutoff_at && <div>Original Goal cutoff: {current.repository_stop.limit_evidence.goal_cutoff_at}</div>}

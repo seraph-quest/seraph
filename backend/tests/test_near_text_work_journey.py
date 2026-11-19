@@ -66,6 +66,8 @@ async def create_actual_near_task(client,factory,*,question='Private bounded fix
     assert created.json()['task']['requires_review'] is True
     return created.json()['task']['task_id'],owner
 
+ADOPTED={'settled','missing_cost','owner_limit','short_goal'}
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('scenario',['settled','missing_cost','cancel_before_adoption','revoke_before_adoption','goal_expired_before_adoption','input_digest_tamper','authority_digest_tamper','fingerprint_tamper','deadline_tamper','owner_limit','short_goal'])
 async def test_actual_native_https_answer_and_unknown_no_release(accounting_db,real_auth,monkeypatch,scenario,caplog):
@@ -165,20 +167,24 @@ async def test_actual_native_https_answer_and_unknown_no_release(accounting_db,r
                 assert not any('NameError' in record.getMessage() or 'AttributeError' in record.getMessage() for record in caplog.records)
             public=json.dumps([r.model_dump(mode='json') for r in runs])
             assert 'Private bounded fixture question' not in public and 'Private fixture answer' not in public
-            if scenario in {'settled','owner_limit','short_goal'}:
+            if scenario in ADOPTED:
                 assert task.status is WorkBoardStatus.review,(task.model_dump(),runs[0].model_dump(),results)
-                assert rows[0].state=='settled' and rows[0].actual_cost_microusd==2
+                if scenario=='missing_cost':
+                    # #1284: no NEAR charge recorded is "not priced yet", never a withheld answer.
+                    assert rows[0].state=='unknown' and rows[0].actual_cost_microusd is None
+                else:
+                    assert rows[0].state=='settled' and rows[0].actual_cost_microusd==2
                 assert runs[0].status=='succeeded'
             else:
                 assert task.status is WorkBoardStatus.blocked,(task.model_dump(),results)
-                assert rows[0].state==('unknown' if scenario=='missing_cost' else 'settled')
+                assert rows[0].state=='settled'
                 assert not json.loads(runs[0].artifact_receipts_json)
         output=await client.get(f'/api/work-board/tasks/{task_id}/near-text/output')
-        if scenario in {'settled','owner_limit','short_goal'}:
+        if scenario in ADOPTED:
             assert output.status_code==200,output.text
             assert output.json()['text']=='Private fixture answer'
             assert output.json()['receipt']['task_id']==task_id
-            assert output.json()['receipt']['cost_microusd']==2
+            assert output.json()['receipt']['cost_microusd']==(None if scenario=='missing_cost' else 2)
             assert output.json()['no_learning'] is True
         else:assert output.status_code in {401,403,409},output.text
         assert calls.count('/v1/chat/completions')==1,calls
@@ -187,19 +193,7 @@ async def test_actual_native_https_answer_and_unknown_no_release(accounting_db,r
         restarted=WorkBoardDispatcher(jobs=DurableJobRepository(),session_provider=factory.accounting_sessions)
         await restarted.run_pass()
         assert calls.count('/v1/chat/completions')==1
-        if scenario=='missing_cost':
-            from src.work_board.repository import WorkBoardRepository,BoardError
-            from src.work_board.contracts import WorkBoardOwner
-            async with factory.accounting_sessions() as db:
-                current=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==task_id))
-                assert current.block_reason=='near_cost_readback_required'
-                with pytest.raises(BoardError) as rejected:
-                    await WorkBoardRepository().retry_task(db,WorkBoardOwner(principal_id=owner['principal_id'],session_id=owner['session_id']),
-                        task_id,expected_revision=current.task_revision)
-                assert rejected.value.code=='attempt_limit'
-            await restarted.run_pass()
-            assert calls.count('/v1/chat/completions')==1
-        if scenario in {'settled','owner_limit','short_goal'}:
+        if scenario in ADOPTED:
             reads=[]
             original_read=near_text_native.read_output
             def observed_read(*args):
@@ -348,10 +342,11 @@ async def test_expired_contact_finance_recovers_ended_attempt_without_current_gr
             async with factory.accounting_sessions() as db:
                 run=await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity==native_id))
                 row=await db.scalar(select(InferenceCostReservation))
-                assert run.status=='cost_liability' and run.lease_owner is None and run.lease_expires_at is None
+                # #1284: a contacted call with no callback is an uncertain effect, never replayed.
+                assert run.status=='unknown_external_effect' and run.lease_owner is None and run.lease_expires_at is None
                 assert run.fencing_token==2 and run.revision>original_revision
-                assert row.state=='unknown' and row.bound_microusd==1000 and row.actual_cost_microusd is None
-                assert row.recovery_reason=='provider_cost_readback_required'
+                assert row.state=='unknown' and row.bound_microusd==0 and row.actual_cost_microusd is None
+                assert row.recovery_reason=='provider_outcome_unknown'
                 revision=row.revision;native_revision=run.revision
                 assert not json.loads(run.artifact_receipts_json)
             await restarted.run_pass()

@@ -1,114 +1,146 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { InferenceAccountingPanel } from "./InferenceAccountingPanel";
+import { InferenceAccountingPanel, spendStateLabel } from "./InferenceAccountingPanel";
 import type { InferenceAccountingStatus } from "../../lib/modelFabric";
 import { normalizeInferenceAccounting } from "../../lib/modelFabric";
 
 const { apiFetch } = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 vi.mock("../../lib/api", () => ({ apiFetch }));
+const settleControl = { action: "settle", endpoint: "/api/settings/model-fabric/accounting/settle", method: "POST",
+  expected_revision: 3, job_id: "owned-job", operation_id: "remote:owned-job" };
 const accounting: InferenceAccountingStatus = {
-  status: "ready", period_id: "2026-10", settings_revision: 2,
-  committed_microusd: 7, reserved_microusd: 0, unknown_microusd: 100, remaining_microusd: 893,
+  status: "ready", period_id: "2026-10", spent_microusd: 3_200_000, unpriced_requests: 1, history_verified: true,
+  operation_count: 1,
   operations: [{ operation_id: "remote:owned-job", job_id: "owned-job", owner_id: "operator:root:owner",
-    runtime_path: "chat_agent", state: "unknown", revision: 3, bound_microusd: 100, period_id: "2026-09",
-    recovery_reason: "provider_cost_readback_required", controls: [{ action: "settle",
-      endpoint: "/api/settings/model-fabric/accounting/settle", method: "POST", expected_revision: 3,
-      job_id: "owned-job", operation_id: "remote:owned-job" }] }],
+    runtime_path: "chat_agent", state: "unknown", revision: 3, period_id: "2026-09", actual_cost_microusd: null,
+    recovery_reason: "provider_cost_readback_required", controls: [settleControl] }],
 };
 
 describe("InferenceAccountingPanel", () => {
-  it.each([undefined, null])("keeps missing accounting metadata usable (%s)", (missing) => {
+  it.each([undefined, null])("keeps missing spend metadata usable (%s)", (missing) => {
     render(<InferenceAccountingPanel accounting={missing} stale onRefresh={vi.fn(async () => {})} />);
-    expect(screen.getByText(/Paid inference blocked/)).toBeInTheDocument();
-    expect(screen.getByText("Refresh accounting")).toBeEnabled();
-    expect(screen.queryByText("Reconcile exact cost operation")).not.toBeInTheDocument();
+    expect(screen.getByText("Spend this month is not available.")).toBeInTheDocument();
+    expect(screen.getByText("Refresh spend history")).toBeEnabled();
+    expect(screen.queryByText("Record the charge")).not.toBeInTheDocument();
   });
 
-  it("settles only the exact advertised operation then reads accounting back", async () => {
+  it("shows the month total, the unpriced count and where spending limits live", () => {
+    render(<InferenceAccountingPanel accounting={accounting} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.getByTestId("spend-total")).toHaveTextContent("October 2026: $3.20 spent. 1 request is not priced by NEAR yet (all months).");
+    expect(screen.getByText(/Spending limits are set in your NEAR account\./)).toBeInTheDocument();
+    expect(screen.queryByText(/blocked/i)).toBeNull();
+    expect(screen.queryByText(/ceiling|remaining|reserved/i)).toBeNull();
+  });
+
+  it("says spend history may be incomplete once a mismatch was resealed", () => {
+    const resealed = normalizeInferenceAccounting({ ...accounting, history_verified: false,
+      history_gap_since: "2026-11-19T08:30:00.123456+00:00" });
+    expect(resealed?.history_gap_since).toBe("2026-11-19T08:30:00.123456+00:00");
+    render(<InferenceAccountingPanel accounting={resealed} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.getByTestId("spend-history-gap")).toHaveTextContent("Spend history may be incomplete since 2026-11-19.");
+    expect(screen.queryByText(/blocked/i)).toBeNull();
+  });
+
+  it("shows no gap note for verified history or an unreadable ledger", () => {
+    const { unmount } = render(<InferenceAccountingPanel accounting={accounting} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.queryByTestId("spend-history-gap")).toBeNull();
+    unmount();
+    render(<InferenceAccountingPanel accounting={{ ...accounting, status: "unavailable", history_verified: false }}
+      stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.queryByTestId("spend-history-gap")).toBeNull();
+  });
+
+  it("says nothing was spent in a month without charges", () => {
+    render(<InferenceAccountingPanel accounting={{ ...accounting, spent_microusd: 0, unpriced_requests: 0, operations: [] }}
+      stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.getByTestId("spend-total")).toHaveTextContent("October 2026: nothing spent.");
+  });
+
+  it("reports an unreadable ledger as unavailable without a blocked banner", () => {
+    render(<InferenceAccountingPanel accounting={{ ...accounting, status: "unavailable" }} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Spend this month is not available.");
+    expect(screen.queryByText(/Paid inference blocked/)).toBeNull();
+  });
+
+  it("labels each request priced, answered or failed without a price, in progress or not sent", () => {
+    const shapes = [["settled", null], ["unknown", "provider_cost_readback_required"], ["unknown", "provider_call_failed"],
+      ["unknown", "provider_outcome_unknown"], ["contact_started", null], ["reserved", null], ["released", null]] as const;
+    const rows = shapes.map(([state, reason], index) => ({
+      ...accounting.operations[0], operation_id: "op-" + index, job_id: "job-" + index, state, controls: [],
+      recovery_reason: reason, actual_cost_microusd: state === "settled" ? 12_340 : null }));
+    render(<InferenceAccountingPanel accounting={{ ...accounting, operations: rows }} stale={false} onRefresh={vi.fn(async () => {})} />);
+    const text = screen.getAllByTestId("spend-row").map((row) => row.textContent ?? "");
+    expect(text[0]).toContain("chat_agent · priced · $0.01 · month 2026-09");
+    expect(text[1]).toContain("· answered, not priced yet ·");
+    // A call that failed, or lost its outcome, after contact is never "not priced yet".
+    expect(text[2]).toContain("· no answer, not priced ·");
+    expect(text[3]).toContain("· outcome unknown, not priced ·");
+    expect(text[4]).toContain("· in progress ·");
+    expect(text[5]).toContain("· not sent ·");
+    expect(text[6]).toContain("· not sent ·");
+    expect(text.slice(2, 5).join(" ")).not.toContain("not priced yet");
+    expect(spendStateLabel("settled")).toBe("priced");
+  });
+
+  it("records a charge only for the exact advertised request then reads spend history back", async () => {
     apiFetch.mockReset();
     apiFetch.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: true,
-      json: async () => ({ ...accounting, committed_microusd: 16, unknown_microusd: 0,
-        remaining_microusd: 984, operations: [] }) });
+      json: async () => ({ ...accounting, spent_microusd: 3_200_009, unpriced_requests: 0, operations: [] }) });
     const refresh = vi.fn(async () => {});
     render(<InferenceAccountingPanel accounting={accounting} stale={false} onRefresh={refresh} />);
-    fireEvent.click(screen.getByText("Reconcile exact cost operation"));
-    expect(screen.getByText(/remains externally unverified/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Record the charge"));
+    expect(screen.getByText(/nothing waits on it/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Declared account charge"), { target: { value: "9" } });
     fireEvent.change(screen.getByLabelText("Settlement evidence SHA-256"), { target: { value: "e".repeat(64) } });
     fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByText("Record declared settlement"));
+    fireEvent.click(screen.getByText("Save charge"));
     await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
     const [url, options] = apiFetch.mock.calls[0];
     expect(url).toContain("/api/settings/model-fabric/accounting/settle");
     expect(JSON.parse(options.body)).toMatchObject({ operation_id: "remote:owned-job", job_id: "owned-job",
       expected_revision: 3, actual_cost_microusd: 9, evidence_digest: "e".repeat(64) });
     expect(apiFetch.mock.calls[1][0]).toContain("/api/settings/model-fabric/accounting");
-    expect(screen.getByText(/remaining 984 micro USD/)).toBeInTheDocument();
+    expect(screen.getByTestId("spend-total")).toHaveTextContent("October 2026: $3.20 spent.");
+    expect(screen.getByTestId("spend-total")).not.toHaveTextContent("not priced");
   });
 
-  it("retains stale totals and disables recovery controls", () => {
+  it("refuses an incomplete charge without calling the backend", () => {
+    apiFetch.mockReset();
+    render(<InferenceAccountingPanel accounting={accounting} stale={false} onRefresh={vi.fn(async () => {})} />);
+    fireEvent.click(screen.getByText("Record the charge"));
+    fireEvent.change(screen.getByLabelText("Declared account charge"), { target: { value: "9" } });
+    fireEvent.change(screen.getByLabelText("Settlement evidence SHA-256"), { target: { value: "not-a-digest" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByText("Save charge"));
+    expect(screen.getByRole("alert")).toHaveTextContent("evidence SHA-256");
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("retains stale history and disables the record control", () => {
     render(<InferenceAccountingPanel accounting={accounting} stale onRefresh={vi.fn(async () => {})} />);
-    expect(screen.getByText(/retained, stale/)).toBeInTheDocument();
-    expect(screen.getByText("Reconcile exact cost operation")).toBeDisabled();
+    expect(screen.getByText(/Retained, stale/)).toBeInTheDocument();
+    expect(screen.getByText("Record the charge")).toBeDisabled();
   });
 
   it("rejects a settlement control that names another operation or endpoint", () => {
     const value = normalizeInferenceAccounting({ ...accounting, operations: [{ ...accounting.operations[0],
-      controls: [{ ...accounting.operations[0].controls![0], operation_id: "foreign-operation" },
-        { ...accounting.operations[0].controls![0], endpoint: "https://foreign.invalid/settle" }] }] });
+      controls: [{ ...settleControl, operation_id: "foreign-operation" },
+        { ...settleControl, endpoint: "https://foreign.invalid/settle" }] }] });
     expect(value?.operations[0].controls).toEqual([]);
   });
 
-  it("reviews only the exact advertised observed month and reads retained accounting back", async () => {
-    apiFetch.mockReset();
-    const blocked = { ...accounting, status: "blocked" as const, accounting_continuity_verified: true,
-      reason_code: "accounting_period_review_required", revision: 5, period_high_water: "2026-10",
-      period_review: { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST" as const,
-        period_id: "2026-10", expected_revision: 5, scope: "deployment_accounting" as const } };
-    apiFetch.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: true,
-      json: async () => ({ ...blocked, status: "ready", period_review: null }) });
-    const refresh = vi.fn(async () => {});
-    render(<InferenceAccountingPanel accounting={blocked} stale={false} onRefresh={refresh} />);
-    expect(screen.getByText("Acknowledge observed UTC month")).toBeDisabled();
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByText("Acknowledge observed UTC month"));
-    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-    expect(apiFetch.mock.calls[0][0]).toContain(blocked.period_review.endpoint);
-    expect(JSON.parse(apiFetch.mock.calls[0][1].body)).toEqual({ period_id: "2026-10", expected_revision: 5 });
-    expect(apiFetch.mock.calls[1][0]).toContain("/api/settings/model-fabric/accounting");
-  });
-
-  it("rejects period controls naming a foreign period or revision", () => {
-    const control = { endpoint: "/api/settings/model-fabric/accounting/period", method: "POST",
-      period_id: "2026-10", expected_revision: 5, scope: "deployment_accounting" };
-    expect(normalizeInferenceAccounting({ ...accounting, revision: 5,
-      period_review: { ...control, period_id: "2027-01" } })?.period_review).toBeNull();
-    expect(normalizeInferenceAccounting({ ...accounting, revision: 5,
-      period_review: { ...control, expected_revision: 4 } })?.period_review).toBeNull();
-    expect(normalizeInferenceAccounting({ ...accounting, revision: Infinity,
-      period_review: { ...control, expected_revision: Infinity } })?.period_review).toBeNull();
-  });
-
-  it("shows each unreviewed overrun charge and the minimum bound that reviews it", () => {
-    const normalized = normalizeInferenceAccounting({
-      ...accounting, status: "blocked", reason_code: "provider_charge_exceeded_reservation",
-      overrun_max_cost_microusd: 612_340,
-      unreviewed_overruns: [
-        { operation_id: "op-big", job_id: "job-big", runtime_path: "chat_agent", period_id: "2026-10", bound_microusd: 500_000, actual_cost_microusd: 612_340 },
-        { operation_id: "op-small", job_id: "job-small", runtime_path: "strategist_agent", period_id: "2026-10", bound_microusd: 50_000, actual_cost_microusd: "bad" },
-      ],
-    });
-    expect(normalized?.unreviewed_overruns).toHaveLength(1);
-    render(<InferenceAccountingPanel accounting={normalized} stale={false} onRefresh={vi.fn(async () => {})} />);
-    const box = screen.getByTestId("unreviewed-overruns");
-    expect(box).toHaveTextContent("chat_agent · month 2026-10 · charged $0.61234 (612,340 µUSD) against a $0.5 bound");
-    expect(box).toHaveTextContent("Operation op-big · job job-big");
-    expect(box).toHaveTextContent("raise the request cost bound to at least $0.61234 (612,340 µUSD) and save");
-    expect(box).toHaveTextContent("press Prove route again");
-  });
-
-  it("hides the overrun review when there is none", () => {
-    render(<InferenceAccountingPanel accounting={{ ...accounting, overrun_max_cost_microusd: 0 }} stale={false} onRefresh={vi.fn(async () => {})} />);
-    expect(screen.queryByTestId("unreviewed-overruns")).toBeNull();
+  it("ignores the retired limit fields an older backend may still send", () => {
+    const value = normalizeInferenceAccounting({ ...accounting, ceiling_microusd: 1_000_000, remaining_microusd: 0,
+      reserved_microusd: 5, unknown_microusd: 9, committed_microusd: 7, period_review: { endpoint: "/x" },
+      unreviewed_overruns: [{ operation_id: "a" }], overrun_max_cost_microusd: 3, settings_revision: 4,
+      operations: [{ ...accounting.operations[0], bound_microusd: 100 }] });
+    expect(value).not.toBeNull();
+    for (const key of ["ceiling_microusd", "remaining_microusd", "reserved_microusd", "unknown_microusd", "committed_microusd",
+      "period_review", "unreviewed_overruns", "overrun_max_cost_microusd", "settings_revision"]) {
+      expect(value).not.toHaveProperty(key);
+    }
+    expect(value?.spent_microusd).toBe(3_200_000);
+    expect(value?.operations).toHaveLength(1);
+    expect(Object.keys(value?.operations[0] ?? {})).not.toContain("bound_microusd");
   });
 });

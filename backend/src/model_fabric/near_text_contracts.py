@@ -44,12 +44,14 @@ class NearTextReceipt(BaseModel):
     input_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     output_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     policy_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
-    billing_response_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    # ADR-037 (#1284): a charge NEAR has not reported leaves these unset and
+    # the state "not_priced"; the answer is delivered either way.
+    billing_response_digest: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     provider_request_id: StrictStr
-    cost_source: Literal["near_billing_costs"] = "near_billing_costs"
-    cost_nano_usd: StrictInt = Field(ge=0, le=1_000_000_000_000)
-    cost_microusd: StrictInt = Field(ge=0, le=1_000_000_000)
-    cost_state: Literal["settled"] = "settled"
+    cost_source: Literal["near_billing_costs"] | None = "near_billing_costs"
+    cost_nano_usd: StrictInt | None = Field(default=None, ge=0, le=1_000_000_000_000)
+    cost_microusd: StrictInt | None = Field(default=None, ge=0, le=1_000_000_000)
+    cost_state: Literal["settled", "not_priced"] = "settled"
     cost_reference: StrictStr
     memory_status: Literal["no_learning"] = "no_learning"
 

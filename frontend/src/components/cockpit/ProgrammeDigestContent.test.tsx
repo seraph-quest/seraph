@@ -54,6 +54,16 @@ describe("Programme digest binding", () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
   });
 
+  it("shows the zero-allowance paused note and no remaining allowance", async () => {
+    const data = receipt(); data.programmes[0].state = "paused"; data.programmes[0].reason_code = "programme_paused_no_allowance";
+    fetchMock.mockResolvedValue(reply(data));
+    render(<ProgrammeDigestContent ownerKey="operator:root" />);
+    expect(await screen.findByText("Paused: it had no inference allowance. Resume it to run.")).toBeInTheDocument();
+    expect(screen.queryByText(/programme_paused_no_allowance/)).toBeNull();
+    expect(screen.queryByText(/allowance ·/)).toBeNull();
+    expect(screen.queryByText(/microUSD/)).toBeNull();
+  });
+
   it("keeps notifications separately opt-in and binds caps, quiet hours and passive recovery", async () => {
     const data = receipt(); data.programmes[0].state = "blocked"; data.programmes[0].reason_code = "programme_review_required";
     fetchMock.mockResolvedValue(reply(data));

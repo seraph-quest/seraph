@@ -87,8 +87,7 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
     monkeypatch.setattr(httpx, "AsyncClient", intercepted_client)
     body = {"goal_revision": 1, "idempotency_key": "ordinary-governed-journey",
         "input": {"goal_ref": goal.id, "intent": "Read notes.txt and return its content and SHA-256",
-            "requested_output": read_descriptor.output_schema, "inference_egress_acknowledged": True,
-            "limits": {"max_cost_microusd": 1000}}}
+            "requested_output": read_descriptor.output_schema, "inference_egress_acknowledged": True}}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
         created = await client.post("/api/work-board/general-tasks", json=body)
         assert created.status_code == 200, created.text
@@ -105,7 +104,8 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
         assert proposed.status_code == 200, proposed.text
         assert proposed.json()["plan"] == plan
         assert proposed.json()["accepted"] is False
-        assert proposed.json()["task_input"]["limits"]["max_cost_microusd"] == 1000
+        # ADR-037 (#1284): no dollar limit is needed or stored for a new task.
+        assert proposed.json()["task_input"]["limits"]["max_cost_microusd"] == 0
         async with sessions() as db:
             runs = list((await db.execute(select(WorkflowRunState))).scalars())
             assert len(runs) == 1 and runs[0].job_kind == "model_inference_ephemeral_v1"
@@ -171,14 +171,14 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
         assert len(contacts) == 1
         snapshot = await jobs.inference_accounting_snapshot()
         assert snapshot["operation_count"] == 1
-        assert snapshot["committed_microusd"] == snapshot["unknown_microusd"] == 0
+        assert snapshot["spent_microusd"] == snapshot["unpriced_requests"] == 0
         operation = snapshot["operations"][0]
         assert operation["state"] == "settled" and operation["runtime_path"] == "general_task_planner"
         print(json.dumps({"flow": "ordinary_intent_plan_accept_native_readback_restart", "task_id": task_id,
             "execution_job_id": execution_id, "planning_job_id": operation["job_id"],
             "planning_operation_id": operation["operation_id"], "private_artifact": verified["file_path"],
             "artifact_sha256": verified["content_sha256"], "intercepted_http_calls": len(contacts),
-            "external_provider_contacts": 0, "committed_microusd": 0, "memory_status": "no_learning"}, sort_keys=True))
+            "external_provider_contacts": 0, "spent_microusd": 0, "memory_status": "no_learning"}, sort_keys=True))
         restored.stop()
         restored_registry.stop()
 

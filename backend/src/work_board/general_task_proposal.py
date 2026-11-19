@@ -57,8 +57,10 @@ async def recheck_proposal_publication(db, owner, witness):
         original = next((row for row in operations if row.operation_id == envelope.proposal_provenance.initial_operation_id), None)
         if original is None or proposal_provenance(original.model_dump(mode="json"), group) != envelope.proposal_provenance:
             raise BoardError("general_task_provenance_changed", "Original proposal accounting binding changed", status_code=409)
-        if original.state in {"unknown", "contact_started"}:
-            raise BoardError("general_task_group_unknown", "Reconcile original planning liability before publication", status_code=409)
+        # A call still in flight blocks publication; a finished call NEAR has
+        # not priced yet ("unknown") does not (#1284).
+        if original.state == "contact_started":
+            raise BoardError("general_task_group_unknown", "The original planning call is still in flight", status_code=409)
     elif any(any(item.get("kind") == "general_task_group_reservation.v1" and item.get("role") == "initial_proposal"
         and item.get("group", {}).get("group_id") == group.group_id
         for item in json.loads(row.evidence_json)) for row in operations):

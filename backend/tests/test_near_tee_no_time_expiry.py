@@ -324,14 +324,14 @@ async def test_failed_put_with_new_key_keeps_proofs_for_the_unchanged_key(client
 
     # Accounting failure mid-save (key B left on the revoked intermediate):
     # re-saving key A restores A's binding and its proofs.
-    real_configure = durable_job_repository.configure_inference_accounting
+    real_configure = durable_job_repository.ensure_inference_ledger
 
     async def unavailable(*_args, **_kwargs):
         raise RuntimeError("accounting_settings_revision_unavailable")
-    monkeypatch.setattr(durable_job_repository, "configure_inference_accounting", unavailable)
+    monkeypatch.setattr(durable_job_repository, "ensure_inference_ledger", unavailable)
     failed = await client.put("/api/settings/model-fabric", json=_put_slot(5, api_key="private-intercepted-key-b"))
     assert failed.status_code == 503, failed.text
-    monkeypatch.setattr(durable_job_repository, "configure_inference_accounting", real_configure)
+    monkeypatch.setattr(durable_job_repository, "ensure_inference_ledger", real_configure)
     revision = read_model_fabric_configuration().egress_revision
     resaved = await client.put("/api/settings/model-fabric", json=_put_slot(revision, api_key=PROVIDER_KEY))
     assert resaved.status_code == 200, resaved.text

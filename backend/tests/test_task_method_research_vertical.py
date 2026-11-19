@@ -152,7 +152,7 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
             # ADR-035: the research route is the NEAR TEE text slot (a new
             # egress revision after the planner fixture's configuration).
             await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",),
-                request_cost_bound_microusd=RESEARCH_REQUEST_BOUND_MICROUSD, egress_revision=3)
+                egress_revision=3)
             # Apply the NEAR TEE lane's limits to the shared broker, as profile
             # resolution does after a settings change (the planner fixture's
             # OpenRouter lane had a 1000 micro-USD owner ceiling).

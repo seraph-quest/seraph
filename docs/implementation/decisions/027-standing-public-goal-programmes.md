@@ -11,6 +11,8 @@ the independently reviewed implementation merge. The source branch describes
 the intended post-merge authority contract; it does not establish Shipped
 availability before that merge. [Development Status](../STATUS.md) owns implementation truth.
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Decision class:** Narrow public service-authority exception to
 [ADR-023](./023-evidence-bound-guardian-opportunities.md).
 
@@ -47,6 +49,14 @@ search/read, the local artifact prefix and finite inference ceiling before
 acceptance. Keys, configuration, goal status, a model suggestion, or a recovered
 read scope grant no programme authority. Zero budget or missing governed policy
 retains a configured-but-blocked generation with a recovery reason.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the programme inference ceiling and zero-budget blocking.
+A programme not yet ended whose stored `max_inference_microusd` is exactly 0 is
+paused once at startup (`programme_paused_no_allowance`, "Paused: it had no
+inference allowance. Resume it to run."), keyed on the stored value, not a
+date, and runs after an explicit resume. A positive stored allowance is no
+longer enforced and new programmes store none. Missing governed policy still
+blocks. Delivered by the second #1284 pull request.
 
 Preview never grants the proposed new generation execution authority. Saving a
 preview with a changed public brief immediately pauses the previous active or
@@ -197,6 +207,10 @@ all settled charges and reserved, contacted or Unknown liabilities across every
 accounting period. A previous outstanding occurrence for the same canonical Goal
 and stable operator identity retains its hold across new generations. A different
 Goal for the same identity is not counted as that Goal's discovery occurrence.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Generation spend is recorded for display only under [ADR-037](./037-no-local-cost-limits.md); it is not
+compared with an allowance. Occurrence, query, source and inference-request
+counts stay.
 
 Public search is a pinned HTTPS POST only to
 `https://html.duckduckgo.com/html/`, with only bounded `q`, empty `b`, and fixed

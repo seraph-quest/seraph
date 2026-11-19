@@ -147,13 +147,14 @@ def test_vision_allowlist_profile_and_catalog_rules():
         deepseek = catalog_record("deepseek-ai/DeepSeek-V4.1-Flash-1017", **changes)
         facts = parse_catalog_record(json.dumps(deepseek).encode(), model_id="deepseek-ai/DeepSeek-V4.1-Flash-1017")
         assert evaluate_catalog(facts, slot_name="vision", slot=deepseek_slot)[0] == reason
-    # A listed per-image price joins the cost bound; a malformed one fails closed.
+    # A listed per-image price joins the displayed cost; a malformed one fails closed.
     priced = vision_catalog()
     priced["costPerImage"] = {"amount": 2000, "scale": 9, "currency": "USD"}  # $0.000002 -> 2 microUSD
     facts = parse_catalog_record(json.dumps(priced).encode(), model_id=VISION_MODEL)
     assert evaluate_catalog(facts, slot_name="vision", slot=slot) == (None, 3423)
-    assert evaluate_catalog(facts, slot_name="vision", slot=replace(slot, request_cost_bound_microusd=3422))[0] \
-        == "near_tee_catalog_cost_bound_too_small"
+    # #1284: a legacy bound below the catalog price no longer refuses the model.
+    assert evaluate_catalog(facts, slot_name="vision", slot=replace(slot, request_cost_bound_microusd=3422)) \
+        == (None, 3423)
     priced["costPerImage"] = {"amount": "x", "scale": 9}
     facts = parse_catalog_record(json.dumps(priced).encode(), model_id=VISION_MODEL)
     assert evaluate_catalog(facts, slot_name="vision", slot=slot)[0] == "near_tee_catalog_response_invalid"
@@ -177,7 +178,7 @@ def test_vision_priority_stays_below_chat_and_serial_bound_is_one():
     assert GpuPriority.INTERACTIVE_CHAT.rank > GpuPriority.SCREENSHOT_BACKGROUND.rank
     from src.model_fabric.configuration import InferenceLaneConfig, validate_inference_lane
     with pytest.raises(ValueError):
-        validate_inference_lane(InferenceLaneConfig(spend_ceiling_microusd=1000, max_inflight=2))
+        validate_inference_lane(InferenceLaneConfig(max_inflight=2))
 
 
 # ── Settings, catalog/capability checks and the screen pipeline ─────────
@@ -185,7 +186,7 @@ def test_vision_priority_stays_below_chat_and_serial_bound_is_one():
 
 async def _lane(client):
     lane = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
-        "inference_lane": {"spend_ceiling_microusd": 1_000_000}})
+        "inference_lane": {}})
     assert lane.status_code == 200, lane.text
 
 
@@ -370,7 +371,7 @@ async def test_uploaded_capture_is_analyzed_on_near_vision_and_reaches_the_diges
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     rows = [row for row in snapshot["operations"] if row["runtime_path"] == "screenshot_image_analysis"]
     assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.vision"
-    assert rows[0]["actual_cost_microusd"] == 1500 and snapshot["unknown_microusd"] == 0
+    assert rows[0]["actual_cost_microusd"] == 1500 and snapshot["unpriced_requests"] == 0
 
     # The analysed upload reaches the digest record; local text is no longer the content.
     start = observation.timestamp.replace(tzinfo=timezone.utc) - timedelta(minutes=5)
@@ -427,22 +428,25 @@ async def test_prompt_json_path_and_known_cost_failures_do_not_crash(client, mod
     near.echo_model = None
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     rows = [row for row in snapshot["operations"] if row["runtime_path"] == "screenshot_image_analysis"]
-    assert [row["state"] for row in rows] == ["settled"] * 3 and snapshot["unknown_microusd"] == 0
+    assert [row["state"] for row in rows] == ["settled"] * 3 and snapshot["unpriced_requests"] == 0
 
-    # Missing billing: Unknown liability, blocked status, serial lease stays blocked.
+    # #1284: missing billing is "not priced yet": the analysis is adopted,
+    # the row is unknown and the serial lease is free.
     near.billing_missing = True
     near.body_id = "chatcmpl-unknown"
+    near.answer = {"role": "assistant", "content": analysis_json("Unpriced analysis.")}
     fourth = await _upload(shots, monkeypatch, capture_id="cap-vision-0005", color=(5, 5, 5))
-    await _analyze(operator)
+    assert (await _analyze(operator)).analyzed == 1
     near.billing_missing = False
-    _obs, analysis, status = await _details(fourth)
-    assert analysis is None and status["status"] == "blocked"
+    _obs, analysis, _status = await _details(fourth)
+    assert analysis["summary"] == "Unpriced analysis."
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     unknown = [row for row in snapshot["operations"] if row["state"] == "unknown"]
     assert len(unknown) == 1 and unknown[0]["profile_id"] == "near_tee.vision"
+    assert snapshot["unpriced_requests"] == 1
     receipt = isolated_broker.receipt_for(unknown[0]["operation_id"])
-    assert receipt.status == "blocked" and receipt.reconciliation_required
-    assert receipt.active_operation_id == unknown[0]["operation_id"]
+    assert receipt.status != "blocked" and not receipt.reconciliation_required
+    assert isolated_broker._active_operation_id is None
     assert {request.url.host for request in near.requests} == {"cloud-api.near.ai"}
 
 

@@ -28,7 +28,6 @@ from src.agent.direct_chat import (
     direct_chat_turn_timeout,
     openrouter_route_block_reason,
     openrouter_route_block_recovery,
-    route_block_overrun_minimum,
     route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
@@ -93,15 +92,13 @@ router = APIRouter()
 
 async def _route_block_detail(error: BaseException, *, provider_contacted: bool = False) -> dict[str, object]:
     reason = openrouter_route_block_reason(error)
-    minimum = await route_block_overrun_minimum(error)
     message, recovery_action = openrouter_route_block_recovery(
-        reason, provider_contacted=provider_contacted, minimum_bound_microusd=minimum,
+        reason, provider_contacted=provider_contacted,
     )
     return {
         "message": message,
         "route_reason": reason,
         "recovery_action": recovery_action,
-        **({"minimum_request_bound_microusd": minimum} if minimum is not None else {}),
         # A denial after earlier calls of the same agent turn is not a
         # preflight refusal: those calls reached the provider.
         "remote_outcome": "contacted_before_block" if provider_contacted else "not_contacted",

@@ -20,6 +20,12 @@ describe("bounded attention projection", () => {
     expect(buildCockpitAttention(value, ready, owner).map((item) => item.id)).toEqual(["task:task", "task:unknown"]);
     expect(buildCockpitAttention(value, ready, owner)[0].approvalId).toBe("approval");
   });
+  it("describes legacy cost_liability work as unpriced spend, never a held reserve", () => {
+    const value = snapshot([{ ...task, task_id: "unpriced", latest_attempt: null, block_kind: "cost_liability", block_reason: "cost_liability" }], []);
+    const [item] = buildCockpitAttention(value, ready, owner);
+    expect(item.reason).toBe("Spend not priced yet · you can record the charge");
+    expect(item.reason).not.toMatch(/reserv|limit|reconcile/i);
+  });
   it.each([
     { ...approval, operator_session_id: "old-root" },
     { ...approval, owner_principal_id: "other" },

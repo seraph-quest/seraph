@@ -77,7 +77,6 @@ export interface OutcomeRouteSummary {
   route: string;
   upstream?: string | null;
   egress?: string | null;
-  budget?: string | null;
   queue?: string | null;
   detail?: string | null;
 }
@@ -520,7 +519,6 @@ export function OutcomeCockpitPanel({
           <ValueRow label="model" value={display(route.model)} />
           <ValueRow label="upstream" value={display(route.upstream)} />
           <ValueRow label="egress" value={display(route.egress)} />
-          <ValueRow label="budget" value={display(route.budget, "cost ceiling unknown")} />
           <ValueRow label="queue" value={display(route.queue, "queue status unavailable")} />
           {route.detail ? <div className="cockpit-outcome-note">{route.detail}</div> : null}
         </Card>

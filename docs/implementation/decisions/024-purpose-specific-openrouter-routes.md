@@ -7,6 +7,8 @@ title: "ADR-024: Purpose-specific OpenRouter routes"
 
 **Status:** Accepted under [#954](https://github.com/seraph-quest/seraph/issues/954), effective on the reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merge to `develop` on October 5, 2026. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits. Superseded by [ADR-035](./035-near-tee-hosted-inference-only.md) for new inference; retained for historical/liability readers. Its slot mapping, witnessed publication, proof-key and embedding-namespace mechanics are reused by ADR-035.
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Decision class:** Additive model-fabric setup contract. ADR-006 was the active provider boundary until ADR-035.
 
 [ADR-033](./033-governed-optional-audio-route.md) narrowly supersedes the
@@ -58,6 +60,10 @@ inventory and requires stopping if an unlisted active caller is found.
 purpose consent. Key/credential reference is shared and write-only; one vault
 entry, no per-slot keys. Cost ceiling, witness, queue bounds and max-inflight=1
 are deployment-wide outside `routes`; changing slots never funds another ceiling.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes the per-slot `request_cost_bound_microusd` and the
+deployment cost ceiling. Old values are accepted and ignored. Queue bounds and
+max-inflight=1 stay deployment-wide.
 No model IDs or upstream identities are invented or shipped as enabled defaults.
 
 Example (abbreviated for readability, not a complete valid request):
@@ -121,6 +127,9 @@ For a save whose accepted current revision is `r`:
    proves the expected ceiling and reserve review. Purpose consent binds the
    reviewed target and its final active revision; intermediate publication
    cannot independently enable a purpose.
+
+   **Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) step 2 configures no ceiling or reserve review and step 3
+   reads back neither; the revoked r+1 and active r+2 publication is unchanged.
 
 A concurrent save that loses CAS returns HTTP409. A fault, crash or lost
 continuation leaves the configuration revoked or continuity-degraded; GET must

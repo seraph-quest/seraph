@@ -189,13 +189,16 @@ async def test_transport_negative_never_retries_inference(transport_setup,kind):
 
 
 @pytest.mark.asyncio
-async def test_two_billing_attempts_unknown_releases_no_answer(transport_setup):
+async def test_two_billing_attempts_unknown_still_delivers_unpriced_answer(transport_setup):
+    # ADR-037 (#1284): billing returning nothing never withholds the answer.
     state=transport_setup
     async def handler(request):
         if request.url.path.endswith("chat/completions"): return response(request,completion())
         return response(request,{"requests":[]})
     state["configure"](handler)
-    with pytest.raises(NearTextError,match="near_text_cost_liability"): await invoke(state)
+    answer=await invoke(state)
+    assert answer.text=="private answer"
+    assert answer.receipt.cost_state=="not_priced" and answer.receipt.cost_microusd is None
     assert len(state["calls"])==3 and not state["evidence"]
 
 
@@ -222,14 +225,16 @@ async def test_current_config_cap_denies_before_http(transport_setup):
 
 
 @pytest.mark.asyncio
-async def test_genuine_overrun_charge_is_captured_without_answer(transport_setup):
+async def test_charge_above_old_bound_is_captured_with_answer(transport_setup):
+    # ADR-037 (#1284): any amount is recorded and the answer delivered.
     state=transport_setup
     provider_id=str(uuid5(NAMESPACE_DNS,"completion-123"))
     async def handler(request):
         if request.url.path.endswith("chat/completions"): return response(request,completion())
         return response(request,{"requests":[{"requestId":provider_id,"costNanoUsd":100001}]})
     state["configure"](handler)
-    with pytest.raises(NearTextError,match="near_text_cost_overrun"): await invoke(state)
+    answer=await invoke(state)
+    assert answer.text=="private answer" and answer.receipt.cost_microusd==101
     assert len(state["calls"])==2 and state["evidence"][0].cost_microusd==101
 
 

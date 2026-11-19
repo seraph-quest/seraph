@@ -33,7 +33,7 @@ export function NearTextWorkPanel({ ownerPrincipalId, ownerSessionId, task, goal
   const goal = goals.find(item => item.id === goalId && nearTextGoalEligible(item, ownerSessionId));
   const eligible = Boolean(owned && task && nearTextOutputEligible(task));
   const liability = Boolean(task && (task.block_kind === "cost_liability" || task.block_reason?.includes("cost_liability")
-    || (task.status === "blocked" && task.block_reason === "near_cost_readback_required")));
+    || (task.status === "blocked" && task.block_reason === "near_answer_unavailable")));
   useEffect(() => {
     const version = ++generation.current;
     controller.current?.abort(); controller.current = null;

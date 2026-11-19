@@ -64,8 +64,8 @@ planned and excluded from completed
 [#736](https://github.com/seraph-quest/seraph/issues/736).
 
 This boundary governs development and acceptance; it does not disable ordinary
-operator-approved product inference under existing consent, grants, routing,
-and budgets. Historical receipts, capability-proof endpoints, and unverified
+operator-approved product inference under existing consent, grants and
+routing. Historical receipts, capability-proof endpoints, and unverified
 quality labels authorize neither an eval nor implementation-time model calls.
 Preserve historical evidence without treating it as an active work requirement.
 
@@ -105,7 +105,7 @@ Public entry points: [docs](https://docs.seraph.quest),
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
-| **Model fabric** | NEAR AI TEE-hosted inference (per NEAR catalog, not verified by Seraph) under ADR-035 with explicit routing, consent, budgets and receipts (ADR-025's NEAR text capability retained) | Agent identity, durable state, shell orchestration, or product policy |
+| **Model fabric** | NEAR AI TEE-hosted inference (per NEAR catalog, not verified by Seraph) under ADR-035 with explicit routing, consent and receipts (ADR-025's NEAR text capability retained) | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
@@ -171,6 +171,7 @@ The following architecture decisions are normative:
 34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
 35. [ADR-035: NEAR TEE-hosted inference only](./decisions/035-near-tee-hosted-inference-only.md) (supersedes ADR-006's provider choice and ADR-024's OpenRouter slots)
 36. [ADR-036: DSH-style plugin structure, pinned trust bundle and profiles](./decisions/036-dsh-style-plugin-structure.md) (refines ADR-026)
+37. [ADR-037: No local cost limits; the provider account holds them](./decisions/037-no-local-cost-limits.md) (supersedes the budget, reserve, period and overrun clauses of ADR-006, 012, 024, 025, 027, 030, 035)
 
 ADR-033 extends only the versioned setup.v3 target with one optional disabled
 audio route; under ADR-035 that OpenRouter route is never activated and a NEAR
@@ -248,11 +249,12 @@ Open branches describe intended post-merge truth and must be identified as such.
   unsupported capabilities remain blocked or degraded rather than falling back
   silently.
 - Remote inference uses one shared bounded admission contract with owner,
-  priority, deadline, cancellation, budget, idempotency, and reconciliation
+  priority, deadline, cancellation, idempotency, and reconciliation
   receipts. The initial in-flight limit is one; this is an API admission bound,
   not a claim about upstream hardware concurrency. The integrated runtime has
-  durable jobs, provider cost reservations and witnessed reconciliation;
-  contacted unknown costs remain liabilities. See the dated
+  durable jobs, durable request records and witnessed spend recording. Under
+  ADR-037 Seraph applies no cost limit of its own: spending limits live in the
+  provider account, and recorded spend is history and display only. See the dated
   [source/test baseline](/research/seraph-capability-baseline-2026-10-05)
   for the develop/main boundary and unresolved focused-test failures. The old
   process-local migration description is historical, not the current target.

@@ -724,8 +724,6 @@ async def _invoke_plan_completion(owner, proposal_id, messages, context, binding
                 return await run_near_tee_vertical_call(call, priority=GpuPriority.REPORTS_RESEARCH_MEMORY,
                     before_contact=fresh_source)
         except NearTeeError as exc:
-            if exc.code == "near_tee_cost_liability":
-                raise
             raise OpportunityError(exc.code) from exc
         finally:
             _contact_source.reset(token)

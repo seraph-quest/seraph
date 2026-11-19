@@ -209,18 +209,17 @@ def spec_for(task, attempt, inputs: Mapping[str, Any], *, deadline: datetime, st
     model = ResearchDossierInput.model_validate(dict(inputs))
     from src.model_fabric.near_tee_vertical import vertical_inference_policy
     # #1159: the NEAR TEE text slot serving the research child route binds the
-    # reviewed allowance (its request bound under the shared lane ceiling).
+    # reviewed policy. ADR-037 (#1284): research carries no dollar allowance;
+    # the zero amounts keep the stored authority shape and are never compared.
     configured, policy_digest, setup = vertical_inference_policy("readonly_research_child")
-    bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
-    if type(bound) is not int or bound <= 0 or bound*len(model.perspectives) > setup.spend_ceiling_microusd:
-        raise ValueError("fixed research slots exceed the existing reviewed allowance")
+    bound = ceiling = 0
     safe_inputs = input_projection(task, model)
     start, cutoff = utc_time(attempt.started_at), utc_time(deadline)
     seconds = (cutoff-start).total_seconds()
     if not seconds.is_integer() or not 1 <= seconds <= 300:
         raise ValueError("research original attempt window unavailable")
     authority = authority_projection(task, model, policy_digest=policy_digest,
-        policy_revision=configured.egress_revision, bound=bound, ceiling=setup.spend_ceiling_microusd,
+        policy_revision=configured.egress_revision, bound=bound, ceiling=ceiling,
         strategy=strategy if strategy is not None else TaskStrategyBinding(status="none", reason="baseline"),
         original_deadline_at=canonical_time(cutoff), original_runtime_seconds=int(seconds))
     return DurableJobSpec(identity=DurableJobIdentity(job_id=job_id(task, attempt), owner_kind="user",

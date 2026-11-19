@@ -923,7 +923,7 @@ async def continue_verified_plan(service, jobs, parent, task, attempt, envelope,
         # would lose the narrower callback/request accounting subgroup.
         return False
     if (service.planner is None or not envelope.task_input.inference_egress_acknowledged
-        or limits.max_inference_calls <= 0 or limits.max_cost_microusd <= 0 or not manifest.step_ids):
+        or limits.max_inference_calls <= 0 or not manifest.step_ids):
         return False
     key = "verified-continuation:" + digest([manifest.creation_digest,
         sorted(zip(manifest.step_ids, manifest.step_receipt_artifact_ids, manifest.step_receipt_digests))])
@@ -960,28 +960,22 @@ async def continue_verified_plan(service, jobs, parent, task, attempt, envelope,
             original = next((row for row in members if row.operation_id == provenance.initial_operation_id), None)
             if original is None or proposal_provenance(original.model_dump(mode="json"), group) != provenance:
                 raise BoardError("general_task_provenance_missing", "Original proposal accounting binding unavailable", status_code=409)
-        if any(row.state in {"unknown", "reserved", "contact_started"} or
-            row.state == "settled" and row.actual_cost_microusd is None for row in members):
+        # ADR-037 (#1284): a call still in flight blocks a further planning
+        # call; a finished but not yet priced (``unknown``) record does not,
+        # and no dollar amount is compared. The call ceiling stays.
+        if any(row.state in {"reserved", "contact_started"} for row in members):
             raise InferenceAccountingError("general_task_group_unknown")
-        spent = sum(row.actual_cost_microusd for row in members if row.state == "settled")
         from src.model_fabric.near_tee_vertical import near_tee_vertical_route
         from src.model_fabric.retirement import openrouter_retired
-        near_route = near_tee_vertical_route("general_task_planner")
-        if near_route is not None:
-            # #1159: continuation planning reserves the NEAR TEE slot bound.
-            bound = near_route.request_cost_bound_microusd
-        elif openrouter_retired():
-            raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
-        else:
+        if near_tee_vertical_route("general_task_planner") is None:
+            if openrouter_retired():
+                raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
             configured, _ = current_inference_policy()
             setup = configured.openrouter_setup
             route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
             if route is None or not getattr(route, "enabled", True):
                 raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
-            bound = getattr(route, "request_cost_bound_microusd", None)
-        if type(bound) is not int or bound <= 0:
-            raise BoardError("general_task_planning_budget_insufficient", "Original governed request bound required", status_code=409)
-        exhausted = len(members) >= group.max_inference_calls or spent + bound > group.max_cost_microusd
+        exhausted = len(members) >= group.max_inference_calls
     if exhausted:
         trace_key = "general:continuation-budget:" + digest([manifest.creation_digest, manifest.group_id])
         trace = {"reason": "general_task_continuation_budget_exhausted",

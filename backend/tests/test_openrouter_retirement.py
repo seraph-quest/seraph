@@ -23,7 +23,6 @@ from src.model_fabric.configuration import (
     ModelFabricConfiguration,
     _configuration_from_payload,
     _configuration_payload,
-    deployment_spend_ceiling,
     effective_inference_lane,
     effective_provider_profiles,
     effective_workload_policy,
@@ -219,14 +218,14 @@ async def test_admission_denies_new_openrouter_and_old_unknown_still_settles(acc
     # retirement and returned no authoritative cost.
     with patch.object(retirement, "_OPENROUTER_RETIRED", False):
         setup_configuration(ceiling=100, bound=100)
-        await repository.configure_inference_accounting(100)
+        await repository.ensure_inference_ledger()
 
         async def no_cost():
             return {"id": "gen-fixture", "usage": {"prompt_tokens": 5}}
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("historical"), no_cost)
     before = await repository.inference_accounting_snapshot()
     row = before["operations"][0]
-    assert row["state"] == "unknown" and before["unknown_microusd"] == 100
+    assert row["state"] == "unknown" and before["unpriced_requests"] == 1
     calls = []
 
     async def transport():
@@ -239,13 +238,13 @@ async def test_admission_denies_new_openrouter_and_old_unknown_still_settles(acc
     # The pre-existing Unknown liability is untouched and still reconcilable.
     middle = await repository.inference_accounting_snapshot()
     assert [item["operation_id"] for item in middle["operations"]] == [row["operation_id"]]
-    assert middle["unknown_microusd"] == 100
+    assert middle["unpriced_requests"] == 1
     settled = await repository.settle_inference_cost(row["operation_id"], job_id=row["job_id"],
         expected_revision=row["revision"], actual_cost_microusd=12, evidence_digest="b" * 64,
         operator_id="operator:settings-owner", idempotency_key="retired-settlement")
     assert settled["state"] == "settled"
     after = await repository.inference_accounting_snapshot()
-    assert after["unknown_microusd"] == 0 and after["committed_microusd"] == 12
+    assert after["unpriced_requests"] == 0 and after["spent_microusd"] == 12
 
 
 @pytest.mark.asyncio
@@ -262,7 +261,7 @@ async def test_retired_denial_on_every_broker_entry_leaves_no_waiter_or_lease(ac
     from tests.test_inference_accounting import request, setup_configuration
     with patch.object(retirement, "_OPENROUTER_RETIRED", False):
         setup_configuration()
-        await DurableJobRepository().configure_inference_accounting(1000)
+        await DurableJobRepository().ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
 
@@ -311,22 +310,25 @@ def test_lane_migration_is_pure_and_copies_values():
         max_queued=8, max_outstanding_per_owner=4, max_retries=1)
     frozen = repr(setup)
     lane = migrate_inference_lane(setup, None)
-    assert lane == InferenceLaneConfig(spend_ceiling_microusd=25_000, max_queued=8, max_inflight=1,
+    # The lane copies only queue bounds (#1284): no amount is migrated.
+    assert lane == InferenceLaneConfig(max_queued=8, max_inflight=1,
         max_outstanding_per_owner=4, max_retries=1)
     assert repr(setup) == frozen
     assert migrate_inference_lane(None, None) is None
     configured = ModelFabricConfiguration(status="ready", openrouter_setup=setup)
     assert effective_inference_lane(configured) == lane
     payload = _configuration_payload(replace(configured, inference_lane=lane))
-    assert payload["inference_lane"] == asdict(lane)
+    assert payload["inference_lane"] == {key: value for key, value in asdict(lane).items()
+        if key not in ("spend_ceiling_microusd", "request_reserve_review_microusd")}
     assert _configuration_from_payload(payload).inference_lane == lane
+    assert "spend_ceiling_microusd" not in payload["inference_lane"]
     for malformed in ({**asdict(lane), "extra": 1}, {**asdict(lane), "max_inflight": 2},
-            {**asdict(lane), "spend_ceiling_microusd": True}, {k: v for k, v in asdict(lane).items() if k != "max_retries"}):
+            {**asdict(lane), "spend_ceiling_microusd": True}):
         with pytest.raises(ValueError):
             _configuration_from_payload({**payload, "inference_lane": malformed})
-    # The lane owns the ceiling once published; a retired OpenRouter ceiling is readback.
-    published = replace(configured, inference_lane=replace(lane, spend_ceiling_microusd=30_000))
-    assert deployment_spend_ceiling(published) == 30_000
+    # A legacy stored lane amount is read past and written back unchanged.
+    legacy = replace(lane, spend_ceiling_microusd=30_000)
+    assert _configuration_from_payload({**payload, "inference_lane": asdict(legacy)}).inference_lane == legacy
 
 
 def test_route_scoped_revoke_keeps_readable_state():
@@ -362,7 +364,7 @@ async def test_lane_publication_preserves_ledger_and_revokes_openrouter_routes(c
     before = await durable_job_repository.inference_accounting_snapshot()
     configured = read_model_fabric_configuration()
     assert configured.inference_lane is None
-    assert effective_inference_lane(configured) == InferenceLaneConfig(spend_ceiling_microusd=25_000,
+    assert effective_inference_lane(configured) == InferenceLaneConfig(
         max_queued=8, max_inflight=1, max_outstanding_per_owner=4, max_retries=1)
     # Reading (and admission configuration) never writes: the migration is pure.
     effective_provider_profiles({})
@@ -372,7 +374,7 @@ async def test_lane_publication_preserves_ledger_and_revokes_openrouter_routes(c
     assert path.read_bytes() == stored
 
     payload = (await client.get("/api/settings/model-fabric")).json()
-    assert payload["inference_lane"]["published"] is False and payload["inference_lane"]["max_queued"] == 8
+    assert read_model_fabric_configuration().inference_lane is None and payload["inference_lane"]["max_queued"] == 8
     assert payload["openrouter_setup"]["status"] == "retired"
     assert payload["openrouter_setup"]["error_code"] == OPENROUTER_RETIRED_REASON
     assert payload["provider_retirement"]["openrouter"]["settlement_available"] is True
@@ -401,43 +403,48 @@ async def test_lane_publication_preserves_ledger_and_revokes_openrouter_routes(c
     assert active.openrouter_setup.routes["text"].model_id == configured.openrouter_setup.routes["text"].model_id
     assert active.openrouter_setup.credential_fingerprint == configured.openrouter_setup.credential_fingerprint
     after = await durable_job_repository.inference_accounting_snapshot()
-    for field in ("status", "ceiling_microusd", "deployment_id", "ledger_digest", "operations",
-            "unknown_microusd", "committed_microusd"):
+    for field in ("status", "deployment_id", "ledger_digest", "operations",
+            "spent_microusd", "unpriced_requests"):
         assert after.get(field) == before.get(field), field
-    assert published.json()["inference_lane"]["published"] is True
+    assert read_model_fabric_configuration().inference_lane is not None
+    assert "spend_ceiling_microusd" not in published.json()["inference_lane"]
 
-    # The lane owns the ceiling; changing it reconfigures the same ledger.
+    # A lane save from an older client still carrying an amount is accepted;
+    # the amount is dropped and the same ledger is kept (#1284).
     raised = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 5,
-        "inference_lane": {"spend_ceiling_microusd": 30_000}})
+        "inference_lane": {"spend_ceiling_microusd": 30_000, "max_queued": 6}})
     assert raised.status_code == 200, raised.text
+    assert "spend_ceiling_microusd" not in raised.json()["inference_lane"]
     final = read_model_fabric_configuration()
-    assert final.inference_lane.spend_ceiling_microusd == 30_000 and deployment_spend_ceiling(final) == 30_000
+    assert final.inference_lane.spend_ceiling_microusd is None and final.inference_lane.max_queued == 6
     snapshot = await durable_job_repository.inference_accounting_snapshot()
-    assert snapshot["ceiling_microusd"] == 30_000 and snapshot["deployment_id"] == before["deployment_id"]
+    assert snapshot["deployment_id"] == before["deployment_id"]
     stale = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 5,
-        "inference_lane": {"spend_ceiling_microusd": 30_000}})
+        "inference_lane": {"max_queued": 6}})
     assert stale.status_code == 409
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_near_text_mirrors_lane_ceiling_and_keeps_routing(client, model_fabric_workspace, keyless_openrouter):
+async def test_near_text_keeps_routing_across_lane_publication(client, model_fabric_workspace, keyless_openrouter):
     from src.model_fabric.effective_policy import current_near_text_policy
     from tests.test_near_text_setup_api import save
     assert (await save(client, 1, api_key="sk-near-kept")).status_code == 200
     configured = read_model_fabric_configuration()
-    assert configured.inference_lane == InferenceLaneConfig(spend_ceiling_microusd=25_000)
+    # NEAR text no longer mirrors a lane ceiling (#1284): no lane is invented.
+    assert configured.inference_lane is None
+    assert configured.near_text.spend_ceiling_microusd is None
     lane = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3,
         "inference_lane": {"spend_ceiling_microusd": 40_000}})
     assert lane.status_code == 200, lane.text
     active, digest = current_near_text_policy()
     assert len(digest) == 64
-    assert active.near_text.spend_ceiling_microusd == 40_000 and deployment_spend_ceiling(active) == 40_000
+    assert active.near_text.spend_ceiling_microusd is None and active.inference_lane.spend_ceiling_microusd is None
     assert active.near_text.plaintext_egress_consent_revision == active.egress_revision
     assert lane.json()["near_text"]["status"] == "configured"
-    mismatch = await save(client, 5, spend_ceiling_microusd=25_000)
-    assert mismatch.status_code == 409 and mismatch.json()["detail"] == "deployment_spend_ceiling_mismatch"
-    assert (await save(client, 5, spend_ceiling_microusd=40_000)).status_code == 200
+    # A NEAR save carrying any old amount is accepted; nothing is compared.
+    assert (await save(client, 5, spend_ceiling_microusd=25_000)).status_code == 200
+    assert read_model_fabric_configuration().near_text.spend_ceiling_microusd is None
 
 
 # ── Operator surfaces ────────────────────────────────────────────
@@ -528,7 +535,7 @@ async def test_boot_publishes_route_revoke_once_without_touching_ledger(client, 
     near, _digest = current_near_text_policy()
     assert near.near_text.plaintext_egress_consent_revision == revoked.egress_revision
     after = await durable_job_repository.inference_accounting_snapshot()
-    for field in ("ceiling_microusd", "deployment_id", "ledger_digest", "revision", "operations"):
+    for field in ("spent_microusd", "deployment_id", "ledger_digest", "revision", "operations"):
         assert after.get(field) == before.get(field), field
 
     path = model_fabric_workspace / "model-fabric-settings.json"
@@ -560,42 +567,6 @@ async def test_boot_revoke_failure_is_visible_and_never_crashes(client, model_fa
     assert status["provider_retirement"]["openrouter"]["route_revoke"]["status"] == "degraded"
     # Retirement still holds at every route without the stored revoke.
     assert effective_workload_policy("chat_agent").allowed_provider_kinds == ()
-
-
-@pytest.mark.asyncio
-async def test_lane_reserve_review_unblocks_openrouter_only_overrun(accounting_db):
-    from fastapi import HTTPException
-    from src.api.model_fabric_settings import ModelFabricConfigurationRequest, _put_inference_lane
-    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
-    from src.workflows.job_runtime import DurableJobRepository
-    from tests.test_inference_accounting import request, setup_configuration
-    repository = DurableJobRepository()
-    with patch.object(retirement, "_OPENROUTER_RETIRED", False):
-        setup_configuration(ceiling=1000, bound=1)
-        await repository.configure_inference_accounting(1000)
-
-        async def charged():
-            return {"usage": {"cost": "0.0000051"}}
-        await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("over-bound"), charged)
-    assert (await repository.inference_accounting_snapshot())["overrun_max_cost_microusd"] == 6
-    persisted = read_model_fabric_configuration()
-
-    def body(**lane):
-        return ModelFabricConfigurationRequest(expected_policy_revision=persisted.egress_revision,
-            inference_lane={"spend_ceiling_microusd": 1000, **lane})
-    with pytest.raises(HTTPException) as refused:
-        await _put_inference_lane(body(), persisted)
-    assert refused.value.status_code == 409 and refused.value.detail["code"] == "request_bound_below_overrun"
-    with pytest.raises(HTTPException):
-        await _put_inference_lane(body(request_reserve_review_microusd=5), persisted)
-    assert read_model_fabric_configuration().inference_lane is None
-    payload = await _put_inference_lane(body(request_reserve_review_microusd=6), persisted)
-    active = read_model_fabric_configuration()
-    assert active.inference_lane.request_reserve_review_microusd == 6
-    assert payload["inference_lane"]["published"] is True
-    snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["overrun_max_cost_microusd"] == 0 and snapshot["status"] == "ready"
-    assert snapshot["committed_microusd"] == 6
 
 
 @pytest.mark.asyncio

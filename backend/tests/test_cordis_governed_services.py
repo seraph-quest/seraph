@@ -21,7 +21,6 @@ import pytest
 
 from tests.cordis_research import needs_cordis, package_variant, research_host
 from tests.test_inference_accounting import accounting_db  # noqa: F401
-from tests.support.sync import assert_blocked
 from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa: F401
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
@@ -245,7 +244,7 @@ async def test_one_broker_preserves_priority_cancellation_and_unknown_cost(accou
         snapshot = await jobs.inference_accounting_snapshot()
         unresolved = [row for row in snapshot["operations"] if row["operation_id"].startswith("remote:cordis-svc:")
                       and row["state"] == "unknown"]
-        assert len(unresolved) == 1 and snapshot["unknown_microusd"] > 0
+        assert len(unresolved) == 1 and snapshot["unpriced_requests"] == 1
         assert model.calls.count("cordis-lost") == 1
 
 
@@ -555,7 +554,6 @@ async def test_late_and_cancelled_capability_results_are_settled_and_recoverable
 
 
 async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting_db, real_auth, monkeypatch):  # noqa: F811
-    import time as clock
     from src.runtime_plugins import governed_services
     from src.runtime_plugins.governed_services import execute_native_inference
     from src.vault.repository import vault_repository
@@ -607,29 +605,23 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
         assert is_near_operation(chat_usage[0]["runtime_path"], chat_usage[0]["profile_id"]), chat_usage
         monkeypatch.setattr(governed_services, "CORDIS_INFERENCE_PER_OWNER", 4)
 
-        # Unknown cost: by broker design an uncertain provider result keeps the serial slot
-        # until it is reconciled, so the next request (Cordis or chat) waits rather than
-        # risking double spend; once reconciled it proceeds.
+        # Uncertain outcome: the caller still gets a block and adopts nothing,
+        # but a callback that has returned frees the lane and the owner slot
+        # at once (#1284), so the next request proceeds without a reconcile.
         model.script["lane-lost"] = {"lost": True}
         with pytest.raises(NativeServiceBlocked):
             await execute_native_inference(operator=env["operator"], purpose="interactive", messages=_messages("lane-lost"),
                                            max_tokens=64, idempotency_key="lane-lost", host=env["host"])
         lost_job = (await _governed_jobs(jobs))[-1]
         held = broker.receipt_for("remote:" + lost_job["job_id"])
-        assert held.status == "blocked" and held.reconciliation_required
-        after = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="interactive",
-            messages=_messages("lane-after-lost"), max_tokens=64, idempotency_key="lane-after", host=env["host"]))
-        assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 6))
-        def after_queued():
-            with broker._condition:
-                return [item for item in broker._queue if item.startswith("remote:cordis-svc:")]
-        # Observed parked in the serial admission queue behind the held,
-        # reconciliation-required slot, not merely slow.
-        await assert_blocked(after, at=after_queued, what="request after an unknown-cost result waits for reconcile")
-        assert "lane-after-lost" not in model.calls and not after.done()
-        await broker.reconcile(held.operation_id, owner_id=held.owner_id, job_id=held.job_id,
-                               fencing_token=held.fencing_token, outcome="failed", actual_cost_microusd=2)
-        assert (await after)["job"]["status"] == "succeeded" and "lane-after-lost" in model.calls
+        assert held.status == "blocked" and not held.reconciliation_required
+        after = await execute_native_inference(operator=env["operator"], purpose="interactive",
+            messages=_messages("lane-after-lost"), max_tokens=64, idempotency_key="lane-after", host=env["host"])
+        assert after["job"]["status"] == "succeeded" and "lane-after-lost" in model.calls
+        from src.model_fabric.gpu_admission import GpuAdmissionLeaseError
+        with pytest.raises(GpuAdmissionLeaseError):
+            await broker.reconcile(held.operation_id, owner_id=held.owner_id, job_id=held.job_id,
+                                   fencing_token=held.fencing_token, outcome="failed")
 
 
 async def test_identity_check_covers_case_insensitive_spellings_and_redaction_covers_multiline_and_non_ascii(accounting_db, real_auth, monkeypatch):  # noqa: F811

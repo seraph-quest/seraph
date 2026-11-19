@@ -30,15 +30,15 @@ async def _charge(cost):
     return provider
 
 
-async def _ledger(root, *, ceiling=1000, operations=(("op-a", "0.000020"), ("op-c", "0.000030"), ("op-b", "0.000150")), fillers=0):
-    """Settled calls; by default op-b (last) overran its 100 µUSD bound (the overrun latch).
+async def _ledger(root, *, operations=(("op-a", "0.000020"), ("op-c", "0.000030"), ("op-b", "0.000150")), fillers=0):
+    """Settled calls; op-b (last) charges more than the legacy stored 100 µUSD bound.
 
     ``fillers`` 1 µUSD calls come first, so with 128 of them the named rows
     fall outside the 128 operations a status snapshot lists (and re-checks).
     """
-    setup_configuration(ceiling=ceiling, bound=100)
+    setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(ceiling)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     for index in range(fillers):
         await broker.execute(request(f"fill-{index:03d}", owner=f"service:fill-{index:03d}"), await _charge("0.000001"))
@@ -89,11 +89,14 @@ def test_incremental_totals_equal_recomputed_totals_under_random_writes(seed):
         codec.apply_ledger_contribution(totals, post, 1)
         rows[post["operation_id"]] = post
         assert totals == codec.ledger_totals(rows.values())
+        assert totals["schema_version"] == codec.LEDGER_TOTALS_VERSION == 2 and "overruns" not in totals
+        # The displayed figures: settled spend per month and unpriced requests.
         period = rng.choice(["2026-08", "2026-09", "2026-10"])
-        expected = sum(row["bound_microusd"] if row["state"] in {"reserved", "contact_started", "unknown"}
-            else (row["actual_cost_microusd"] or 0) if row["state"] == "settled" and row["period_id"] >= period else 0
-            for row in rows.values())
-        assert codec.held_microusd(totals, period) == expected
+        spent = sum(row["actual_cost_microusd"] or 0 for row in rows.values()
+            if row["state"] == "settled" and row["period_id"] == period)
+        assert totals["settled_by_period"].get(period, 0) == spent
+        for state in ("reserved", "contact_started", "unknown"):
+            assert totals["open_rows_by_state"][state] == sum(row["state"] == state for row in rows.values())
 
 
 def test_row_digest_normalises_aware_and_naive_utc_datetimes():
@@ -121,13 +124,14 @@ async def test_digest_at_flush_matches_reloaded_raw_rows_and_writes_are_v2(accou
     assert codec.is_v2_digest(account["ledger_digest"])
     assert codec.ledger_digest(account, raw) == account["ledger_digest"]
     assert json.loads(account["ledger_totals_json"]) == codec.ledger_totals(raw)
+    assert json.loads(account["ledger_totals_json"])["schema_version"] == 2
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["reason_code"] == "provider_charge_exceeded_reservation"
-    assert snapshot["committed_microusd"] == 200 and snapshot["operation_count"] == 3
+    assert snapshot["status"] == "ready" and snapshot["reason_code"] is None
+    assert snapshot["spent_microusd"] == 200 and snapshot["operation_count"] == 3
 
 
 def _assert_immediately_blocked(snapshot_value, admission):
-    assert snapshot_value["status"] == "blocked" and snapshot_value["reason_code"] == "accounting_continuity_unavailable"
+    assert snapshot_value["status"] == "unavailable" and snapshot_value["reason_code"] == "accounting_continuity_unavailable"
     assert "accounting_continuity_unavailable" in admission
 
 
@@ -189,33 +193,32 @@ async def test_witness_rollback_and_database_swap_block_the_next_operation(accou
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["lower_settled_actual", "settled_to_released", "older_period",
-                                    "overrun_actual_lowered", "overrun_bound_raised"])
-async def test_content_edits_to_untouched_rows_never_change_admission_and_fail_full_verification(accounting_db, monkeypatch, tamper):
-    """R1: editing history cannot free capacity or clear the overrun latch (ADR-006)."""
+                                    "large_charge_actual_lowered", "legacy_bound_raised"])
+async def test_content_edits_to_untouched_rows_never_change_the_view_and_fail_full_verification(accounting_db, monkeypatch, tamper):
+    """R1: editing history cannot change what is shown, and full verification latches (ADR-006)."""
     root, _engine, _factory = accounting_db
-    overrun = tamper.startswith("overrun")
+    large = tamper in {"large_charge_actual_lowered", "legacy_bound_raised"}
     # 128 fillers keep the tampered row out of the snapshot's re-checked list,
-    # so only the sealed totals stand between the edit and admission.
-    operations = (("op-b", "0.000150"),) if overrun else (("op-c", "0.000090"),)
-    repository, broker = await _ledger(root, ceiling=300, operations=operations, fillers=128)
+    # so only the sealed totals stand between the edit and the view.
+    operations = (("op-b", "0.000150"),) if large else (("op-c", "0.000090"),)
+    repository, broker = await _ledger(root, operations=operations, fillers=128)
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)  # the oracle assumes no tampering
-    expected = "provider_charge_exceeded_reservation" if overrun else "deployment_cost_budget_exhausted"
-    assert expected in await _admission(broker, "op-before")
+    assert await _admission(broker, "op-before") == "admitted"
     before = await repository.inference_accounting_snapshot()
     edits = {
         "lower_settled_actual": "UPDATE inference_cost_reservations SET actual_cost_microusd = 0 WHERE operation_id = 'op-c'",
         "settled_to_released": "UPDATE inference_cost_reservations SET state = 'released' WHERE operation_id = 'op-c'",
         "older_period": "UPDATE inference_cost_reservations SET period_id = '2000-01' WHERE operation_id = 'op-c'",
-        "overrun_actual_lowered": "UPDATE inference_cost_reservations SET actual_cost_microusd = 10 WHERE operation_id = 'op-b'",
-        "overrun_bound_raised": "UPDATE inference_cost_reservations SET bound_microusd = 1000 WHERE operation_id = 'op-b'",
+        "large_charge_actual_lowered": "UPDATE inference_cost_reservations SET actual_cost_microusd = 10 WHERE operation_id = 'op-b'",
+        "legacy_bound_raised": "UPDATE inference_cost_reservations SET bound_microusd = 1000 WHERE operation_id = 'op-b'",
     }
     _sql(root, edits[tamper])
-    # Status and admission read only the sealed totals: capacity and the
-    # overrun latch are exactly as before the edit.
+    # Status reads only the sealed totals: the shown figures are exactly as
+    # before the edit.
     during = await repository.inference_accounting_snapshot()
-    for key in ("status", "committed_microusd", "reserved_microusd", "remaining_microusd", "reason_code", "overrun_max_cost_microusd"):
+    for key in ("status", "spent_microusd", "unpriced_requests", "operation_count", "reason_code"):
         assert during[key] == before[key], key
-    assert expected in await _admission(broker, "op-during")
+    assert await _admission(broker, "op-during") == "admitted"
     # Full verification (background verifier, then the in-lock re-check)
     # detects the edit and latches accounting for this process.
     monkeypatch.setattr("config.settings.settings.workspace_dir", str(root))
@@ -239,7 +242,7 @@ async def test_listed_row_edits_are_caught_by_the_status_read(accounting_db, mon
 async def test_stale_full_verification_runs_inline_at_admission(accounting_db, monkeypatch):
     """R7: past 2× the interval, admission verifies in full before admitting."""
     root, _engine, _factory = accounting_db
-    repository, broker = await _ledger(root, ceiling=10_000, operations=(("op-a", "0.000020"),), fillers=128)
+    repository, broker = await _ledger(root, operations=(("op-a", "0.000020"),), fillers=128)
     monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
     _sql(root, "UPDATE inference_cost_reservations SET actual_cost_microusd = 0 WHERE operation_id = 'op-a'")
     assert await _admission(broker, "op-fresh") == "admitted"  # within the window: fast path
@@ -303,8 +306,9 @@ async def test_v1_ledger_migrates_forward_once_with_an_empty_checkpoint(accounti
     assert after[0] == revision + 1 and codec.is_v2_digest(after[1])
     assert read_accounting_checkpoint(workspace)["operations"] == []
     assert all(digest is not None for (digest,) in _sql(root, "SELECT ledger_row_digest FROM inference_cost_reservations"))
+    assert json.loads(after[2])["schema_version"] == 2
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 200 and snapshot["reason_code"] == "provider_charge_exceeded_reservation"
+    assert snapshot["spent_microusd"] == 200 and snapshot["reason_code"] is None
 
 
 @pytest.mark.asyncio

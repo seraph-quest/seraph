@@ -784,7 +784,7 @@ the Constitution and ADRs remain the target authority.
 | Operator outcome | Declared behavior and boundary |
 | --- | --- |
 | Return to work and recover interruptions | Stable ownership, separately reviewed continuity recovery, a guided first verified result and task attention controls preserve inspectable history. A fresh login does not restore expired execution grants or unknown-effect authority. |
-| Run bounded plans and research | Durable inference reservations, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, budget and recovery state. Verified child outputs gate parent adoption; uncertainty holds capacity or liability instead of triggering blind replay. |
+| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, budget and recovery state. Verified child outputs gate parent adoption; uncertainty holds capacity or liability instead of triggering blind replay. |
 | Review practical execution | Tested repository publication, finite Python/Node repair profiles, exact-site private reading and literal PDF/CSV comparison produce reviewable native receipts and readback. Host-user execution is not OS isolation; optional Linux sandbox enforcement has its own readiness gate. |
 | Use evidence in the next decision | Source-bound working sets, evidence-conflict invalidation and explicit procedure recommendations recheck current provenance. Learning requires separate review; success alone does not authorize memory change or demonstrate improved decision quality. |
 | Understand and revoke capability authority | Effective grants and coordinated revocation expose current permission. Reviewed local and authored packages bind exact versions, digests, schemas and execution profiles; unavailable isolation, quarantine or changed authority blocks new dispatch. Installation alone is not executable trust. |
@@ -818,10 +818,10 @@ lets the NEAR TEE adapter send only that exact request: any other body or
 target is refused in `prepare_near_tee_call`, before any reservation, and
 again at the precontact guard. The single-shot repair consent pins the same
 exact body and route digests. A repository-sized slot at real NEAR prices
-costs about 2.7k micro-USD per request, so the slot bound and Task/Goal limits
-must allow that (availability only). Every per-request gate (model echo,
-`x-no-aliasing`, billing readback, Unknown liability, cost bound) is
-unchanged; `near_tee_route_unsupported` is no longer produced and stays only
+costs about 2.7k micro-USD per request, so Task/Goal cost limits must allow
+that (availability only; the slot bound is gone since ADR-037, and Task/Goal
+cost limits go in the second #1284 pull request). Every other per-request gate
+(model echo, `x-no-aliasing`, billing readback) is unchanged; `near_tee_route_unsupported` is no longer produced and stays only
 as a label for Tasks already blocked with it. A NEAR TEE answer that is not adopted (for
 example `near_tee_output_truncated` for a JSON draft cut at the slot's output
 bound) settles its NEAR cost and blocks the Mail or Calendar card with that
@@ -904,10 +904,11 @@ catalog-receipt gate for `near.text` is not implemented yet.
 text slot of the model fabric, non-streaming, disabled by default. The operator
 picks one canonical model from the closed ADR-035 text allowlist, stores a
 separate write-only `vault:near_api_key` (fingerprint readback only), sets
-input/output/timeout limits and a per-request reserve within the shared
-`inference_lane` ceiling, and grants a revision-bound purpose consent with an
-explicit plaintext-to-NEAR acknowledgement. Saves use the witnessed revoke→
-accounting→activate publication with revision CAS; global revoke blocks the
+input/output/timeout limits, and grants a revision-bound purpose consent with an
+explicit plaintext-to-NEAR acknowledgement. There is no per-request reserve or
+spend ceiling ([ADR-037](./decisions/037-no-local-cost-limits.md), #1284):
+spending limits are set in the NEAR account. Saves use the witnessed revoke→
+ledger→activate publication with revision CAS; global revoke blocks the
 slot and no save resurrects revoked consent.
 
 An explicit, authenticated **catalog check** reads only NEAR's
@@ -935,8 +936,8 @@ receipt records `is_ready: null` and `readiness_basis: absent_flag_attested`
 and Settings says readiness was inferred (this is how
 `deepseek-ai/DeepSeek-V4.1-Flash-1017` passes). Dispatch re-validates the receipt locally and never
 refreshes it; a missing, failed or rebound receipt blocks the slot (age
-never does). Dispatch also needs current capability-check proofs (operator-triggered,
-cost-bounded mechanics only, through the broker and ledger). Structured
+never does). Dispatch also needs current capability-check proofs (operator-triggered
+mechanics only, through the broker and ledger). Structured
 callers (`general_task_planner`, `strategist_agent`, `session_consolidation`)
 need a current `structured_output` proof whatever NEAR's catalog lists; the
 catalog's `structured_outputs` feature is recorded as a fact, not a
@@ -947,36 +948,36 @@ slot's maximum output) when the receipt lists `reasoning`, because reasoning
 tokens count against `max_tokens`. An answer ended by the output bound with no
 content, or a JSON (`response_format`, vision) answer ended by it, fails as
 `near_tee_output_truncated` after its cost settles. For reasoning models
-Settings recommends a maximum output of at least 4096 (guidance only; the
-reserve must still cover it).
+Settings recommends a maximum output of at least 4096 (guidance only).
 
 Text routes (`completion_with_fallback`, guardian/report synthesis such as
 `end_of_day_goal_report`, `screenshot_observation_digest`, `daily_briefing`)
 reach the NEAR transport through the one shared broker, with chat priority,
-the serial bound of one and durable reservations. Requests carry the canonical
-id with `x-no-aliasing: true`; a different response model fails the call
-after its cost settles; reasoning fields are never answer text. NEAR
-`/v1/billing/costs` readback runs inside the lease; a missing cost becomes an
-Unknown liability and keeps the lane blocked until fenced manual settlement,
-which also releases the lane (tested, including after the slot is disabled).
-Checks that must hold when bytes would leave (the `x-no-aliasing` header,
-current policy, and a deadline that still leaves the billing window) run under
-the contact writer: a lease granted too late is a durable never-contacted
+the serial bound of one and one durable request record per call. Requests carry
+the canonical id with `x-no-aliasing: true`; a different response model fails
+the call after its cost is recorded; reasoning fields are never answer text.
+NEAR `/v1/billing/costs` readback runs inside the lease, best effort within the
+time left before the deadline. A charge of any size is recorded as spend and
+the answer is delivered; a missing charge records the request as "not priced
+yet". Either way the lane is released when the provider callback has finished
+and the next request is admitted (ADR-037). Checks that must hold when bytes
+would leave (the `x-no-aliasing` header, current policy, and at least one
+second left before the deadline) run under the contact writer: a lease granted too late is a durable never-contacted
 denial, not an Unknown.
 Streaming chat and tools (#1147 PR3c, **Partial**): streaming text routes
 (WebSocket direct chat, Cordis `inference.request` interactive and background
 purposes) stream through the same broker lease. Server-sent events are read
 with byte and line caps, identity encoding, no redirects and strict JSON; the
 model echo is checked on the first chunk carrying `model` (a mismatch stops the
-stream); reasoning deltas are never emitted. The stream is ended no later than
-16s before the original deadline and billing is read back after it in the same
-lease; deltas already delivered are never retracted, and a known-cost failure
-(echo mismatch, deadline cut, protocol error) settles and fails the turn. A
+stream); reasoning deltas are never emitted. Billing is read back after the
+stream in the same lease, best effort within the time left; deltas already
+delivered are never retracted, and a failure (echo mismatch, deadline cut,
+protocol error) records its cost and fails the turn. A
 caller that stops reading or is cancelled once NEAR has answered (closed
 stream, WebSocket timeout, Cordis output cap) closes the provider stream, still
 reads billing back and settles with `near_tee_stream_cancelled`; the lane is
-released (tested). A missing cost is an Unknown liability that keeps the lane
-blocked. Lightweight REST/WebSocket chat turns on the slot set their inference
+released (tested). A missing cost is recorded as "not priced yet" and does not
+hold the lane. Lightweight REST/WebSocket chat turns on the slot set their inference
 deadline 2s inside the 60s (or lower) outer turn timeout, so the stream and
 its billing finish before the outer cut; `/api/runtime/status` reports this as
 `chat_turn_cap`, and a slot timeout above the turn deadline is reported and
@@ -1016,11 +1017,11 @@ fold. Blocked chat messages are provider-neutral and the WebSocket error frame
 carries `code`, `recovery_action` and `settings_section`, rendered as an **Open
 Settings** button; the status line names the effective route ("Chat is using
 DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
-(route, accounting, proofs, chat checks, remaining budget) would block the
-turn. A new UTC month shows "Start the new month", which posts the existing
-review of the current month on the operator's click so the monthly budget
-starts again. No consent, budget or check
-semantics changed. Evidence is component and
+(route, proofs, chat checks) would block the turn. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) the card has no budget
+step or input and no month, overrun or budget state: ready reads "$X used this
+month." and Details says "Spending limits are set in your NEAR account." No
+consent or check semantics changed. Evidence is component and
 intercepted-transport tests only; the remaining tab migration is later #1280
 slices. See the [app guide](./12-current-app-guide.md#the-model-card-1280).
 
@@ -1031,18 +1032,18 @@ adapter analyses screenshots, disabled by default. The operator picks one
 model from the closed ADR-035 vision allowlist (`z-ai/glm-5.3-flash`,
 `Qwen/Qwen3.8-27B`, `Qwen/Qwen3-VL-30B-A3B-Instruct`,
 `deepseek-ai/DeepSeek-V4.1-Flash-1017`; DeepSeek's absent readiness is
-inferred from its attested, verifiable vllm record since #1167), sets limits and a per-request reserve, and grants a
+inferred from its attested, verifiable vllm record since #1167), sets limits, and grants a
 **separate screenshot purpose consent**: enabling or changing the slot needs
 both the plaintext-to-NEAR acknowledgement and an explicit acknowledgement
 that screenshots reach the NEAR gateway in plaintext; the text slot's consent
 never implies it, and an explicit `screenshot_plaintext_egress_acknowledged:
 false` withdraws it (the slot stays saved and blocked). Saves use the same
 witnessed CAS publication; a save that omits a slot keeps it. Only enabled
-slots with current consent lift a revocation or count toward reserve review.
+slots with current consent lift a revocation.
 
 The catalog check requires the image input modality for the vision slot,
-records NEAR's `structured_outputs` feature and adds a listed per-image price
-to the cost bound. Capability checks for the slot are `vision`,
+records NEAR's `structured_outputs` feature and a listed per-image price (for
+display; no cost bound since ADR-037). Capability checks for the slot are `vision`,
 `structured_output`, `health` and `latency_ms` (mechanics only). The
 `structured_output` check sends an image in the runtime's effective request
 mode (strict json_schema or prompt-JSON) and its proof records that mode;
@@ -1074,9 +1075,9 @@ request over `max_input_tokens` is blocked before contact, as is a slot
 timeout above the background job budget minus the billing window and a 10 s
 margin (94 s by default). It runs on the
 shared broker at screenshot-background priority (below chat, serial bound one)
-with NEAR billing inside the lease; a missing cost is an Unknown liability that
-blocks the lane until fenced settlement. Invalid output, an echo mismatch or an
-empty answer settle the cost and record a failed analysis; policy, consent,
+with NEAR billing inside the lease; a missing cost is recorded as "not priced
+yet" and blocks nothing. Invalid output, an echo mismatch or an
+empty answer record the cost and record a failed analysis; policy, consent,
 receipt, size and proof denials record a blocked analysis with no contact.
 
 Uploaded daemon captures and screenshot-folder images share the path: pending
@@ -1117,20 +1118,19 @@ above still blocks dispatch.
 Implemented mechanics (proven with intercepted transport and the gate lifted
 in tests only): the slot takes `Qwen/Qwen3-Embedding-0.6B` from the closed
 allowlist, a per-request input-token bound (conservatively one token per UTF-8
-byte plus overhead) and batch size (1–64), a per-request reserve, and its own
-purpose consent acknowledging that memory text reaches NEAR in plaintext. The
-catalog check requires vllm, attested, verifiable, ready, text input and an
-embedding output modality, enough context and a reserve covering maximum input
-x input price plus the one-token output bound x output price (the catalog lists
-an output price; how NEAR bills embedding output, per vector or per dimension,
-is unsourced); a stated dimension is recorded. The
+byte plus overhead) and batch size (1–64), and its own purpose consent
+acknowledging that memory text reaches NEAR in plaintext. The catalog check
+requires vllm, attested, verifiable, ready, text input and an embedding output
+modality and enough context; the listed input and output prices are recorded
+for display (how NEAR bills embedding output, per vector or per dimension, is
+unsourced); a stated dimension is recorded. The
 `embedding` capability check measures the vector dimension. Dispatch posts
 `/v1/embeddings` with the canonical id and `x-no-aliasing: true` on the
 `memory_embedding` route (background priority below chat) through the one
 broker with billing readback inside the lease; a response model or dimension
-that differs from the proof is settled and not adopted; a missing cost, or a
-response without a billing identity, is an Unknown liability that blocks the
-lane until fenced settlement.
+that differs from the proof has its cost recorded and is not adopted; a missing
+cost, or a response without a billing identity, is recorded as "not priced yet"
+and blocks nothing.
 
 Vectors live in a namespace keyed by provider `near_tee`, model, measured
 dimension and schema, never mixed with older OpenRouter vectors. Recall uses it
@@ -1150,9 +1150,10 @@ complete (`near_tee_index_changed_during_run`). The index state file is
 updated under a process lock and an exclusive file lock; the status
 projection only reads it. A vector written for a new memory counts under its
 `embedding_id`. Re-indexing is never automatic: an authenticated settings action with
-a per-run consent and spend cap starts one durable job (existing workflow job
-ledger) that embeds canonical memory in bounded batches, checkpoints each
-batch, stops at the budget, can be cancelled, resumes idempotently from the
+a per-run consent and a finite item count (`max_items`; no spend cap since
+ADR-037, an old client's `budget_microusd` is ignored) starts one durable job
+(existing workflow job ledger) that embeds canonical memory in bounded batches,
+checkpoints each batch, reports the amount spent, can be cancelled, resumes idempotently from the
 namespace contents, removes rows of memories that are no longer active, and
 records a verified local readback before success. More than 10,000 canonical
 memories leaves the index incomplete (`near_tee_reindex_over_cap`); it never
@@ -1168,14 +1169,16 @@ governed transports, embeddings, screenshot vision, the capability-check
 endpoint and screen-analysis provider selection deny new OpenRouter contact with
 `openrouter_retired` and no fallback. Retained configuration, credential,
 receipts, ledger rows, billing readback and manual settlement stay readable so
-contacted liabilities reconcile. Lane limits and the deployment ceiling moved to
+contacted liabilities reconcile. Lane limits moved to
 a provider-neutral, versioned `inference_lane` (pure migration of retained
-values; explicit witnessed publication that preserves the ledger and publishes a
+values, whose former deployment ceiling and reserve review are read past since
+ADR-037, #1284; explicit witnessed publication that preserves the ledger and publishes a
 route-scoped revoke of stored OpenRouter routes). Routes without a ready NEAR
 TEE slot are blocked and say so in runtime status and Settings.
 Provider-intercepted tests assert zero OpenRouter contact on representative
 routes; this is **Partial** pending the NEAR slices. The text below records the
-historical phase.
+historical phase; its cost bounds, ceiling and overrun latch no longer apply
+([ADR-037](./decisions/037-no-local-cost-limits.md)).
 
 This section records the accepted ordinary OpenRouter inference phase and its
 provider-free implementation contract. The ordinary route is the governed
@@ -1209,36 +1212,39 @@ are labelled as billed calls. Chat names the specific blocked reason (for
 example `proof_expired:health` → Prove route) and the composer shows proof
 expiry. Scheduled jobs that may call the text route stay ON by default with
 per-job toggles and call estimates; a disabled job makes no model call and
-reports `disabled_by_operator`. The request bound defaults to $0.50 with a
-worst-case-per-call preview, because a charge above it latches every further
-OpenRouter call until the overrun is reviewed; chat names that latch and
-distinguishes a mid-turn agent block (earlier calls reached the provider) from
-a preflight block. Settings → Telegram pairs and grants transit
+reports `disabled_by_operator`. Chat distinguishes a mid-turn agent block
+(earlier calls reached the provider) from a preflight block. The former $0.50
+request bound and its overrun latch were removed by ADR-037 (#1284). Settings → Telegram pairs and grants transit
 consent over the existing API. Offline tests intercept all inference; a real
 OpenRouter session remains externally unverified. See the
 [current app guide](./12-current-app-guide.md#daily-use-readiness-1068).
 
-Deployment inference accounting remains **Partial**. The canonical durable job
-repository owns finite reservations, immutable UTC-month attribution, account
-usage settlement, and unknown liabilities that carry across rollover and
-restore. The existing remote broker remains the sole serial executor. Paid
+Deployment inference accounting remains **Partial**. Since #1284
+([ADR-037](./decisions/037-no-local-cost-limits.md)) it records spend and
+applies no cost limit: there is no spend ceiling, per-request reserve, monthly
+period review, overrun latch or budget state, and spending limits are set in
+the NEAR account. The canonical durable job repository owns one request record
+per provider call (at-most-once execution, the consent revision rechecked at
+contact, durable contact denial, the recorded charge), its UTC-month stamp for
+display, and charges NEAR has not priced yet, which hold nothing. Ledger totals
+are sealed at schema version 2 on first start; an older build refuses them, so
+rollback needs a database from before the upgrade. The existing remote broker remains the sole serial executor. Paid
 execution on revisions containing the reviewed
 [#1031](https://github.com/seraph-quest/seraph/issues/1031) repair includes durable
-settlement and canonical readback before that serial lease can release; failure
-retains its existing reconciliation hold. Scripted local receipts establish the
-async/sync/stream ordering and preserve original debt, deadline and denied-contact
-proof, without external inference or provider-availability claims. Paid
-egress requires a retained lifecycle witness outside root snapshots; stale or
-missing continuity blocks inference while deterministic CPU features remain
-usable. Settings exposes exact-operation manual reconciliation, explicitly
-marked externally unverified, without restoring job or grant authority. Live
-admission also requires exact review of every changed observed UTC month;
-clock correction conservatively retains future charges. Stable profile root
-binding and witnessed policy epochs prevent fresh-root budget bootstrap and
-archived egress reactivation. After a local workspace root move, the stopped
+settlement and canonical readback before that serial lease can release; since
+ADR-037 a missing charge no longer holds the lease. Scripted local receipts establish the
+async/sync/stream ordering and preserve the recorded charge, deadline and
+denied-contact proof, without external inference or provider-availability
+claims. Paid egress requires a retained lifecycle witness outside root
+snapshots; stale or missing continuity still blocks inference on this branch
+while deterministic CPU features remain usable (that block becomes a recorded
+history gap in the second #1284 pull request; do not release between the two).
+Settings exposes an optional "record the charge" action for one request, marked
+externally unverified, that only records a charge. A new UTC month needs no
+review. Stable profile root binding and witnessed policy epochs prevent
+archived egress reactivation (a consent fence). After a local workspace root move, the stopped
 local stack rebinds with `./manage.sh -e dev local accounting-rebind`
-([#1277](https://github.com/seraph-quest/seraph/issues/1277)). Overruns require explicit adequate reserve review
-bound to already-settled operation sequence/revision. Live
+([#1277](https://github.com/seraph-quest/seraph/issues/1277)). Live
 provider charges and managed Docker mount operation remain unverified until
 separate operator-authorised operational receipts exist.
 

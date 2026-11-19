@@ -1360,7 +1360,7 @@ _STABLE_REASON_CODES = frozenset(
         "dependency_unfinished",
         "dispatcher_failure",
         "execution_blocked",
-        "near_cost_readback_required",
+        "near_answer_unavailable",
         "near_owner_outstanding_limit",
         "executor_missing",
         "executor_lane_mismatch",
@@ -1418,17 +1418,13 @@ _CAPABILITY_MODEL_ROUTES = {
 
 
 def _near_known_cost_failure(exc: BaseException) -> str | None:
-    """The NEAR TEE code of a settled known-cost failure in ``exc``'s chain.
-
-    An Unknown liability (``near_tee_cost_liability``) is never returned: it
-    stays on the reconciliation path.
-    """
+    """The NEAR TEE code of a completed provider failure in ``exc``'s chain."""
     from src.model_fabric.near_tee import NearTeeError
     seen = 0
     current: BaseException | None = exc
     while current is not None and seen < 4:
         if isinstance(current, NearTeeError):
-            return None if current.code == "near_tee_cost_liability" else current.code
+            return current.code
         current = current.__cause__ or current.__context__
         seen += 1
     return None
@@ -1459,10 +1455,9 @@ def _strategist_model_route_ready(policy: Any) -> bool:
     """
     from src.model_fabric.retirement import openrouter_retired
     provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
-    ceiling = getattr(policy, "max_cost_microusd", None)
     allowed = ({"near_tee"},) if openrouter_retired() else ({"near_tee"}, {"openrouter"})
-    return (not bool(getattr(policy, "fallback_allowed", False)) and provider_kinds in allowed
-        and not isinstance(ceiling, bool) and isinstance(ceiling, int) and ceiling > 0)
+    # ADR-037 (#1284): availability never depends on a cost ceiling.
+    return not bool(getattr(policy, "fallback_allowed", False)) and provider_kinds in allowed
 
 
 def _capability_route_block(capability: str, model_route: str) -> str | None:
@@ -4734,9 +4729,6 @@ class WorkBoardDispatcher:
                         decision, _proofs = await _governed_preflight_target_async(target, context)
                         if decision is None or not decision.allowed:
                             return "research_model_route_unavailable", "The fixed research route needs current governed capability proof"
-                    snapshot = await self.jobs.inference_accounting_snapshot()
-                    if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
-                        return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
                     return None, None
                 if capability == "inference.near-text.v1":
                     from src.model_fabric.effective_policy import current_near_text_policy
@@ -8045,7 +8037,8 @@ class WorkBoardDispatcher:
                     route_block=True,
                 )
             policy = effective_workload_policy("strategist_agent")
-            ceiling = getattr(policy, "max_cost_microusd", None)
+            # Recorded job budget only (ADR-037): no route carries a ceiling.
+            ceiling = 0
             if not _strategist_model_route_ready(policy):
                 raise BoardError(
                     "mail_model_route_unavailable",
@@ -8066,8 +8059,6 @@ class WorkBoardDispatcher:
                 if communication_binding.source_job_id != job_id:
                     raise DurableJobIdempotencyConflict("Original communication source identity changed")
                 authority["communication_preparation"] = binding_authority(communication_binding)
-                if communication_binding.budget_microusd > int(ceiling):
-                    raise BoardError("communication_source_budget_changed", "Original source budget exceeds the current model route", status_code=409)
                 ceiling = communication_binding.budget_microusd
             authority_digest = _safe_digest(authority)
             if admission_only:
@@ -8466,7 +8457,8 @@ class WorkBoardDispatcher:
                     route_block=True,
                 )
             policy = effective_workload_policy("strategist_agent")
-            ceiling = getattr(policy, "max_cost_microusd", None)
+            # Recorded job budget only (ADR-037): no route carries a ceiling.
+            ceiling = 0
             if not _strategist_model_route_ready(policy):
                 raise BoardError(
                     "calendar_model_route_unavailable",
@@ -8518,8 +8510,6 @@ class WorkBoardDispatcher:
                 if communication_binding.source_job_id != job_id:
                     raise DurableJobIdempotencyConflict("Original communication source identity changed")
                 authority["communication_preparation"] = binding_authority(communication_binding)
-                if communication_binding.budget_microusd > int(ceiling):
-                    raise BoardError("communication_source_budget_changed", "Original source budget exceeds the current model route", status_code=409)
                 ceiling = communication_binding.budget_microusd
             def expected_calendar_authority() -> dict[str, Any]:
                 expected = calendar_authority(task=task, attempt=attempt)

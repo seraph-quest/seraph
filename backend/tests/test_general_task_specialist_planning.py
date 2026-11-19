@@ -136,7 +136,7 @@ async def test_actual_callback_drift_after_reserve_denies_scripted_contact(task_
             await planner.propose_specialist(db, owner, group=group, binding=binding,
                 task_input=inputs, descriptors=descriptors, original_provenance=provenance, request_key="drift")
         rows = list((await db.execute(select(InferenceCostReservation))).scalars())
-        assert len(rows) == 1 and rows[0].contact_started_at is None and rows[0].bound_microusd == 100
+        assert len(rows) == 1 and rows[0].contact_started_at is None and rows[0].bound_microusd == 0
     assert transport["contacts"] == []
 
 
@@ -171,5 +171,5 @@ async def test_actual_specialist_child_cap_and_unknown_debt_cannot_reset_group(t
         with pytest.raises(InferenceAccountingError, match="group_unknown"):
             await reserve_entry(db, run, rows, {"group":group,"role":"specialist",**binding},
                 operation_id="forbidden-restart-call", bound=100, runtime_path="general_task_planner")
-        assert len(rows) == 1 and rows[0].state == "unknown" and rows[0].bound_microusd == 100
+        assert len(rows) == 1 and rows[0].state == "unknown" and rows[0].bound_microusd == 0
     assert len(transport["contacts"]) == 1

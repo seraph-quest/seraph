@@ -150,15 +150,9 @@ async def invoke_near_text(*, context: InferenceRequestContext, question: str,
             evidence = await read_near_billing(client, key=key, identity=identity,
                 operation_id=operation_id, deadline_at=context.deadline_at, no_aliasing=True,
                 error=NearTextError, prefix="near_text", capture=capture_near_billing_evidence)
-            if evidence is None:
-                text = None
-                raise NearTextError("near_text_cost_liability")
             if answer_invalid:
                 text = None
                 raise NearTextError("near_text_answer_invalid") from None
-            if evidence.cost_microusd > setup.request_cost_bound_microusd:
-                text = None
-                raise NearTextError("near_text_cost_overrun")
             await validate_current()
             _, adoption_policy = current_near_text_policy()
             if adoption_policy != policy_digest or time.time() >= context.deadline_at:
@@ -167,9 +161,13 @@ async def invoke_near_text(*, context: InferenceRequestContext, question: str,
             return NearTextAnswer(text, NearTextReceipt(job_id=context.job_id, request_id=context.request_id,
                 operation_id=operation_id, input_digest=context.data_digest,
                 output_digest=hashlib.sha256(text.encode()).hexdigest(), policy_digest=policy_digest,
-                provider_request_id=provider_id, cost_microusd=evidence.cost_microusd,
-                cost_nano_usd=evidence.cost_nano_usd,
-                billing_response_digest=evidence.response_sha256,
+                provider_request_id=provider_id,
+                # ADR-037 (#1284): delivered whether or not NEAR priced it.
+                cost_microusd=evidence.cost_microusd if evidence is not None else None,
+                cost_nano_usd=evidence.cost_nano_usd if evidence is not None else None,
+                billing_response_digest=evidence.response_sha256 if evidence is not None else None,
+                cost_source="near_billing_costs" if evidence is not None else None,
+                cost_state="settled" if evidence is not None else "not_priced",
                 cost_reference=operation_id))
 
     return await run_preflighted_adapter(context=bound_context, decision=decision, adapter=adapter, hooks=hooks)

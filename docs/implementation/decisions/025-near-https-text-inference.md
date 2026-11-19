@@ -7,6 +7,8 @@ title: "ADR-025: Optional NEAR HTTPS text inference"
 
 **Status:** Accepted under [#959](https://github.com/seraph-quest/seraph/issues/959), effective on the independently reviewed milestone merge to `develop`. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits. Provider access remains disabled by default and requires current explicit authority.
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Superseded/absorbed:** [ADR-035](./035-near-tee-hosted-inference-only.md) absorbs this capability: it stays a separate native Work capability, rebased on the shared NEAR client with `x-no-aliasing`, the response model echo and the catalog receipt gate, until folded into the NEAR TEE text slot by explicit operator action. Statements below that ordinary routing stays OpenRouter-only are historical.
 
 **Decision class:** Narrow exception to ADR-006 for one optional native capability. ADR-024's three OpenRouter slots and ordinary model routing remain unchanged.
@@ -43,6 +45,10 @@ spend_ceiling_microusd strict integer 1..1_000_000_000,
 credential_ref fixed `vault:near_text_api_key`, server credential_fingerprint,
 server plaintext_egress_consent_revision. Request reserve must not exceed ceiling.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) removes `request_cost_bound_microusd`, `spend_ceiling_microusd`
+and the reserve-within-ceiling rule from this setup. Stored values are read
+past and dropped on the next save.
+
 `NearTextSetupInput` uses SecretStr for optional write-only api_key; otherwise
 matching editable fields and exactly `plaintext_provider_egress_acknowledged`
 (strict bool, false default). Fingerprint/ref/consent revision are not writable.
@@ -69,6 +75,9 @@ When OpenRouter exists, mismatching NEAR save returns 409. Persisted mismatch
 degrades configuration. Near-only bootstrap uses the existing genuinely-empty
 accounting lifecycle/witness, never creates another ledger or resets liabilities.
 An explicit OpenRouter shared-ceiling edit synchronizes the NEAR mirror.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** The shared ceiling and its mirror are superseded by [ADR-037](./037-no-local-cost-limits.md); nothing is
+mirrored or compared.
 
 One global policy epoch and revoke fence govern both providers. NEAR grants
 explicitly disclose that global revoke affects OpenRouter and NEAR; preserve
@@ -156,6 +165,12 @@ token-price estimates. Billing after contact may
 settle original liability using captured credentials; revocation cannot authorize
 new inference or result adoption. Original deadlines still bound billing.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the reserve, Unknown-liability and overrun clauses of
+this paragraph. An answer is delivered once NEAR returns it, whatever its
+charge; a missing charge records the request as "not priced yet" and holds
+nothing. The `cost_liability` status stops being produced for new work in the
+second #1284 pull request.
+
 The native owner implements `work_board/near_text_native.py`, native registration/dispatcher/parser,
 direct identity/input/authority/fingerprint/readback and authenticated GET
 `/api/work-board/tasks/{task_id}/near-text/output`. It uses current owner/Root/Goal,
@@ -180,6 +195,12 @@ zero external contact. Existing native accepted/queued/running/succeeded readbac
 feeds existing Work Review/Done human-review transitions, never automatic LLM
 answer-accuracy approval. Unknown native cost_liability retains ledger Unknown
 and projects task blocked with `near_cost_readback_required`, without answer artifact.
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).**
+[ADR-037](./037-no-local-cost-limits.md) supersedes the previous sentence. An answer
+NEAR returned is delivered whether or not its cost is reported; the request
+record stays `unknown` (not priced yet). A task without an answer, for example
+after a timeout or failure once NEAR was contacted, is blocked with
+`near_answer_unavailable`.
 
 Billing source: official nearai/docs commit
 `021296c01f593e9d0521ce7a227247ce0c7f9000`, dated October 5 and read October 7, 2026.

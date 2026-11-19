@@ -105,8 +105,7 @@ NEAR_TEE_ROUTE_UNSUPPORTED_LABEL = ("This capability is not yet available on NEA
 # closed set a vertical route block can carry.
 NEAR_TEE_SLOT_BLOCK_REASONS = frozenset({
     "near_tee_slot_unconfigured", "near_tee_slot_disabled", "near_tee_embedding_evidence_required",
-    "near_tee_purpose_consent_required", "near_tee_credential_required", "inference_lane_required",
-    "near_tee_request_reserve_exceeds_lane_ceiling",
+    "near_tee_purpose_consent_required", "near_tee_credential_required",
 })
 ROUTE_BLOCK_REASONS = frozenset({OPENROUTER_RETIRED_REASON, NO_ACTIVE_PROVIDER_REASON,
     PROVIDER_POLICY_REVOKED_REASON, NEAR_TEE_ROUTE_UNSUPPORTED_REASON}) | NEAR_TEE_SLOT_BLOCK_REASONS

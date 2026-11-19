@@ -132,8 +132,6 @@ def _context(*, job_id: str, request_id: str, profile: ProviderProfile) -> Infer
         allowed_profile_ids=(profile.id,),
         allowed_provider_kinds=("openrouter",),
         redaction_applied=True,
-        estimated_cost_microusd=64,
-        owner_budget_microusd=100,
     )
 
 
@@ -211,7 +209,7 @@ def _remote_effect(job: dict[str, object]) -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_sync_injected_transport_round_trip_is_durably_fenced(accounting_db):
     setup_configuration()
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-sync", request_id="request-744-sync", profile=profile)
@@ -292,7 +290,7 @@ async def test_llm_runtime_sync_caller_uses_the_same_durable_fence(async_db, mon
 @pytest.mark.asyncio
 async def test_streaming_injected_transport_round_trip_uses_same_durable_fence(accounting_db):
     setup_configuration()
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-stream", request_id="request-744-stream", profile=profile)
@@ -354,9 +352,9 @@ async def test_streaming_injected_transport_round_trip_uses_same_durable_fence(a
 async def test_provider_error_persists_uncertain_blocked_receipt_without_fallback(async_db, monkeypatch):
     from src.model_fabric import execution
 
-    # Keep the intentionally unresolved provider outcome isolated from later
-    # tests; the production broker correctly holds its active lease until an
-    # operator reconciliation settles the unknown cost.
+    # Keep the provider outcome isolated from later tests. #1284: a returned
+    # uncertain callback stays blocked (nothing is adopted or retried) but
+    # frees the lane immediately; no cost reconciliation is required.
     use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker())
     now = time.time()
     profile = _profile(now=now)
@@ -390,13 +388,13 @@ async def test_provider_error_persists_uncertain_blocked_receipt_without_fallbac
     effect = _remote_effect(job)
     assert effect["status"] == "blocked"
     assert effect["details"]["admission_status"] == "blocked"
-    assert effect["details"]["receipt"]["reconciliation_required"] is True
+    assert effect["details"]["receipt"]["reconciliation_required"] is False
 
 
 @pytest.mark.asyncio
 async def test_restart_identity_fence_rejects_duplicate_dispatch(accounting_db):
     setup_configuration()
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-restart", request_id="request-744-restart", profile=profile)

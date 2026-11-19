@@ -47,7 +47,6 @@ const endpointFixture = {
     model: "x-ai/grok-4.1-fast",
     upstream: "openrouter-primary",
     egress: "cloud_acknowledged",
-    budget: "250 µUSD ceiling",
   },
   evidence: {
     label: "workspace/report.md",
@@ -124,7 +123,6 @@ function fixtureModel(overrides: {
     model: endpointFixture.runtime.model,
     upstream: endpointFixture.runtime.upstream,
     egress: endpointFixture.runtime.egress,
-    budget: endpointFixture.runtime.budget,
     ...overrides.route,
   };
   const evidence: OutcomeEvidenceSummary = {
@@ -155,6 +153,8 @@ describe("OutcomeCockpitPanel", () => {
     expect(screen.getByTestId("outcome-goal-card")).toHaveAttribute("data-state", "active");
     expect(screen.getByText("Ship the guardian slice")).toBeInTheDocument();
     expect(within(screen.getByTestId("outcome-route-card")).getAllByText("openrouter").length).toBeGreaterThan(0);
+    // Seraph keeps no cost ceiling (#1284), so the route card has no budget row.
+    expect(screen.getByTestId("outcome-route-card")).not.toHaveTextContent(/budget|cost ceiling/);
     expect(screen.getByText("workspace/report.md")).toBeInTheDocument();
     expect(screen.getByTestId("outcome-result-card")).toHaveAttribute("data-state", "failed");
     expect(within(screen.getByTestId("outcome-approval-card")).getByText("2099-01-01T00:00:00Z")).toBeInTheDocument();

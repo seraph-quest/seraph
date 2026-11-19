@@ -172,7 +172,7 @@ it("shows discarded-answer guidance for the native missing-cost projection befor
   const mounted = render(<NearTextWorkPanel {...props} task={task} onOpenAccounting={onOpenAccounting} />);
   fireEvent.click(screen.getByRole("button", { name: "Read NEAR answer" }));
   await screen.findByLabelText("Literal NEAR answer");
-  const blocked = { ...task, task_revision: 4, status: "blocked", block_kind: "capability", block_reason: "near_cost_readback_required", readback_status: "unknown" } as WorkBoardTask;
+  const blocked = { ...task, task_revision: 4, status: "blocked", block_kind: "capability", block_reason: "near_answer_unavailable", readback_status: "unknown" } as WorkBoardTask;
   mounted.rerender(<NearTextWorkPanel {...props} task={blocked} onOpenAccounting={onOpenAccounting} />);
   expect(screen.queryByLabelText("Literal NEAR answer")).toBeNull();
   expect(screen.getByRole("button", { name: "Read NEAR answer" })).toBeDisabled();

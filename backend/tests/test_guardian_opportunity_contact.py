@@ -31,7 +31,7 @@ async def test_actual_contact_writer_current_permissions(accounting_db, monkeypa
     configured = setup_configuration()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         configured.openrouter_setup, profiles=(), policies=()), egress_revision=configured.egress_revision+1))
-    await durable_job_repository.configure_inference_accounting(1000)
+    await durable_job_repository.ensure_inference_ledger()
     _, goal, watch, _, row, _ = await publish_source((sessions, root))
     queued = await admit_assessment(row.id)
     async def claim(db, run):
@@ -45,7 +45,7 @@ async def test_actual_contact_writer_current_permissions(accounting_db, monkeypa
     operation_id = "contact-guard:"+row.id
     await durable_job_repository.reserve_inference_cost(operation_id=operation_id, job_id=native["job_id"],
         owner_id=native["owner"]["principal_id"], payload_digest="b"*64, policy_digest=policy_digest, runtime_path="strategist_agent",
-        profile_id="openrouter", bound_microusd=100, owner_ceiling_microusd=1000, priority=2,
+        profile_id="openrouter", priority=2,
         deadline_at=time.time()+60, owner=RUNNER, fencing_token=native["lease"]["fencing_token"])
     async with sessions() as db:
         if change == "source_grant":

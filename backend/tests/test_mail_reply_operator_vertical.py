@@ -134,7 +134,7 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
         configured = setup_configuration()
         setup = replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output"))
         write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(setup, profiles=(), policies=()), egress_revision=configured.egress_revision+1))
-        await jobs.configure_inference_accounting(1000)
+        await jobs.ensure_inference_ledger()
     google = GoogleBoundary()
     transport = httpx.MockTransport(google.handle)
     real_google = gmail_read.GoogleGmailReadonlyAdapter

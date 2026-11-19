@@ -7521,7 +7521,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.db.models import InferenceCostReservation
         async with self._session() as accounting_db:
             accounting_row = await accounting_db.get(InferenceCostReservation, str(safe_receipt["operation_id"]))
-            unknown_cost = accounting_row is not None and accounting_row.state in {"contact_started", "unknown"}
+            # Only a call still in flight is an unresolved effect. A finished
+            # call NEAR has not priced yet ("unknown") never withholds the
+            # result (ADR-037, #1284); an uncertain broker receipt still maps
+            # to an unknown effect through its own status.
+            unknown_cost = accounting_row is not None and accounting_row.state == "contact_started"
         return await self.record_effect(
             job_id,
             effect_type="remote_inference_admission",

@@ -577,28 +577,28 @@ def _repository_route_identity(*, required=True):
 
 
 def _repository_policy_limits():
-    """Stage the same canonical route bound used by the accounting owner.
+    """Stage the canonical route policy digest used by the accounting owner.
 
-    This reads configuration and must only run outside a SQL writer while the
-    Source orchestration owns the configuration mutation fence.
+    Returns ``(policy_digest, 0)``: the second value is the recorded legacy
+    server bound, which new jobs store as 0 and nothing compares (ADR-037,
+    #1284). This reads configuration and must only run outside a SQL writer
+    while the Source orchestration owns the configuration mutation fence.
     """
     from src.model_fabric.accounting import _policy_for_runtime
     from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
     from src.model_fabric.caller_context import canonical_route_spec
     from src.model_fabric.near_tee_vertical import near_tee_vertical_route
     from src.workflows.job_runtime import DurableJobLeaseError
-    if (near_route := near_tee_vertical_route("strategist_agent")) is not None:
-        # #1184: the NEAR TEE text slot serves the iteration; its accounting
-        # reserves exactly the slot's request cost bound under its policy.
+    if near_tee_vertical_route("strategist_agent") is not None:
+        # #1184: the NEAR TEE text slot serves the iteration under its policy.
         from src.model_fabric.effective_policy import current_near_tee_policy
         try:
             _configured, digest = current_near_tee_policy("text")
         except PermissionError as exc:
             raise DurableJobLeaseError("original repository text route unavailable") from exc
-        bound = near_route.request_cost_bound_microusd
-        if type(bound) is not int or bound <= 0 or not _SHA.fullmatch(digest):
-            raise DurableJobLeaseError("original repository server bound required")
-        return digest, bound
+        if not _SHA.fullmatch(digest):
+            raise DurableJobLeaseError("original repository text route unavailable")
+        return digest, 0
     from src.model_fabric.retirement import openrouter_retired
     if openrouter_retired():
         # No NEAR TEE slot serves the iteration: repository repair has no route.
@@ -607,16 +607,14 @@ def _repository_policy_limits():
     setup = configured.openrouter_setup
     if setup is None:
         raise DurableJobLeaseError("original repository text route unavailable")
-    bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
     if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
         slot = route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class)
         route = (setup.routes or {}).get(slot)
         if slot != "text" or route is None or not route.enabled:
             raise DurableJobLeaseError("original repository text route unavailable")
-        bound = route.request_cost_bound_microusd
-    if type(bound) is not int or bound <= 0 or not _SHA.fullmatch(digest):
-        raise DurableJobLeaseError("original repository server bound required")
-    return digest, bound
+    if not _SHA.fullmatch(digest):
+        raise DurableJobLeaseError("original repository text route unavailable")
+    return digest, 0
 
 
 def _recheck_repository_policy_limits(staged_policy):
@@ -672,7 +670,8 @@ def read_repository_inventory(run):
             or type(limits["original_goal_revision"]) is not int or limits["original_goal_revision"] != binding.goal_revision
             or limits["original_goal_owner_principal_id"] != binding.owner_principal_id
             or limits["original_goal_owner_session_id"] != binding.original_root_id
-            or type(limits["original_server_bound_microusd"]) is not int or limits["original_server_bound_microusd"] <= 0):
+            # Recorded legacy server bound (ADR-037, #1284): 0 on new jobs.
+            or type(limits["original_server_bound_microusd"]) is not int or limits["original_server_bound_microusd"] < 0):
         raise DurableJobLeaseError("original repository limits inventory changed")
     temporal = limits["original_goal_limits"]
     if (not isinstance(temporal, dict) or set(temporal) != {
@@ -693,7 +692,11 @@ def read_repository_inventory(run):
 def _assert_repository_original_limits(run, goal, policy):
     from src.workflows.job_runtime import DurableJobLeaseError
     limits = read_repository_inventory(run)["original_limits"]
-    if _repository_original_limits(goal, policy) != limits:
+    # The recorded legacy server bound is kept as stored, never compared
+    # with the current route (ADR-037, #1284).
+    current = {**_repository_original_limits(goal, policy),
+        "original_server_bound_microusd": limits["original_server_bound_microusd"]}
+    if current != limits:
         raise DurableJobLeaseError("original repository Goal or inference policy changed")
     return limits
 
@@ -4722,8 +4725,7 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
     goal = await db.get(Goal, witness.group.goal_id, populate_existing=True)
     limits = read_repository_inventory(run)["original_limits"]
     if (goal is None or json.dumps(goal.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) != source.goal_row_json
-            or json.dumps(limits, sort_keys=True, separators=(",", ":")) != source.original_limits_json
-            or bound_microusd != limits["original_server_bound_microusd"]):
+            or json.dumps(limits, sort_keys=True, separators=(",", ":")) != source.original_limits_json):
         blocked("repository_original_limits_changed")
     if _repository_record(run, "repository:stop-intent:v1") is not None:
         existing = next((row for row in rows if row.operation_id == operation_id), None)

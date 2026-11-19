@@ -85,9 +85,18 @@ async def persisted_result(accounting_db, real_auth, monkeypatch, *, silent=Fals
             runtime._executions.clear()
 
 
-@pytest.mark.parametrize("silent", [False, True])
-async def test_actual_persisted_result_adopts_once_without_execution_renewal(accounting_db, real_auth, monkeypatch, silent):
+@pytest.mark.parametrize(("silent", "unpriced"), [(False, False), (True, False), (False, True)])
+async def test_actual_persisted_result_adopts_once_without_execution_renewal(accounting_db, real_auth, monkeypatch, silent, unpriced):
     async with persisted_result(accounting_db, real_auth, monkeypatch, silent=silent) as (_, sessions, row, before, cost_before, contacts):
+        if unpriced:
+            # #1284: a contacted request that is "not priced yet" never
+            # withholds the persisted result.
+            async with sessions() as db:
+                reservation = (await db.execute(select(InferenceCostReservation).where(
+                    InferenceCostReservation.job_id == row.job_id))).scalar_one()
+                reservation.state, reservation.actual_cost_microusd = "unknown", None
+                await db.commit()
+                cost_before = reservation.model_dump(mode="json")
         contact_count = len(contacts)
         first, second = await asyncio.gather(runtime.run_opportunity_tick(), runtime.run_opportunity_tick())
         assert first["started"] == second["started"] == 0
@@ -113,7 +122,7 @@ async def test_actual_persisted_result_adopts_once_without_execution_renewal(acc
 
 
 @pytest.mark.parametrize("change", ["goal", "policy", "root", "source", "cancel", "deadline", "lease",
-    "fence", "missing_result", "tampered_result", "missing_snapshot", "unknown_cost", "native_binding", "duplicate_artifact",
+    "fence", "missing_result", "tampered_result", "missing_snapshot", "native_binding", "duplicate_artifact",
     "citation", "privacy"])
 async def test_actual_persisted_result_invalidated_before_restart_never_adopts(accounting_db, real_auth, monkeypatch, change):
     async with persisted_result(accounting_db, real_auth, monkeypatch, expect_invalid=True) as (root, sessions, row, native, cost_before, contacts):
@@ -143,10 +152,6 @@ async def test_actual_persisted_result_invalidated_before_restart_never_adopts(a
             elif change == "duplicate_artifact":
                 artifacts = json.loads(run.artifact_receipts_json)
                 run.artifact_receipts_json = json.dumps(artifacts + artifacts)
-            elif change == "unknown_cost":
-                reservation = (await db.execute(select(InferenceCostReservation).where(
-                    InferenceCostReservation.job_id == row.job_id))).scalar_one()
-                reservation.state, reservation.actual_cost_microusd = "unknown", None
             elif change in {"citation", "privacy"}:
                 from src.artifacts.registry import artifact_id_for
                 from src.guardian.opportunity_contracts import digest, json_bytes
@@ -187,7 +192,7 @@ async def test_actual_persisted_result_invalidated_before_restart_never_adopts(a
             assert (await db.execute(select(func.count()).select_from(GuardianIntervention))).scalar() == 0
             reservation = (await db.execute(select(InferenceCostReservation).where(
                 InferenceCostReservation.job_id == row.job_id))).scalar_one()
-            assert reservation.state == ("unknown" if change == "unknown_cost" else cost_before["state"])
+            assert reservation.state == cost_before["state"]
             assert reservation.bound_microusd == cost_before["bound_microusd"]
         assert len(contacts) == count
         assert (await durable_job_repository.get_job(row.job_id))["attempt_count"] == native["attempt_count"]

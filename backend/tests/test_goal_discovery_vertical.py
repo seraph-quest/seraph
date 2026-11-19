@@ -16,9 +16,9 @@ from tests.cordis_research import needs_cordis, research_host
 import pytest_asyncio
 
 
-# ADR-035: the NEAR TEE slot reserves its catalog-priced bound per request
-# (>= 1711 micro-USD for this slot), so the programme budget funds that
-# reserve; generation_ceiling keeps room for exactly one request.
+# The NEAR TEE slot carries no amount (ADR-037, #1284). generation_ceiling
+# sets a programme allowance just above one request's spend, which no longer
+# gates the next generation (#1284).
 _REQUEST_BOUND = 2_000
 _PROGRAMME_BUDGET = 20_000
 
@@ -212,8 +212,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
     socket_path, physical_contacts, physical_controls = public_http_fixture
     gateway = ModelBoundary()
     gateway.cost_nano = 2_000  # NEAR bills 2 micro-USD per request
-    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",),
-                                    request_cost_bound_microusd=_REQUEST_BOUND)
+    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",))
     original_client = httpx.AsyncClient
     physical_controls["scenario"] = scenario
     class PublicFixtureBoundary(httpx.AsyncBaseTransport):
@@ -430,7 +429,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                     await service.run(job["job_id"])
                 original = await jobs.get_job(job["job_id"])
                 debt = await jobs.inference_accounting_snapshot(job_id=job["job_id"])
-                assert debt["operations"][0]["state"] == "unknown" and debt["unknown_microusd"] > 0
+                assert debt["operations"][0]["state"] == "unknown" and debt["unpriced_requests"] >= 1
                 renewed_request = {**request, "expected_grant_revision": 1,
                     "public_brief": "A separately reviewed replacement for this same Goal"}
                 renewed_preview = await client.post(base + "/preview", json=renewed_request)
@@ -591,7 +590,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 assert len(calls) == expected_calls
                 if scenario == "model_timeout":
                     debt = await jobs.inference_accounting_snapshot(job_id=job["job_id"])
-                    assert debt["operations"][0]["state"] == "unknown" and debt["unknown_microusd"] > 0
+                    assert debt["operations"][0]["state"] == "unknown" and debt["unpriced_requests"] >= 1
                     logged = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
                     assert logged.status_code == 200
                     select_goal = {"selections": [{"kind": "goal", "record_id": goal_id}]}
@@ -696,23 +695,6 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             assert same["job_id"] == job["job_id"] and len(calls) == 3
             snapshot = await jobs.inference_accounting_snapshot(job_id=job["job_id"])
             assert len(snapshot["operations"]) == 3 and all(row["state"] == "settled" for row in snapshot["operations"])
-            if scenario == "generation_ceiling":
-                # Arrange the already-actually-settled canonical rows in a
-                # previous period through the existing accounting witness
-                # writer. This is a period rollover fixture, not elapsed host
-                # time or provider spending; native IDs/actual charges stay exact.
-                from pathlib import Path
-                from src.workflows.inference_accounting import _continuity_lock
-                async with jobs._session() as db:
-                    await jobs._accounting_begin(db)
-                    account, rows = await jobs._accounting_rows(db)
-                    with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                        jobs._assert_accounting_continuity(workspace, account, rows)
-                        for row in rows:
-                            if row.job_id == job["job_id"]:
-                                row.period_id = "2026-09"
-                                db.add(row)
-                        await jobs._persist_accounting_witness(db, workspace, account, rows)
             original_clock = goal_programme_service._clock
             future = original_clock() + timedelta(days=1)
             monkeypatch.setattr(goal_programme_service, "_clock", lambda: future)
@@ -728,14 +710,14 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 assert len(resolver_calls) == 2
                 expected_strategy_version = "2"
             if scenario == "generation_ceiling":
-                with pytest.raises(Exception):
-                    await service.run(second["job_id"])
-                assert len(calls) == 3 and len(contacts) == 2
-                blocked = await jobs.get_job(second["job_id"])
-                assert blocked["status"] == "blocked"
+                # #1284: a programme allowance smaller than the spend already
+                # settled no longer gates the next discovery generation.
+                second_done = await service.run(second["job_id"])
+                assert second_done["status"] == "succeeded"
+                assert len(calls) == 5 and len(contacts) == 4
                 total = await jobs.inference_accounting_snapshot()
                 assert len([row for row in total["operations"] if row["job_id"] == job["job_id"]]) == 3
-                assert not any(row["job_id"] == second["job_id"] for row in total["operations"])
+                assert any(row["job_id"] == second["job_id"] for row in total["operations"])
                 return
             second_done = await jobs.get_job(second["job_id"]) if scenario == "completed" else await service.run(second["job_id"])
             assert second_done["status"] == "succeeded"

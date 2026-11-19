@@ -15,7 +15,7 @@ governed OpenRouter vision adapter only after all of these are true: the
 operator has enabled analysis and cloud upload, an exact vision model is
 configured, the OpenRouter key and upstream allow-list are present, fallback
 and data-collection controls are fail-closed, zero-data-retention is enabled
-for the vision request, and the workload has an explicit finite budget. If any
+for the vision request. Seraph sets no cost limit (ADR-037). If any
 condition is missing, the observation remains local metadata with a visible
 blocked/degraded reason; Seraph does not fall back to a local VLM or GPU host.
 
@@ -189,7 +189,7 @@ Opening Settings defaults to the Model section (formerly Models & OpenRouter, be
 If a screenshot image disappears before analysis, Seraph records the observation status as `source_missing` instead of retrying it as a generic provider failure. If an incomplete observation points at an older configured screenshot root, the active settings summary classifies it as `stale_root`. `source_missing` and `stale_root` rows are excluded from active backlog/failure counts and from screenshot digest or end-of-day report inputs. The Settings panel shows stale cleanup candidates and exposes a localhost-only Clear Stale action that archives only stale incomplete rows; succeeded rows remain historical evidence even if their original image file has since been deleted.
 
 The same surface exposes the active OpenRouter vision profile status: configured
-gateway state, selected model, upstream allow-list, cloud consent, budget,
+gateway state, selected model, upstream allow-list, cloud consent,
 latest capability-proof receipt, and whether remote profile routing is safe.
 
 ## Historical GPU/VLM analysis target
@@ -489,7 +489,7 @@ Seraph blocks screen-derived digest/report LLM calls unless the resolved runtime
 Each screenshot observation carries Seraph-owned analysis status details:
 
 - `pending` only when a governed semantic provider is configured and the screenshot is queued for analysis
-- `blocked` when OpenRouter configuration, consent, budget, capability proof, or admission is unavailable; the detail carries the recoverable reason
+- `blocked` when OpenRouter configuration, consent, capability proof, or admission is unavailable; the detail carries the recoverable reason
 - `succeeded` when a validated semantic analysis payload was stored
 - `failed` when the provider call or schema validation failed
 - `needs_reanalysis` when a stored semantic payload was produced by an older prompt, schema, or configured model

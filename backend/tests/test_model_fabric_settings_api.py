@@ -139,7 +139,7 @@ async def _prepare_legacy_canary_accounting(monkeypatch, *, client=None):
         cloud_egress_acknowledged=True, spend_ceiling_microusd=5000,
         request_cost_bound_microusd=500, credential_ref="env:OPENROUTER_API_KEY")
     write_model_fabric_configuration(replace(configured, openrouter_setup=setup))
-    await durable_job_repository.configure_inference_accounting(5000)
+    await durable_job_repository.ensure_inference_ledger()
     monkeypatch.setattr(settings, "operator_auth_secret", "fixture-canary-password")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     token, operator = await create_session()
@@ -193,7 +193,8 @@ async def test_put_get_configuration_becomes_canonical_profile_and_policy(client
     assert context.allowed_profile_ids == (PERSISTED_PROFILE_ID,)
     assert context.allowed_provider_kinds == ("openrouter",)
     assert context.fallback_allowed is False
-    assert context.requirements.max_cost_microusd == 5000
+    # A legacy stored policy amount is read past and never carried (#1284).
+    assert context.requirements.max_cost_microusd is None
 
 
 @pytest.mark.asyncio
@@ -254,25 +255,11 @@ def test_configuration_rejects_unsafe_cost_source_without_api_validation():
 
 
 @pytest.mark.asyncio
-async def test_cloud_widening_requires_cost_ceiling_and_binds_redaction_evidence(
+async def test_cloud_widening_binds_redaction_evidence_without_cost_ceiling(
     client,
     model_fabric_workspace,
 ):
-    missing_budget = await client.put(
-        "/api/settings/model-fabric",
-        json={
-            "workload_policies": [
-                {
-                    "runtime_path": "chat_agent",
-                    "egress_class": "cloud_allowed_redacted",
-                    "cloud_egress_acknowledged": True,
-                }
-            ]
-        },
-    )
-    assert missing_budget.status_code == 422
-    assert "cost ceiling" in missing_budget.json()["detail"]
-
+    # #1284: cloud widening no longer requires a cost ceiling.
     configured = await client.put(
         "/api/settings/model-fabric",
         json={
@@ -281,12 +268,11 @@ async def test_cloud_widening_requires_cost_ceiling_and_binds_redaction_evidence
                     "runtime_path": "chat_agent",
                     "egress_class": "cloud_allowed_redacted",
                     "cloud_egress_acknowledged": True,
-                    "max_cost_microusd": 750,
                 }
             ]
         },
     )
-    assert configured.status_code == 200
+    assert configured.status_code == 200, configured.text
     principal = TrustPrincipal(
         principal_id="operator-test",
         principal_type=PrincipalType.OPERATOR,
@@ -305,7 +291,7 @@ async def test_cloud_widening_requires_cost_ceiling_and_binds_redaction_evidence
         redaction_applied=True,
     )
     assert context.egress_class is EgressClass.CLOUD_ALLOWED_REDACTED
-    assert context.requirements.max_cost_microusd == 750
+    assert context.requirements.max_cost_microusd is None
     assert context.transformation_digest == transformation
     assert context.redaction_applied is True
 

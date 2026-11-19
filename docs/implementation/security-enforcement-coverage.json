@@ -285,7 +285,7 @@
     },
     {
       "id": "availability.model_gpu_admission",
-      "boundary": "Model and VLM requests to the one-GPU queue and inference budgets",
+      "boundary": "Model and VLM requests to the one-GPU queue and admission bounds",
       "milestone_status": "owned_by_downstream",
       "existing_evidence": "partial",
       "owner_issue": 744,
@@ -301,11 +301,11 @@
     },
     {
       "id": "availability.capability_limits",
-      "boundary": "Capability invocation to process, CPU, memory, network, output, time, and cost budgets",
+      "boundary": "Capability invocation to process, CPU, memory, network, output, and time budgets",
       "milestone_status": "owned_by_downstream",
       "existing_evidence": "partial",
       "owner_issue": 747,
-      "required_proof": "Per-capability limits, admission, timeout, cancellation, output bounds, cleanup, and cost enforcement"
+      "required_proof": "Per-capability limits, admission, timeout, cancellation, output bounds, cleanup, and spend recording (no Seraph-side cost limit, ADR-037)"
     },
     {
       "id": "release.cumulative_security",

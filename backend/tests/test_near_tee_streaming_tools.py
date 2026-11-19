@@ -184,7 +184,7 @@ async def test_streaming_happy_path_hides_reasoning_and_settles_billing_in_lease
         assert body["stream"] is True and body["model"] == TEXT_MODEL and "tools" not in body
         snapshot, rows = await _rows()
         assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["actual_cost_microusd"] == 1500
-        assert rows[0]["profile_id"] == "near_tee.text" and snapshot["unknown_microusd"] == 0
+        assert rows[0]["profile_id"] == "near_tee.text" and snapshot["unpriced_requests"] == 0
         assert isolated_broker._active_operation_id is None
         # The durable route receipt names the NEAR TEE profile.
         from src.model_fabric.repository import model_fabric_repository
@@ -217,7 +217,7 @@ async def test_stream_echo_mismatch_mid_stream_keeps_delivered_deltas_and_settle
         assert isinstance(error, NearTeeError) and error.code == "near_tee_model_mismatch"
         assert _paths(near.requests[before:]) == ["/v1/chat/completions", "/v1/billing/costs"]
         snapshot, rows = await _rows()
-        assert [row["state"] for row in rows] == ["settled"] and snapshot["unknown_microusd"] == 0
+        assert [row["state"] for row in rows] == ["settled"] and snapshot["unpriced_requests"] == 0
         assert isolated_broker._active_operation_id is None
 
         # A delta before any model echo fails closed too (echo checked on the first chunk carrying model).
@@ -234,10 +234,11 @@ async def test_stream_echo_mismatch_mid_stream_keeps_delivered_deltas_and_settle
                       "readback runs through inference accounting; those are not on the clock seam yet (#1225)")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_stream_is_cut_before_the_billing_window_and_billing_runs_in_deadline(client, model_fabric_workspace,
+async def test_stream_is_cut_at_the_request_timeout_and_billing_runs_in_deadline(client, model_fabric_workspace,
         keyless_openrouter, monkeypatch, isolated_broker):
-    """ADR-035: the stream ends >= 16s before the original deadline so the
-    billing readback still runs inside the same lease and deadline."""
+    """The stream ends at the request's own timeout and the best-effort
+    billing readback runs inside the same lease and deadline (#1284: no
+    billing window is reserved out of the deadline)."""
     from src.approval.runtime import reset_runtime_context
     from src.llm_runtime import stream_completion_with_fallback
     from src.model_fabric import near_tee
@@ -249,7 +250,7 @@ async def test_stream_is_cut_before_the_billing_window_and_billing_runs_in_deadl
 
     async def short_deadline(**kwargs):
         call = await original(**kwargs)
-        # 19s left: at most 3s of streaming, then the 16s billing reserve.
+        # 19s left: the 3s request timeout cuts the stream; billing uses what is left.
         context = replace(call.context, deadline_at=time.time() + 19)
         deadlines.append(context.deadline_at)
         return replace(call, context=context, inference_timeout_seconds=min(call.inference_timeout_seconds, 3))
@@ -268,10 +269,10 @@ async def test_stream_is_cut_before_the_billing_window_and_billing_runs_in_deadl
         assert _paths(near.requests[before:]) == ["/v1/chat/completions", "/v1/billing/costs"]
         (deadline,) = deadlines
         billing_at = [at for path, at in near.times if path == "/v1/billing/costs"][-1]
-        assert billing_at <= deadline - 16 + 0.5  # the cut left the whole billing window
+        assert billing_at <= deadline - 16 + 0.5  # cut by the 3s request timeout, not the deadline
         assert billing_at < deadline
         snapshot, rows = await _rows()
-        assert [row["state"] for row in rows] == ["settled"] and snapshot["unknown_microusd"] == 0
+        assert [row["state"] for row in rows] == ["settled"] and snapshot["unpriced_requests"] == 0
         assert isolated_broker._active_operation_id is None
     finally:
         reset_runtime_context(tokens)
@@ -279,11 +280,12 @@ async def test_stream_is_cut_before_the_billing_window_and_billing_runs_in_deadl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_stream_missing_cost_is_unknown_and_keeps_the_lease_blocked(client, model_fabric_workspace,
+async def test_stream_missing_cost_is_unpriced_delivered_and_frees_the_lease(client, model_fabric_workspace,
         keyless_openrouter, monkeypatch, isolated_broker):
+    """#1284: no NEAR billing record is "not priced yet": the stream is
+    delivered whole, the row is unknown and the lane is free."""
     from src.approval.runtime import reset_runtime_context
     from src.llm_runtime import stream_completion_with_fallback
-    from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
 
     near, operator = await _ready(client, monkeypatch, prove=("streaming",))
     tokens = _bind(operator)
@@ -292,14 +294,19 @@ async def test_stream_missing_cost_is_unknown_and_keeps_the_lease_blocked(client
         near.body_id = "chatcmpl-stream-unknown"
         parts, error = await _collect(stream_completion_with_fallback(MESSAGES, 0.3, 64, "chat_agent",
             _chat_stream_context(operator, MESSAGES)))
-        assert parts == ["Hello ", "from NEAR"]
-        assert isinstance(error, GpuAdmissionUncertainError)
-        assert isinstance(error.__cause__, NearTeeError) and error.__cause__.code == "near_tee_cost_liability"
+        assert parts == ["Hello ", "from NEAR"] and error is None, error
         snapshot, rows = await _rows()
-        assert [row["state"] for row in rows] == ["unknown"] and snapshot["unknown_microusd"] > 0
+        assert [row["state"] for row in rows] == ["unknown"] and snapshot["unpriced_requests"] == 1
+        assert rows[0]["actual_cost_microusd"] is None
         receipt = isolated_broker.receipt_for(rows[0]["operation_id"])
-        assert receipt.status == "blocked" and receipt.reconciliation_required
-        assert receipt.active_operation_id == rows[0]["operation_id"]
+        assert receipt.status != "blocked" and not receipt.reconciliation_required
+        assert isolated_broker._active_operation_id is None
+        # The next request runs.
+        near.billing_missing = False
+        near.body_id = "chatcmpl-after-unpriced"
+        parts, error = await _collect(stream_completion_with_fallback(MESSAGES, 0.3, 64, "chat_agent",
+            _chat_stream_context(operator, MESSAGES)))
+        assert error is None and parts == ["Hello ", "from NEAR"]
     finally:
         reset_runtime_context(tokens)
 
@@ -318,7 +325,8 @@ async def test_stream_precontact_denials_are_sealed_and_never_contact(client, mo
 
     async def late(**kwargs):
         call = await original(**kwargs)
-        return replace(call, context=replace(call.context, deadline_at=time.time() + 5))
+        # Under one second left for the request itself (#1284: no billing reserve).
+        return replace(call, context=replace(call.context, deadline_at=time.time() + 0.5))
     try:
         monkeypatch.setattr(near_tee, "prepare_near_tee_call", late)
         before = len(near.requests)
@@ -328,7 +336,7 @@ async def test_stream_precontact_denials_are_sealed_and_never_contact(client, mo
         assert "near_tee_deadline_insufficient" in repr(error) + repr(error.__cause__)
         assert len(near.requests) == before
         snapshot, rows = await _rows()
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
         assert all(row["contact_started_at"] is None and row["state"] != "unknown" for row in rows)
         assert isolated_broker._active_operation_id is None
     finally:
@@ -425,7 +433,7 @@ async def test_agent_tool_call_round_trip_on_allowlisted_tools_model(client, mod
                     tools_to_call_from=tools)
             assert rejected.value.code == code
         snapshot, rows = await _rows()
-        assert [row["state"] for row in rows] == ["settled"] * 5 and snapshot["unknown_microusd"] == 0
+        assert [row["state"] for row in rows] == ["settled"] * 5 and snapshot["unpriced_requests"] == 0
         assert isolated_broker._active_operation_id is None
     finally:
         reset_runtime_context(tokens)
@@ -522,7 +530,7 @@ async def test_chat_rest_and_stream_effective_route_and_runtime_status(client, m
     rows = [row for row in snapshot["operations"] if row["runtime_path"] in {"chat_agent", "onboarding_agent"}]
     assert sorted(row["runtime_path"] for row in rows) == ["chat_agent", "onboarding_agent"]
     assert all(row["state"] == "settled" and row["profile_id"] == "near_tee.text" for row in rows)
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 0
     assert {request.url.host for request in near.requests} == {"cloud-api.near.ai"}
 
 
@@ -633,7 +641,7 @@ async def test_consumer_close_mid_stream_still_settles_billing(client, model_fab
         assert _paths(near.requests[before:]) == ["/v1/chat/completions", "/v1/billing/costs"]
         snapshot, rows = await _rows()
         _settled_and_free(rows, isolated_broker)
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
         # The lane is free for the next turn.
         near.body_id = "chatcmpl-after-close"
         parts, error = await _collect(stream_completion_with_fallback(MESSAGES, 0.3, 64, "chat_agent",
@@ -674,7 +682,7 @@ async def test_websocket_style_cancellation_mid_stream_settles_and_releases(clie
         assert _paths(near.requests[before:]) == ["/v1/chat/completions", "/v1/billing/costs"]
         snapshot, rows = await _rows()
         _settled_and_free(rows, isolated_broker)
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
     finally:
         reset_runtime_context(tokens)
 
@@ -697,7 +705,7 @@ async def test_cordis_output_oversize_cut_settles_and_releases(client, model_fab
     assert _paths(near.requests[before:]) == ["/v1/chat/completions", "/v1/billing/costs"]
     snapshot, rows = await _rows("cordis_interactive_inference")
     _settled_and_free(rows, isolated_broker)
-    assert snapshot["unknown_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 0
 
 
 @pytest.mark.asyncio
@@ -716,15 +724,16 @@ async def test_cordis_max_tokens_above_slot_output_is_named(client, model_fabric
     assert len(near.requests) == before
 
 
-@pytest.mark.realtime(reason="the chat turn cap, NEAR stream window and billing reserve span direct_chat, near_client "
+@pytest.mark.realtime(reason="the chat turn cap, NEAR stream window and billing lookup span direct_chat, near_client "
                       "and inference accounting, which are not on the clock seam yet (#1225)")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_chat_turn_deadline_ends_stream_and_billing_before_the_outer_cut(client, model_fabric_workspace,
         keyless_openrouter, monkeypatch, isolated_broker):
     """The outer REST/WebSocket cut (here 20s) never lands in the stream or
-    billing window: the turn's deadline is 2s inside it and the stream ends
-    16s before that deadline."""
+    billing lookup: the turn's deadline is 2s inside it and the stream ends at
+    the slot timeout (10s), leaving the rest for the best-effort billing
+    lookup (#1284: no billing reserve)."""
     from config.settings import settings
     from src.agent.direct_chat import direct_chat_context_timeout, direct_chat_turn_timeout, stream_direct_local_chat
     from src.approval.runtime import reset_runtime_context
@@ -734,7 +743,7 @@ async def test_chat_turn_deadline_ends_stream_and_billing_before_the_outer_cut(c
     assert direct_chat_turn_timeout() == 20 and direct_chat_context_timeout("chat_agent") == 18
     cap = (await client.get("/api/runtime/status")).json()["effective_runtime"]["chat_turn_cap"]
     assert cap == {"turn_timeout_seconds": 20.0, "inference_deadline_seconds": 18.0,
-        "stream_window_seconds": 2.0, "billing_reserve_seconds": 16.0}
+        "stream_window_seconds": 10.0}
     tokens = _bind(operator)
     parts = []
 
@@ -812,7 +821,7 @@ async def test_conversation_principal_adoption_uses_the_admitted_operator_root(c
         snapshot, rows = await _rows()
         # Contact happened either way: the known cost settles and the lane is free.
         _settled_and_free(rows, isolated_broker)
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
     finally:
         reset_runtime_context(tokens)
 
@@ -824,7 +833,7 @@ def test_admission_request_captures_operator_root_immutably():
         session_id="conversation")
     context = SimpleNamespace(principal=principal, request_id="r1", job_id="", deadline_at=time.time() + 60,
         runtime_path="chat_agent", session_id="conversation", workload="interactive",
-        estimated_cost_microusd=1, owner_budget_microusd=10, data_digest="d")
+        data_digest="d")
     request = GpuAdmissionRequest.from_inference_context(context, operation_id="op-1")
     assert request.operator_session_id == "root-session" and request.session_id == "conversation"
     with pytest.raises(Exception):

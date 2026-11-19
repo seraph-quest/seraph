@@ -43,7 +43,7 @@ from .contracts import (
 )
 from .near_client import near_request_headers
 from .near_tee import (
-    NEAR_TEE_BILLING_RESERVE_SECONDS,
+    NEAR_TEE_BILLING_LOOKUP_SECONDS,
     NearTeeDenied,
     NearTeeError,
     precontact_reason,
@@ -75,7 +75,6 @@ class NearTeeEmbeddingCall:
     key: str = field(repr=False)
     dimension: int = 0
     expected_count: int = 0
-    request_cost_bound_microusd: int = 0
     inference_timeout_seconds: float = 0.0
     headers: dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -208,8 +207,7 @@ async def prepare_near_tee_embedding_call(*, context: InferenceRequestContext, t
         raise NearTeeDenied("near_tee_request_too_large")
     bound = bind_final_inference_payload(context, body)
     checked = time.time() if now is None else now
-    inference_timeout = min(float(slot.timeout_seconds),
-        bound.deadline_at - checked - NEAR_TEE_BILLING_RESERVE_SECONDS)
+    inference_timeout = min(float(slot.timeout_seconds), bound.deadline_at - checked)
     if inference_timeout < 1:
         raise NearTeeDenied("near_tee_deadline_insufficient")
     candidate = candidate_from_profile(profile)
@@ -219,7 +217,6 @@ async def prepare_near_tee_embedding_call(*, context: InferenceRequestContext, t
         raise NearTeeDenied(reason, decision)
     return NearTeeEmbeddingCall(context=bound, decision=decision, proof_hashes=decision.proof_hashes, body=body,
         key=key, dimension=dimension, expected_count=len(texts),
-        request_cost_bound_microusd=slot.request_cost_bound_microusd,
         inference_timeout_seconds=inference_timeout,
         headers=near_request_headers(key=key, no_aliasing=True, json_body=True))
 
@@ -257,8 +254,7 @@ async def near_tee_embedding_transport(call: NearTeeEmbeddingCall) -> NearTeeEmb
     model = str(call.body["model"])
     deadline = call.context.deadline_at
     async with near_http_client() as client:
-        timeout = max(0.5, min(call.inference_timeout_seconds,
-            deadline - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS))
+        timeout = max(0.5, min(call.inference_timeout_seconds, deadline - time.time()))
         payload, identity = await _post_embeddings(client, body=call.body, key=call.key, timeout=timeout)
         vectors, failure = near_tee_embedding_vectors(payload, model=model, expected_count=call.expected_count,
             dimension=call.dimension)
@@ -266,15 +262,13 @@ async def near_tee_embedding_transport(call: NearTeeEmbeddingCall) -> NearTeeEmb
         evidence = await read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
             deadline_at=deadline, no_aliasing=True, error=NearTeeError, prefix="near_tee",
             capture=capture_near_billing_evidence)
-    if evidence is None:
-        # Contact happened and no authoritative cost arrived: Unknown liability.
-        raise NearTeeError("near_tee_cost_liability")
-    if failure is None and evidence.cost_microusd > call.request_cost_bound_microusd:
-        failure = "near_tee_cost_overrun"
+    # ADR-037 (#1284): vectors are delivered whatever NEAR reports; no
+    # reported charge leaves the request "not priced yet" (cost None).
     if failure is not None:
         vectors = None
     return NearTeeEmbeddingOutcome(vectors=vectors, failure_code=failure,
-        provider_request_id=identity.provider_request_id, cost_microusd=evidence.cost_microusd,
+        provider_request_id=identity.provider_request_id,
+        cost_microusd=evidence.cost_microusd if evidence is not None else None,
         dimension=call.dimension)
 
 
@@ -284,8 +278,8 @@ async def near_tee_embedding_capability_check_transport(*, profile, capability: 
 
     Mechanics only: one fixed non-sensitive input, response shape, model echo
     and the measured vector dimension (the ``embedding`` proof value). Runs
-    inside the probe's broker lease with billing readback; missing billing is
-    an Unknown liability (raised).
+    inside the probe's broker lease with best-effort billing readback; a
+    missing charge leaves the request "not priced yet" (#1284).
     """
     from .accounting import capture_near_billing_evidence, current_near_accounting_operation_id
     from .near_client import near_http_client, read_near_billing
@@ -298,15 +292,14 @@ async def near_tee_embedding_capability_check_transport(*, profile, capability: 
     async with near_http_client() as client:
         started = time.monotonic()
         payload, identity = await _post_embeddings(client, body=body, key=key,
-            timeout=max(0.5, deadline_at - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS))
+            timeout=max(0.5, deadline_at - time.time()))
         elapsed_ms = max(int((time.monotonic() - started) * 1000), 0)
         vectors, failure = near_tee_embedding_vectors(payload, model=profile.model, expected_count=1, dimension=None)
         del payload
         evidence = await read_near_billing(client, key=key, identity=identity, operation_id=operation_id,
             deadline_at=deadline_at, no_aliasing=True, error=NearTeeError, prefix="near_tee",
             capture=capture_near_billing_evidence)
-    if evidence is None:
-        raise NearTeeError("near_tee_cost_liability")
+    del evidence  # recorded by the capture hook when NEAR reported a charge
     if failure is not None:
         return CapabilityProbeObservation(False, error_code=failure)
     dimension = len(vectors[0])
@@ -342,8 +335,8 @@ def embed_texts_near_tee_sync(texts: list[str], *, principal, request_id: str) -
         raise NearTeeDenied(reason)
     context = build_canonical_inference_context(EMBEDDING_RUNTIME_PATH,
         payload={"model": slot.model_id, "input": list(texts)}, output_tokens=1,
-        # The billing window is reserved out of the original deadline.
-        timeout_seconds=float(slot.timeout_seconds) + NEAR_TEE_BILLING_RESERVE_SECONDS + 1,
+        # Room for the best-effort billing lookup after the request.
+        timeout_seconds=float(slot.timeout_seconds) + NEAR_TEE_BILLING_LOOKUP_SECONDS + 1,
         principal=principal, session_id=principal.session_id, job_id=principal.job_id, request_id=request_id)
     receipt_session = _new_route_receipt_session(context)
     try:

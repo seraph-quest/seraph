@@ -532,23 +532,9 @@ def _proof_reason(
     required = set(context.requirements.capabilities)
     required.update({"latency_ms", "health"})
     if candidate.endpoint_class is EndpointClass.REMOTE:
-        if context.requirements.max_cost_microusd is None or candidate.profile.cost_microusd is None:
-            return "profile_cost_unknown"
-        if candidate.profile.provider_kind == NEAR_TEE_PROVIDER_KIND:
-            # Prices come from the NEAR catalog setup receipt, which the NEAR
-            # TEE caller re-validates locally (binding, not age) before
-            # admission (ADR-035 amendment #1178).
-            if candidate.profile.cost_source != "near_tee_catalog_receipt":
-                return "profile_cost_source_missing_or_stale"
-        elif (
-            not candidate.profile.cost_source
-            or candidate.profile.cost_source_updated_at is None
-            or candidate.profile.cost_source_updated_at < now - 2_592_000
-            or candidate.profile.cost_source_updated_at > now
-        ):
-            return "profile_cost_source_missing_or_stale"
-        if candidate.profile.cost_microusd > context.requirements.max_cost_microusd:
-            return "profile_cost_noncompliant"
+        # ADR-037 (#1284): no remote route is selected or refused by cost;
+        # spending limits live in the provider account.
+        pass
     else:
         if context.requirements.max_local_resource_ms is None or candidate.profile.local_resource_ms is None:
             return "profile_local_resource_unknown"

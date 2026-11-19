@@ -297,8 +297,9 @@ def test_catalog_cost_bound_and_shape():
     facts = parse_catalog_record(json.dumps(catalog_record()).encode(), model_id=TEXT_MODEL)
     # 8192 x 0.04/M + 1024 x 1.35/M USD = 327.68 + 1382.4 microUSD -> 1711 (ceil)
     assert evaluate_catalog(facts, slot_name="text", slot=_slot(enabled=True)) == (None, 1711)
+    # #1284: a stored legacy bound below the catalog price is read past, never compared.
     assert evaluate_catalog(facts, slot_name="text", slot=_slot(enabled=True, request_cost_bound_microusd=1710)) == (
-        "near_tee_catalog_cost_bound_too_small", 1711)
+        None, 1711)
     no_price = catalog_record()
     del no_price["outputCostPerToken"]
     facts = parse_catalog_record(json.dumps(no_price).encode(), model_id=TEXT_MODEL)
@@ -324,7 +325,7 @@ async def _login(client, monkeypatch):
 
 async def _configure(client, **slot_changes):
     lane = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
-        "inference_lane": {"spend_ceiling_microusd": 1_000_000}})
+        "inference_lane": {}})
     assert lane.status_code == 200, lane.text
     saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3,
         "near_tee": {"api_key": PROVIDER_KEY, "slots": {"text": slot_payload(**slot_changes)}}})
@@ -336,11 +337,8 @@ async def _configure(client, **slot_changes):
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_settings_save_is_witnessed_cas_and_local(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
     near = NearFixture().install(monkeypatch)
-    early = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
-        "near_tee": {"slots": {"text": slot_payload()}}})
-    assert early.status_code == 409 and early.json()["detail"] == "inference_lane_required"
     assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
-        "inference_lane": {"spend_ceiling_microusd": 1_000_000}})).status_code == 200
+        "inference_lane": {}})).status_code == 200
     unlisted = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3,
         "near_tee": {"slots": {"text": slot_payload(model_id="anthropic/claude-sonnet-4")}}})
     assert unlisted.status_code == 422 and unlisted.json()["detail"] == "near_tee_model_not_allowlisted"
@@ -460,7 +458,7 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
         json={"expected_policy_revision": 5})).status_code == 200
     await _prove_slot(client, near)
     ledger = await durable_job_repository.inference_accounting_snapshot()
-    assert ledger["committed_microusd"] == 3 * 1500 and ledger["unknown_microusd"] == 0
+    assert ledger["spent_microusd"] == 3 * 1500 and ledger["unpriced_requests"] == 0
     assert {row["profile_id"] for row in ledger["operations"]} == {"near_tee.text"}
     status = (await client.get("/api/settings/model-fabric")).json()
     assert status["near_tee"]["slots"]["text"]["status"] == "ready", status["near_tee"]
@@ -506,7 +504,7 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
         assert inference_body["model"] == TEXT_MODEL and inference_body["stream"] is False
         assert inference_body["temperature"] == 0.4 and inference_body["max_tokens"] == 900
         snapshot = await durable_job_repository.inference_accounting_snapshot()
-        assert snapshot["committed_microusd"] == 4 * 1500 and snapshot["unknown_microusd"] == 0
+        assert snapshot["spent_microusd"] == 4 * 1500 and snapshot["unpriced_requests"] == 0
         row = [item for item in snapshot["operations"] if item["runtime_path"] == "end_of_day_goal_report"]
         assert len(row) == 1 and row[0]["state"] == "settled" and row[0]["profile_id"] == "near_tee.text"
         assert row[0]["actual_cost_microusd"] == 1500
@@ -518,7 +516,7 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
             await report()
         near.echo_model = None
         snapshot = await durable_job_repository.inference_accounting_snapshot()
-        assert snapshot["committed_microusd"] == 5 * 1500 and snapshot["unknown_microusd"] == 0
+        assert snapshot["spent_microusd"] == 5 * 1500 and snapshot["unpriced_requests"] == 0
 
         # Reasoning with empty answer content is an empty output, never answer text.
         near.answer = {"role": "assistant", "content": "", "reasoning_content": "PRIVATE-REASONING-MUST-NOT-LEAK"}
@@ -539,23 +537,24 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
         assert streamed.value.reason_codes == ("proof_missing:streaming",)
         assert len(near.requests) == before
 
-        # Missing billing becomes an Unknown liability and the serial lease stays blocked.
+        # #1284: missing billing is "not priced yet": the answer is delivered,
+        # the row is unknown and the serial lease is free for the next request.
         near.billing_missing = True
         near.body_id = "chatcmpl-unknown"
-        from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
-        with pytest.raises(GpuAdmissionUncertainError) as uncertain:
-            await report()
-        assert isinstance(uncertain.value.__cause__, NearTeeError)
-        assert uncertain.value.__cause__.code == "near_tee_cost_liability"
+        near.answer = {"role": "assistant", "content": "Unpriced report body."}
+        response = await report()
+        assert response.choices[0].message.content == "Unpriced report body."
         snapshot = await durable_job_repository.inference_accounting_snapshot()
         unknown = [item for item in snapshot["operations"] if item["state"] == "unknown"]
         assert len(unknown) == 1 and unknown[0]["profile_id"] == "near_tee.text"
-        assert snapshot["unknown_microusd"] > 0
+        assert unknown[0]["actual_cost_microusd"] is None and snapshot["unpriced_requests"] == 1
         receipt = remote_inference_admission_broker.receipt_for(unknown[0]["operation_id"])
-        assert receipt.status == "blocked" and receipt.reconciliation_required
+        assert receipt.status != "blocked" and not receipt.reconciliation_required
+        assert remote_inference_admission_broker._active_operation_id is None
         near.billing_missing = False
-        # The serial lease stays held by the Unknown operation until fenced settlement.
-        assert receipt.active_operation_id == unknown[0]["operation_id"]
+        near.body_id = "chatcmpl-after-unknown"
+        near.answer = {"role": "assistant", "content": "ok"}
+        assert (await report()).choices[0].message.content == "ok"
         # Zero OpenRouter contact on every route: the fixture refuses any other host.
         assert {request.url.host for request in near.requests} == {"cloud-api.near.ai"}
     finally:
@@ -611,7 +610,7 @@ def test_priority_and_serial_bound_preserved_for_near_tee_contexts():
     assert priority_for_inference_context(report) is GpuPriority.REPORTS_RESEARCH_MEMORY
     assert GpuPriority.INTERACTIVE_CHAT.rank > GpuPriority.REPORTS_RESEARCH_MEMORY.rank  # chat first
     with pytest.raises(ValueError):
-        validate_inference_lane(InferenceLaneConfig(spend_ceiling_microusd=1000, max_inflight=2))
+        validate_inference_lane(InferenceLaneConfig(max_inflight=2))
 
 
 async def _ready_slot(client, monkeypatch):
@@ -644,7 +643,7 @@ def _report_call(operator, *, runtime_path="end_of_day_goal_report"):
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_lease_granted_too_late_is_a_never_contacted_denial(client, model_fabric_workspace,
         keyless_openrouter, monkeypatch, isolated_broker):
-    """A lease that starts after the billing window no longer fits is denied
+    """A lease granted with under one second left for the request is denied
     durably before contact: no NEAR request, no Unknown, lease released."""
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.model_fabric import near_tee
@@ -657,8 +656,8 @@ async def test_lease_granted_too_late_is_a_never_contacted_denial(client, model_
     async def late_admission(**kwargs):
         call = await original(**kwargs)
         # Preflight passed with a full window; by the time the lease is
-        # granted only 5s remain, less than the 16s billing reserve.
-        return replace(call, context=replace(call.context, deadline_at=time.time() + 5))
+        # granted under one second remains for the request itself.
+        return replace(call, context=replace(call.context, deadline_at=time.time() + 0.5))
     try:
         monkeypatch.setattr(near_tee, "prepare_near_tee_call", late_admission)
         before = len(near.requests)
@@ -667,7 +666,7 @@ async def test_lease_granted_too_late_is_a_never_contacted_denial(client, model_
         assert "near_tee_deadline_insufficient" in repr(denied.value) + repr(denied.value.__cause__)
         assert len(near.requests) == before  # no bytes left for NEAR
         snapshot = await durable_job_repository.inference_accounting_snapshot()
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
         assert all(row["state"] != "unknown" and row["contact_started_at"] is None
             for row in snapshot["operations"] if row["runtime_path"] == "end_of_day_goal_report")
         assert isolated_broker._active_operation_id is None  # lease released, not blocked
@@ -680,16 +679,18 @@ async def test_lease_granted_too_late_is_a_never_contacted_denial(client, model_
 
 
 async def _unknown_operation(near, operator, durable_job_repository, broker):
-    from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
+    """#1284: an unpriced NEAR answer is delivered and frees the lane."""
     near.billing_missing = True
     near.body_id = "chatcmpl-unknown-settle"
-    with pytest.raises(GpuAdmissionUncertainError):
-        await _report_call(operator)()
+    response = await _report_call(operator)()
+    assert response.choices[0].message.content == "Report body from the NEAR TEE fixture."
     near.billing_missing = False
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     (row,) = [item for item in snapshot["operations"] if item["state"] == "unknown"]
+    assert snapshot["unpriced_requests"] == 1
     receipt = broker.receipt_for(row["operation_id"])
-    assert receipt.status == "blocked" and receipt.reconciliation_required
+    assert receipt.status != "blocked" and not receipt.reconciliation_required
+    assert broker._active_operation_id is None
     return row
 
 
@@ -702,8 +703,10 @@ async def _settle(client, row):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.parametrize("disable_first", [False, True])
-async def test_unknown_near_tee_operation_recovers_by_fenced_settlement(client, model_fabric_workspace,
+async def test_unpriced_near_tee_operation_charge_can_be_recorded_later(client, model_fabric_workspace,
         keyless_openrouter, monkeypatch, isolated_broker, disable_first):
+    """#1284: an unpriced request never held the lane; recording its charge
+    later (optional, manual) only fills the history in."""
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.model_fabric.contracts import NoCompliantModelRouteError
     from src.workflows.job_runtime import durable_job_repository
@@ -720,14 +723,16 @@ async def test_unknown_near_tee_operation_recovers_by_fenced_settlement(client, 
         settled = await _settle(client, row)
         assert settled.status_code == 200, settled.text
         body = settled.json()
-        assert body["status"] == "settled" and body["lane_recovery"]["status"] == "reconciled", body
+        assert body["status"] == "settled", body
         receipt = isolated_broker.receipt_for(row["operation_id"])
-        assert receipt.status == "failed" and not receipt.reconciliation_required
+        assert receipt.status != "blocked" and not receipt.reconciliation_required
         snapshot = await durable_job_repository.inference_accounting_snapshot()
-        assert snapshot["unknown_microusd"] == 0
+        assert snapshot["unpriced_requests"] == 0
+        (recorded,) = [item for item in snapshot["operations"] if item["operation_id"] == row["operation_id"]]
+        assert recorded["state"] == "settled" and recorded["actual_cost_microusd"] == 1500
         before = len(near.requests)
         if disable_first:
-            # Lane recovered; the disabled slot stays blocked with no contact.
+            # The lane is free; the disabled slot stays blocked with no contact.
             with pytest.raises(NoCompliantModelRouteError):
                 await _report_call(operator)()
             assert len(near.requests) == before

@@ -33,50 +33,9 @@ from tests.support.brokers import use_inference_broker
 pytestmark = pytest.mark.openrouter_legacy
 
 
-@pytest_asyncio.fixture
-async def accounting_db(tmp_path, monkeypatch):
-    # Register both canonical SQLModel owners before materializing this file DB.
-    # Reviewed-method selection can otherwise register its table during a later
-    # test, after create_all, leaving full-metadata readback without that table.
-    from src.db import models as _models  # noqa: F401
-    from src.db import task_method_models as _task_method_models  # noqa: F401
-
-    root = tmp_path / "workspace"
-    root.mkdir()
-    monkeypatch.setattr(settings, "workspace_dir", str(root))
-    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
-    from src.workspace.production import prepare_lifecycle_directory
-    prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
-    # Partial (#1222): still its own engine, not create_database_engine, so no
-    # foreign keys, WAL or busy-timeout pragmas. Several fixtures seeded on it
-    # violate foreign keys, which production pragmas enforce. Tracked as a
-    # follow-up to #1222 in #1241.
-    engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'seraph.db'}", connect_args={"timeout": 5})
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except BaseException:
-                await session.rollback()
-                raise
-    # The single database seam (#1222): every get_session caller uses this file.
-    install_database(monkeypatch, engine)
-    factory.accounting_sessions = sessions
-    try:
-        yield root, engine, factory
-    finally:
-        # As the `db` fixture: tracked background work writes to this engine,
-        # so it finishes before the engine is disposed (#1223).
-        try:
-            await drain_tracked_tasks(timeout_seconds=5.0)
-            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
-        finally:
-            await engine.dispose()
+# Database and lifecycle plumbing shared by many files (#1284): it lives in
+# tests/support/accounting.py and is re-exported here for existing imports.
+from tests.support.accounting import accounting_db  # noqa: E402,F401
 
 
 @pytest.mark.asyncio
@@ -103,7 +62,7 @@ def setup_configuration(*, ceiling=1000, bound=100):
 def request(operation_id, *, owner="service:accounting", priority=RemoteInferencePriority.INTERACTIVE_CHAT):
     return RemoteInferenceAdmissionRequest(operation_id=operation_id, job_id=operation_id,
         owner_id=owner, priority=priority, deadline_at=time.time() + 120,
-        runtime_path="chat_agent", data_digest="a" * 64, owner_budget_microusd=1000)
+        runtime_path="chat_agent", data_digest="a" * 64)
 
 
 @pytest.mark.parametrize("value, expected", [("0.0000001", 1), ("0.0000061", 7), (0, 0), ("-1", None), ("NaN", None), ("Infinity", None), (True, None), ({}, None)])
@@ -133,7 +92,7 @@ async def test_actual_broker_execution_settles_and_reopens_file_db(accounting_db
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
     async def transport():
@@ -143,36 +102,34 @@ async def test_actual_broker_execution_settles_and_reopens_file_db(accounting_db
     assert result["choices"][0]["message"]["content"] == "result"
     before = await repository.inference_accounting_snapshot()
     assert before["status"] == "ready", before
-    assert before["committed_microusd"] == 7
-    assert before["remaining_microusd"] == 993
+    assert before["spent_microusd"] == 7
+    assert before["unpriced_requests"] == 0
     assert calls == ["actual intercepted callback"]
     job = await repository.get_job(before["operations"][0]["job_id"])
     assert job["status"] == "succeeded"
     assert "no_learning" in job["result"]["summary"]
     await engine.dispose()
     restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    assert (await DurableJobRepository().inference_accounting_snapshot())["remaining_microusd"] == 993
+    assert (await DurableJobRepository().inference_accounting_snapshot())["spent_microusd"] == 7
     with pytest.raises(ValueError):
         await restarted.execute(request("operation-one"), transport)
     assert len(calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_unknown_cost_survives_rollover_and_explicit_revision_settlement(accounting_db):
-    setup_configuration(ceiling=100, bound=100)
+async def test_unknown_cost_explicit_revision_settlement(accounting_db):
+    setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(100)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     async def no_cost():
         return {"id": "embd-fixture", "usage": {"prompt_tokens": 5}}
     await broker.execute(request("embedding", owner="service:embedding"), no_cost)
-    snapshot = await repository.inference_accounting_snapshot(now=datetime.now(timezone.utc) + timedelta(days=70))
+    snapshot = await repository.inference_accounting_snapshot()
     row = snapshot["operations"][0]
-    assert snapshot["unknown_microusd"] == 100
-    assert snapshot["remaining_microusd"] == 0
+    assert snapshot["unpriced_requests"] == 1
     assert row["state"] == "unknown"
-    with pytest.raises(ValueError):
-        await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("new-owner", owner="service:fresh-owner"), no_cost)
+    assert row["recovery_reason"] == "provider_cost_readback_required"
     with pytest.raises(InferenceAccountingError, match="revision_changed"):
         await repository.settle_inference_cost(row["operation_id"], job_id=row["job_id"],
             expected_revision=row["revision"] - 1, actual_cost_microusd=12,
@@ -181,11 +138,42 @@ async def test_unknown_cost_survives_rollover_and_explicit_revision_settlement(a
         expected_revision=row["revision"], actual_cost_microusd=12,
         evidence_digest="b" * 64, operator_id="operator:settings-owner", idempotency_key="manual-1")
     after = await repository.inference_accounting_snapshot()
-    assert after["committed_microusd"] == 12
-    assert after["unknown_microusd"] == 0
+    assert after["spent_microusd"] == 12
+    assert after["unpriced_requests"] == 0
     assert after["operations"][0]["period_id"] == row["period_id"]
-    # Settlement is billing authority only; the unknown job is not resumed.
-    assert (await repository.get_job(row["job_id"]))["status"] == "cost_liability"
+    # #1284: the answer was adopted while unpriced; settlement is billing
+    # history only and does not change the job.
+    assert (await repository.get_job(row["job_id"]))["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_failed_call_after_contact_is_recorded_as_no_answer_not_succeeded(accounting_db):
+    # #1284: an unpriced record from a call that raised after contact says
+    # "no answer"; its ephemeral job is never reported as succeeded. The
+    # failure is declared certain here, so the serial lane (whose uncertain
+    # result hold is unchanged) is free and the next request is answered.
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    async def failing_after_contact():
+        raise RuntimeError("provider connection dropped after the request was sent")
+    with pytest.raises(RuntimeError, match="dropped"):
+        await broker.execute(request("failed-after-contact"), failing_after_contact, uncertain_on_error=False)
+    snapshot = await repository.inference_accounting_snapshot()
+    row = next(item for item in snapshot["operations"] if item["operation_id"] == "failed-after-contact")
+    assert row["state"] == "unknown" and row["contact_started_at"] is not None
+    assert row["recovery_reason"] == "provider_call_failed"
+    assert snapshot["unpriced_requests"] == 1
+    job = await repository.get_job(row["job_id"])
+    assert job["status"] != "succeeded"
+    async def answered():
+        return {"id": "gen-after-failure", "usage": {"cost": "0.000002"}, "choices": [{"message": {"content": "ok"}}]}
+    assert (await broker.execute(request("answered-after-failure"), answered))["choices"][0]["message"]["content"] == "ok"
+    after = await repository.inference_accounting_snapshot()
+    answered_row = next(item for item in after["operations"] if item["operation_id"] == "answered-after-failure")
+    assert answered_row["state"] == "settled" and answered_row["recovery_reason"] is None
+    assert (await repository.get_job(answered_row["job_id"]))["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -193,7 +181,7 @@ async def test_old_database_and_settings_cannot_erase_outside_root_witness(accou
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     await engine.dispose()
     old_db = root.parent / "old.db"
     shutil.copy2(root / "seraph.db", old_db)
@@ -205,13 +193,13 @@ async def test_old_database_and_settings_cannot_erase_outside_root_witness(accou
     shutil.copy2(old_db, root / "seraph.db")
     (root / "model-fabric-settings.json").write_bytes(old_metadata)
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["status"] == "blocked"
+    assert snapshot["status"] == "unavailable"
     calls = []
     with pytest.raises(ValueError, match="continuity_unavailable"):
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("rollback-replay"), lambda: calls.append("forbidden"))
     assert calls == []
     with pytest.raises(InferenceAccountingError, match="continuity_unavailable"):
-        await repository.configure_inference_accounting(1000)
+        await repository.ensure_inference_ledger()
 
 
 @pytest.mark.asyncio
@@ -219,7 +207,7 @@ async def test_missing_witness_blocks_sync_and_stream_before_transport(accountin
     root, _engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     lifecycle_receipt_path(ProductionWorkspace(host_root=root)).unlink()
     calls = []
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
@@ -237,7 +225,7 @@ async def test_missing_witness_blocks_sync_and_stream_before_transport(accountin
 @pytest.mark.asyncio
 async def test_duplicate_concurrent_reservations_execute_at_most_once(accounting_db):
     setup_configuration()
-    await DurableJobRepository().configure_inference_accounting(1000)
+    await DurableJobRepository().ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
     in_contact = Gate("first contact")
@@ -257,7 +245,7 @@ async def test_duplicate_concurrent_reservations_execute_at_most_once(accounting
     outcomes = await asyncio.gather(*duplicates, return_exceptions=True)
     assert len(calls) == 1, outcomes
     snapshot = await DurableJobRepository().inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 1
+    assert snapshot["spent_microusd"] == 1
     assert len(snapshot["operations"]) == 1
 
 
@@ -299,7 +287,7 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
             "request_cost_bound_microusd": 100, "credential_ref": "env:OPENROUTER_API_KEY"}
         saved = await client.put("/api/settings/model-fabric", headers=headers, json={"openrouter_setup": setup})
         assert saved.status_code == 200, saved.text
-        assert saved.json()["inference_accounting"]["remaining_microusd"] == 1000
+        assert saved.json()["inference_accounting"]["status"] == "ready"
         from src.api.model_fabric_settings import model_fabric_runtime_status
         runtime = await model_fabric_runtime_status("openrouter")
         assert runtime["inference_accounting"]["status"] == "ready"
@@ -310,7 +298,7 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
         assert len(calls) == 1, canary.text
         readback = (await client.get("/api/settings/model-fabric/accounting")).json()
         row = readback["operations"][0]
-        assert row["state"] == "unknown" and readback["unknown_microusd"] == 100
+        assert row["state"] == "unknown" and readback["unpriced_requests"] == 1
         assert row["owner_id"] == login.json()["principal_id"]
         await client.post("/api/auth/logout", headers=headers)
         relogin = await client.post("/api/auth/login", headers=headers, json={"password": "accounting-api-password"})
@@ -318,7 +306,7 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
         assert relogin.json()["principal_id"] != login.json()["principal_id"]
         retained = (await client.get("/api/settings/model-fabric/accounting")).json()
         assert retained["deployment_id"] == readback["deployment_id"]
-        assert retained["unknown_microusd"] == 100 and retained["remaining_microusd"] == 900
+        assert retained["unpriced_requests"] == 1
         assert retained["operations"][0]["owner_id"] == login.json()["principal_id"]
         body = {"operation_id": row["operation_id"], "job_id": row["job_id"], "expected_revision": row["revision"],
             "actual_cost_microusd": 9, "evidence_digest": "e" * 64, "idempotency_key": "api-manual-1"}
@@ -332,11 +320,11 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
         repeated = await client.post(row["controls"][0]["endpoint"], headers=headers, json=body)
         assert repeated.json() == settled.json()
         final = (await client.get("/api/settings/model-fabric/accounting")).json()
-        assert final["committed_microusd"] == 9 and final["unknown_microusd"] == 0
+        assert final["spent_microusd"] == 9 and final["unpriced_requests"] == 0
         evidence = json.loads(final["operations"][0]["evidence_json"])[-1]
         assert evidence["provenance"] == "manual_externally_unverified"
         assert evidence["provider_charge_verified"] is False
-        assert (await DurableJobRepository().get_job(row["job_id"]))["status"] == "cost_liability"
+        assert (await DurableJobRepository().get_job(row["job_id"]))["status"] == "succeeded"
         lifecycle_receipt_path(ProductionWorkspace(host_root=root)).unlink()
         blocked_runtime = await model_fabric_runtime_status("openrouter")
         assert blocked_runtime["inference_readiness"]["status"] == "blocked"
@@ -351,7 +339,7 @@ async def test_restore_carries_latest_ledger_and_missing_witness_refuses(account
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     await engine.dispose()
     restored = root.parent / "staged"
     restored.mkdir()
@@ -372,7 +360,7 @@ async def test_restore_carries_latest_ledger_and_missing_witness_refuses(account
         await connection.exec_driver_sql("BEGIN IMMEDIATE")
         await _ensure_inference_group_lookup(connection)
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 13 and snapshot["remaining_microusd"] == 987
+    assert snapshot["spent_microusd"] == 13
     assert snapshot["operations"][0]["owner_id"] == "service:accounting"
     assert (await repository.get_job(snapshot["operations"][0]["job_id"]))["status"] == "blocked"
     lifecycle_receipt_path(ProductionWorkspace(host_root=root)).unlink()
@@ -381,25 +369,22 @@ async def test_restore_carries_latest_ledger_and_missing_witness_refuses(account
 
 
 @pytest.mark.asyncio
-async def test_all_billable_kinds_missing_ledger_invalid_owner_never_contact(accounting_db):
+async def test_retired_audio_and_invalid_owner_never_contact(accounting_db):
+    # #1284: a missing ledger is created on the first request, so it no
+    # longer denies; the retired audio route and owner authority still do.
     setup_configuration()
     calls = []
     async def provider():
         calls.append("forbidden")
-    for runtime_path in ("chat_agent", "embedding", "capability_probe", "screen_artifact_analysis", "audio_transcription"):
-        candidate = replace(request("missing:" + runtime_path), runtime_path=runtime_path)
-        # Audio has an explicit v3/native-only contract; legacy setup denies
-        # it before the shared ledger is consulted. Other billable kinds keep
-        # their original continuity-first failure and never reach a callback.
-        denial = "audio_route_retired" if runtime_path == "audio_transcription" else "continuity_unavailable"  # #1179
-        with pytest.raises(ValueError, match=denial):
-            await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(candidate, provider)
+    candidate = replace(request("missing:audio_transcription"), runtime_path="audio_transcription")
+    with pytest.raises(ValueError, match="audio_route_retired"):  # #1179
+        await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(candidate, provider)
     from src.db.models import WorkflowRunState, InferenceCostReservation
     from sqlalchemy import select
     async with accounting_db[2].accounting_sessions() as db:
         assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
         assert (await db.execute(select(InferenceCostReservation))).scalars().all() == []
-    await DurableJobRepository().configure_inference_accounting(1000)
+    await DurableJobRepository().ensure_inference_ledger()
     with pytest.raises(ValueError, match="authority_invalid"):
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("invalid-owner", owner="unbound-principal"), provider)
     assert calls == []
@@ -413,7 +398,7 @@ async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accou
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started, release = asyncio.Event(), asyncio.Event()
     changed = asyncio.Event()
@@ -521,7 +506,7 @@ async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accou
             for task in tasks:
                 task.result()
         assert order == ["active", "foreground", "background"]
-        assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 3
+        assert (await repository.inference_accounting_snapshot())["spent_microusd"] == 3
         async def revoke_after_charge():
             from src.model_fabric.accounting import capture_inference_usage
             capture_inference_usage({"usage": {"cost": "0.000005"}})
@@ -530,8 +515,8 @@ async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accou
             return {"content": "must not adopt"}
         with pytest.raises((PermissionError, InferenceAccountingError)):
             await broker.execute(request("revoked-after-contact"), revoke_after_charge)
-        assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 8
-        observe("assertions", "passed", order=order, committed_microusd=8)
+        assert (await repository.inference_accounting_snapshot())["spent_microusd"] == 8
+        observe("assertions", "passed", order=order, spent_microusd=8)
         succeeded = True
     finally:
         primary = sys.exception()
@@ -577,7 +562,7 @@ async def test_witness_before_commit_crash_explicit_maintenance_retains_contact(
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     workspace = ProductionWorkspace(host_root=root)
     original_commit = AsyncSession.commit
     fail_once = True
@@ -596,7 +581,7 @@ async def test_witness_before_commit_crash_explicit_maintenance_retains_contact(
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("commit-gap"), forbidden)
     assert not fail_once and calls == []
     await engine.dispose()
-    assert (await repository.inference_accounting_snapshot())["status"] == "blocked"
+    assert (await repository.inference_accounting_snapshot())["status"] == "unavailable"
     with pytest.raises(ValueError, match="continuity_unavailable"):
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("commit-gap-new"), forbidden)
     registry = canonical_workspace_registry(root)
@@ -611,7 +596,7 @@ async def test_witness_before_commit_crash_explicit_maintenance_retains_contact(
         await connection.exec_driver_sql("BEGIN IMMEDIATE")
         await _ensure_inference_group_lookup(connection)
     after = await repository.inference_accounting_snapshot()
-    assert after["status"] == "ready" and after["unknown_microusd"] == 100
+    assert after["status"] == "ready"
     assert after["operations"][0]["state"] == "contact_started"
     with maintenance_fence(workspace):
         assert reconcile_accounting_checkpoint(root=root, registry=registry)["status"] == "already_reconciled"
@@ -620,10 +605,11 @@ async def test_witness_before_commit_crash_explicit_maintenance_retains_contact(
 
 
 @pytest.mark.asyncio
-async def test_charge_above_bound_retained_and_next_admission_blocks(accounting_db):
+async def test_charge_above_legacy_bound_settles_and_next_admission_proceeds(accounting_db):
+    # #1284: a legacy stored bound is read past; no overrun latch exists.
     setup_configuration(ceiling=1000, bound=1)
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     calls = []
     async def charged():
         calls.append("provider")
@@ -631,18 +617,19 @@ async def test_charge_above_bound_retained_and_next_admission_blocks(accounting_
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     await broker.execute(request("over-bound"), charged)
     snapshot = await repository.inference_accounting_snapshot()
-    assert snapshot["committed_microusd"] == 6
-    assert snapshot["operations"][0]["recovery_reason"] == "provider_charge_exceeded_reservation"
-    with pytest.raises(ValueError, match="exceeded_reservation"):
-        await broker.execute(request("over-bound-next"), charged)
-    assert len(calls) == 1
+    assert snapshot["spent_microusd"] == 6
+    assert snapshot["operations"][0]["state"] == "settled"
+    assert snapshot["operations"][0]["recovery_reason"] is None
+    await broker.execute(request("over-bound-next"), charged)
+    assert len(calls) == 2
+    assert (await repository.inference_accounting_snapshot())["spent_microusd"] == 12
 
 
 @pytest.mark.asyncio
 async def test_shared_sync_async_stream_broker_one_active(accounting_db):
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started, release = asyncio.Event(), asyncio.Event()
     order = []
@@ -674,7 +661,7 @@ async def test_shared_sync_async_stream_broker_one_active(accounting_db):
     release.set()
     await asyncio.gather(streaming, syncing, executing)
     assert sorted(order) == ["async", "stream", "sync"]
-    assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 3
+    assert (await repository.inference_accounting_snapshot())["spent_microusd"] == 3
 
 
 @pytest.mark.asyncio
@@ -682,7 +669,7 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     _root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started = asyncio.Event()
     calls = []
@@ -712,27 +699,25 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     rows = {row["operation_id"]: row for row in snapshot["operations"]}
     assert rows["cancel-queued"]["state"] == "released"
     assert rows["cancel-contacted"]["state"] == "unknown"
-    assert snapshot["unknown_microusd"] == 100 and snapshot["remaining_microusd"] == 900
-    await repository.configure_inference_accounting(1200)
-    revised = await repository.inference_accounting_snapshot()
-    assert revised["unknown_microusd"] == 100 and revised["remaining_microusd"] == 1100
+    assert snapshot["unpriced_requests"] == 1
+    await repository.ensure_inference_ledger()
+    assert (await repository.inference_accounting_snapshot())["unpriced_requests"] == 1
     with pytest.raises((ValueError, InferenceAccountingError)):
         await recreated.execute(request("cancel-contacted"), forbidden)
     assert calls == ["contacted"]
 
 
 @pytest.mark.asyncio
-async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_period_fence(accounting_db, monkeypatch):
+async def test_status_snapshot_never_takes_the_writer_lock_or_writes(accounting_db, monkeypatch):
     """#702: status polls ran BEGIN IMMEDIATE and queued behind any writer."""
     import sqlite3
     import threading
     from sqlalchemy import event
-    from src.workspace import accounting_witness
     from src.workspace.production import read_lifecycle_receipt, write_lifecycle_receipt
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     statements = []
     event.listen(engine.sync_engine, "before_cursor_execute",
         lambda _conn, _cursor, statement, *_args: statements.append(" ".join(statement.split()[:2]).upper()))
@@ -768,28 +753,23 @@ async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_peri
         release.set()
         writer.join(10)
 
-    # A new period is a clock-rollback fence: it is still persisted, under the
-    # writer transaction, exactly once.
-    following = f"{int(ready['period_id'][:4]) + 1}{ready['period_id'][4:]}"
-    monkeypatch.setattr(accounting_witness, "utc_period", lambda now=None: following)
+    # #1284: a new UTC month is display only; a read never writes a period.
     statements.clear()
-    rolled = await repository.inference_accounting_snapshot()
-    assert rolled["reason_code"] == "accounting_period_review_required"
-    assert rolled["period_high_water"] == following and rolled["revision"] == ready["revision"] + 1
-    assert "BEGIN IMMEDIATE" in statements
-    statements.clear()
-    assert (await repository.inference_accounting_snapshot())["revision"] == rolled["revision"]
+    rolled = await repository.inference_accounting_snapshot(now=datetime.now(timezone.utc) + timedelta(days=400))
+    assert rolled["status"] == "ready" and rolled["reason_code"] is None
+    assert rolled["revision"] == ready["revision"] and rolled["period_id"] != ready["period_id"]
     assert "BEGIN IMMEDIATE" not in statements
+    assert not [item for item in statements if item.split()[0] in {"INSERT", "UPDATE", "DELETE"}]
 
     # A witness ahead of the snapshot (a writer between witness and commit)
     # is settled by the serialized path, which keeps failing closed if real.
     workspace = ProductionWorkspace(host_root=root)
     receipt = read_lifecycle_receipt(workspace)
-    receipt["inference_accounting"] = {**receipt["inference_accounting"], "revision": rolled["revision"] + 1}
+    receipt["inference_accounting"] = {**receipt["inference_accounting"], "revision": ready["revision"] + 1}
     write_lifecycle_receipt(workspace, receipt)
     statements.clear()
     diverged = await repository.inference_accounting_snapshot()
-    assert diverged["status"] == "blocked" and diverged["reason_code"] == "accounting_continuity_unavailable"
+    assert diverged["status"] == "unavailable" and diverged["reason_code"] == "accounting_continuity_unavailable"
     assert "BEGIN IMMEDIATE" in statements
 
 
@@ -806,7 +786,7 @@ async def test_status_snapshot_falls_back_to_serialized_read_when_witness_moves(
     root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
-    await repository.configure_inference_accounting(1000)
+    await repository.ensure_inference_ledger()
     ready = await repository.inference_accounting_snapshot()
     statements = []
     event.listen(engine.sync_engine, "before_cursor_execute",

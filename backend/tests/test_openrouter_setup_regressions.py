@@ -73,7 +73,7 @@ def _request() -> Request:
     )
 
 
-def test_canonical_context_derives_bounded_cost_and_owner_budget():
+def test_canonical_context_carries_no_cost_or_owner_budget():
     principal = TrustPrincipal(
         principal_id="operator-cost-contract",
         principal_type=PrincipalType.OPERATOR,
@@ -98,40 +98,13 @@ def test_canonical_context_derives_bounded_cost_and_owner_budget():
             session_id=principal.session_id,
         )
 
-    assert context.owner_budget_microusd == 25_000
-    assert context.estimated_cost_microusd is not None
-    assert 0 < context.estimated_cost_microusd <= context.owner_budget_microusd
+    # ADR-037 (#1284): a stored legacy policy amount reaches neither the
+    # request context nor the broker admission request.
+    assert not hasattr(context, "owner_budget_microusd")
+    assert not hasattr(context, "estimated_cost_microusd")
+    assert context.requirements.max_cost_microusd is None
     admission = GpuAdmissionRequest.from_inference_context(context)
-    assert admission.estimated_cost_microusd == context.estimated_cost_microusd
-    assert admission.owner_budget_microusd == context.owner_budget_microusd
-
-
-def test_canonical_context_caps_large_estimate_to_persisted_ceiling():
-    principal = TrustPrincipal(
-        principal_id="operator-cost-cap",
-        principal_type=PrincipalType.OPERATOR,
-        grants=(AuthorityGrant.MODEL_INFERENCE,),
-        session_id="session-cost-cap",
-    )
-    policy = WorkloadPolicy(
-        "chat_agent",
-        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
-        cloud_egress_acknowledged=True,
-        allowed_provider_kinds=("openrouter",),
-        max_cost_microusd=3,
-    )
-    with patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy):
-        context = build_canonical_inference_context(
-            "chat_agent",
-            payload={"message": "x" * 1000},
-            output_tokens=64,
-            timeout_seconds=5,
-            principal=principal,
-            session_id=principal.session_id,
-        )
-
-    assert context.estimated_cost_microusd == 3
-    assert context.owner_budget_microusd == 3
+    assert not hasattr(admission, "owner_budget_microusd")
 
 
 def test_setup_input_requires_explicit_deny_retention_policy():
@@ -308,7 +281,7 @@ def test_runtime_readiness_uses_persisted_setup_controls_over_legacy_settings(mo
     assert readiness["active_only"] is True
     assert readiness["cloud_egress"] == "cloud_allowed_full"
     assert readiness["cloud_consent"] is True
-    assert readiness["cost_ceiling_microusd"] == 25_000
+    assert "cost_ceiling_microusd" not in readiness
     assert "openrouter_only_mode_disabled" not in readiness["reasons"]
     assert "openrouter_upstream_allowlist_missing" not in readiness["reasons"]
     assert "openrouter_fallbacks_enabled" not in readiness["reasons"]

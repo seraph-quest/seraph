@@ -6,6 +6,8 @@ title: "ADR-012: Finite Durable Read-only Research"
 
 **Status:** Accepted
 
+**Amended by:** [ADR-037](./037-no-local-cost-limits.md) (2026-11-18, #1284) supersedes this decision's budget, reserve, period and overrun clauses. Seraph applies no cost limit; spending limits live in the provider account.
+
 **Decision class:** Target architecture
 
 **Date:** 2026-10-03
@@ -112,6 +114,11 @@ implementation cannot silently expand them.
 | Output storage | Existing private owner-bound workspace, bounded nofollow write/promote/readback; source artifacts plus child outputs and final dossier only. |
 | Cost | `b_i` is the existing trusted server request reservation bound, never a caller estimate or absolute upstream billing cap. At funding `sum(b_i) <= C` and current owner/deployment/Goal allowance checks hold. Actual provider overrun is retained and blocks further contacts, including already funded siblings. |
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the Cost row. Funding writes one request record per
+perspective in one transaction, so paired contact stays atomic, but compares no
+slot bound, allowance, ledger ceiling, month or overrun. Actual charges are
+recorded as spend only and block no contact.
+
 The reviewed V4 contract uses prompt bytes. Existing installed cl100k
 counting/approximation cannot establish exact Claude or arbitrary-route input
 tokens; that claim is unnecessary for a hard byte/output/call/time envelope.
@@ -135,6 +142,9 @@ an upstream bill above B or C. Record actual provider charge and keep missing
 charge Unknown. Preserve current deployment/owner continuity and overrun behavior,
 with the shared contact correction below protecting pre-funded work too. Do not
 clip actual debt or present reservations as an absolute billing cap.
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** Under [ADR-037](./037-no-local-cost-limits.md) there is no reservation amount B, allowance C or overrun
+behavior. A missing charge is recorded as "not priced yet" and holds nothing.
 
 Version updates, restart, operator retry, waiting and lease reclaim never renew
 the first deadline, source-read count, call count, cost subsets or original Root.
@@ -240,12 +250,22 @@ policy revision adoption, cheaper caller estimate or budget-renewal retry. If
 current trusted `B_i` exceeds its fixed slot or the policy changed, block and ask
 for a distinct finite reviewed operation; do not transplant old cost liability.
 
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the held-amount, allowance and overrun-denial terms of
+this section. The all-or-neither two-row funding, the fixed call slots and the
+never-contacted rebind stay; nothing is counted against a cost allowance.
+
 This accepted target requires strict two-row funding of real paused prompt-ready
 children plus exact never-contacted current-fence rebind. Design review accepts
 the boundary; implementation and actual runtime proof remain required.
 
 
 ## Shared atomic contact guard and durable held denial
+
+**Amendment 2026-11-18 ([#1284](https://github.com/seraph-quest/seraph/issues/1284), operator direction).** [ADR-037](./037-no-local-cost-limits.md) supersedes the overrun parts of this section: the contact guard no
+longer recomputes the accounting period, ceiling or unreviewed overruns, and a
+settled charge of any size does not deny a sibling. The same-transaction policy
+and consent recheck, the durable never-contacted denial for a changed or
+revoked policy, and its commit-before-signal rule stay.
 
 At the design source checkpoint, the independent critic identified a seam gap: canonical
 `workflows/inference_accounting.py:415-446` checks continuity, reservation/policy,

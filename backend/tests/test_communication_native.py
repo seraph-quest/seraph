@@ -89,7 +89,7 @@ async def test_actual_empty_inspection_native_encrypted_plan(task_runtime, monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("include_calendar,failure_mode", [(False, None), (True, None), (True, "closed"), (True, "unknown"), (True, "insufficient"), (True, "revoked_closed"), (True, "effect_conflict"), (True, "effect_response_loss")])
+@pytest.mark.parametrize("include_calendar,failure_mode", [(False, None), (True, None), (True, "closed"), (True, "unknown"), (True, "revoked_closed"), (True, "effect_conflict"), (True, "effect_response_loss")])
 async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypatch, include_calendar, failure_mode, build_admission_lifecycle):
     import json
     from types import SimpleNamespace
@@ -128,7 +128,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
     await build_admission_lifecycle.start()
     if include_calendar:
         from src.workflows.job_runtime import DurableJobRepository
-        await DurableJobRepository().configure_inference_accounting(50_000)
+        await DurableJobRepository().ensure_inference_ledger()
     operator = mail._operator()
     effect_mode = failure_mode if failure_mode and failure_mode.startswith("effect_") else None
     if effect_mode:
@@ -211,7 +211,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
                     for key, value in mail._reply_body("communication-source").items() if key != "idempotency_key"}],
                     meeting_inputs=[meeting_input] if include_calendar else [],
                     reschedule_inputs=[calendar_effect["proposal"]] if include_calendar and failure_mode is None else [],
-                    acknowledge_private_review=True), max_cost_microusd=50_000 if include_calendar and failure_mode != "insufficient" else 25_000, wall_seconds=120,
+                    acknowledge_private_review=True), max_cost_microusd=50_000 if include_calendar else 25_000, wall_seconds=120,
                 idempotency_key="communication-native-mail")
         async with client:
             response = await client.post("/api/work-board/general-tasks/communications", json=creation.model_dump(mode="json"))
@@ -238,7 +238,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
                 reservations = list((await db.execute(select(InferenceCostReservation))).scalars())
                 paid = [row for row in reservations if row.runtime_path == "strategist_agent"]
                 assert len(paid) == 1 and paid[0].state == "unknown"
-                assert paid[0].bound_microusd == 25_000
+                assert paid[0].bound_microusd == 0
                 child = (await db.execute(select(WorkflowRunState).where(
                     WorkflowRunState.job_kind == "general_task_native_tool_v1"))).scalars().one()
                 checkpoint = json.loads(child.checkpoint_context_json)
@@ -257,7 +257,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
             assert len(calls) == 1 and len(source_reads) == 1
             return
         assert result["completed"] == 1, (result, diagnostics)
-        expected_calls = 1 if failure_mode == "insufficient" else (2 if include_calendar else 1)
+        expected_calls = 2 if include_calendar else 1
         expected_reads = 1 if failure_mode in {"closed", "revoked_closed"} else 2
         assert len(source_reads) == expected_reads and len(calls) == expected_calls
         async with sessions() as db:
@@ -269,13 +269,6 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
             assert private_response.json() == {"task_id": task_id,
                 "plan": plan.model_dump(mode="json"), "no_learning": True}
             (workspace / "communication-api-private-receipt.json").write_text(private_response.text)
-        if failure_mode == "insufficient":
-            assert calendar_requests == [] and len(plan.reply_drafts) == 1
-            assert plan.meeting_preparations == [] and len(plan.unresolved_questions) == 1
-            assert plan.unresolved_questions[0].reason == "general_task_group_cost_limit"
-            assert plan.unresolved_questions[0].source_id == meeting_input["event_binding_id"]
-            assert not any(row[0] == "calendar_meeting_prep" for row in diagnostics)
-            return
         if failure_mode in {"closed", "revoked_closed"}:
             assert plan.reply_drafts == [] and len(plan.meeting_preparations) == 1
             assert len(plan.source_refs) == 1 and len(plan.unresolved_questions) == 1

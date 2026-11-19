@@ -75,8 +75,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     accounting = subparsers.add_parser("accounting-reconcile", help="repair one retained accounting commit checkpoint under maintenance")
     accounting.add_argument("--confirm", action="store_true")
-    accounting.add_argument("--period", help="acknowledge only the exact observed current UTC month")
-    accounting.add_argument("--expected-revision", type=int)
     accounting.add_argument("--policy", action="store_true", help="repair interrupted policy publication as revoked")
     rebind = subparsers.add_parser("accounting-rebind", help="retain deployment accounting before adopting a different canonical root")
     rebind.add_argument("--from-root", type=Path, required=True)
@@ -299,11 +297,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.command == "accounting-reconcile":
                 if not args.confirm:
                     raise WorkspaceLifecycleError("accounting reconciliation requires explicit confirm=True")
-                if args.period:
-                    from src.workspace.accounting_continuity import acknowledge_accounting_period
-                    receipt = acknowledge_accounting_period(root=workspace.host_root, period=args.period,
-                        expected_revision=args.expected_revision, actor="managed_maintenance")
-                elif args.policy:
+                if args.policy:
                     from src.workspace.accounting_witness import reconcile_policy_checkpoint
                     receipt = reconcile_policy_checkpoint(workspace.host_root)
                 else:

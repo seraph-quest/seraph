@@ -86,7 +86,8 @@ def verify_ledger_content(account, raw_rows):
             sealed = json.loads(account.get(TOTALS_COLUMN) or "")
         except ValueError as exc:
             raise ProductionWorkspaceReconciliationError("accounting continuity totals unavailable") from exc
-        if sealed != ledger_totals(rows):
+        # Sealed totals verify in the schema they were written with (#1284).
+        if not isinstance(sealed, dict) or sealed != ledger_totals(rows, sealed.get("schema_version")):
             raise ProductionWorkspaceReconciliationError("accounting continuity totals mismatch")
     return rows
 
@@ -107,41 +108,6 @@ def verify_accounting_generation(database, expected):
         if rows is None:
             raise ProductionWorkspaceReconciliationError("accounting continuity latest ledger unavailable")
         return account, rows
-
-
-def acknowledge_accounting_period(*, root, period, expected_revision, actor):
-    from src.workspace.accounting_witness import maintenance_accounting_lock, utc_period, period_state, ledger_digest, witness
-    from src.workspace.production import ProductionWorkspaceReconciliationError, read_lifecycle_receipt, write_lifecycle_receipt, write_accounting_checkpoint
-    if period != utc_period() or type(expected_revision) is not int:
-        raise ProductionWorkspaceReconciliationError("accounting period review binding invalid")
-    with maintenance_accounting_lock(root) as workspace:
-        receipt = read_lifecycle_receipt(workspace) or {}
-        account, rows = verify_accounting_generation(root / "seraph.db", receipt.get("inference_accounting"))
-        if account["revision"] != expected_revision:
-            raise ProductionWorkspaceReconciliationError("accounting period revision changed")
-        state = period_state(account, rows, period)
-        history = json.loads(account["settings_history_json"])
-        history.append({"kind": "period_observed", "period_id": max(period, state["period_high_water"]), "recorded_at": datetime.now(timezone.utc).isoformat()})
-        history.append({"kind": "period_review", "period_id": period, "accounting_revision": expected_revision,
-            "actor": actor, "recorded_at": datetime.now(timezone.utc).isoformat(), "memory_status": "no_learning"})
-        base = witness(account)
-        account["settings_history_json"] = json.dumps(history, sort_keys=True, separators=(",", ":"))
-        account["revision"] += 1
-        account["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-        account["ledger_digest"] = ledger_digest(account, rows)
-        with sqlite3.connect(root / "seraph.db") as db:
-            db.execute("BEGIN IMMEDIATE")
-            names = ",".join('"'+name+'"=?' for name in account)
-            update = db.execute(f'UPDATE inference_accounting_owners SET {names} WHERE deployment_id=? AND revision=?',
-                (*account.values(), account["deployment_id"], expected_revision))
-            if update.rowcount != 1:
-                raise ProductionWorkspaceReconciliationError("accounting period revision changed")
-            write_accounting_checkpoint(workspace, {"schema_version": 1, "base": base, "account": account,
-                "operations": [], "witness": witness(account), "secret_values_included": False})
-            receipt["inference_accounting"] = witness(account)
-            write_lifecycle_receipt(workspace, receipt, _accounting_lock_held=True)
-        return {"status": "acknowledged", "period_id": period, "revision": account["revision"],
-            "period_high_water": max(period, state["period_high_water"]), "job_authority_changed": False, "memory_status": "no_learning"}
 
 
 def rebind_accounting_root(*, active, target):

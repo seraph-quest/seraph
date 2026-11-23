@@ -38,7 +38,7 @@ it("opens Settings on the exact section a shell status action names (#1172)", as
   render(<SettingsPanel />);
   act(() => openSettingsSection("policies"));
   expect(useChatStore.getState().settingsPanelOpen).toBe(true);
-  expect(screen.getByRole("button", { name: "Policies" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "General" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.queryByLabelText("Inference accounting")).not.toBeInTheDocument();
   act(() => useChatStore.getState().setSettingsPanelOpen(false));
   act(() => openSettingsSection("artifacts"));

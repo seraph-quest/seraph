@@ -1052,10 +1052,12 @@ The Settings tab migration (#1280 slice 2) is **Partial** while slices 3-6
 of #1280 remain: 17 tabs became six (Model, General, Accounts, Automation, Extensions,
 Diagnostics), Settings always opens on Model, panels moved unchanged, and
 every old section id (including `artifacts` and `model`) still opens the tab
-that now holds the panel and scrolls it into view. Background inference moved
+that now holds the panel and keeps it in view while panels above it load,
+under a sticky tab bar. Background inference moved
 from the Model tab's fold to Automation; the screenshot folder and raw runtime
 output stay in that fold until a later #1280 slice. Evidence is component
-tests covering every old id; no backend change. See the
+tests covering every old id and a mocked-API browser check of the Native and
+MCP deep links; the only backend changes are user-facing path strings. See the
 [app guide](./12-current-app-guide.md#settings-tabs-1280).
 
 ## NEAR TEE vision slot and screen pipeline (ADR-035, #1147 PR4)

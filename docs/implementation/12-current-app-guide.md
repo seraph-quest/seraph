@@ -1817,7 +1817,11 @@ has a Connections page. Every old section id still works as a deep link
 WebSocket `settings_section` field): it opens the tab that now holds the panel
 and scrolls that panel into view, for example `native` opens Accounts at
 Native, `policies` opens General at Policies, `audit` opens Diagnostics, and
-`artifacts` and `model` open Model. Only the active tab mounts, so Skills,
+`artifacts` and `model` open Model; `background-jobs` opens Automation at
+background inference. The panel stays in view while panels above it load their
+data (a ResizeObserver re-places it, no timer), until the operator scrolls,
+types, touches or clicks inside Settings, switches tab or closes Settings. The
+tab bar stays visible at the top while Settings scrolls. Only the active tab mounts, so Skills,
 Discover and MCP load (and MCP polls) only while Extensions is open. The
 screenshot folder and the raw runtime output stay in the Model tab's fold until
 a later #1280 slice moves them.

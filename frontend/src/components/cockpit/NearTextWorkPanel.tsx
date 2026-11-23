@@ -77,14 +77,14 @@ export function NearTextWorkPanel({ ownerPrincipalId, ownerSessionId, task, goal
     const timeout = window.setTimeout(() => abort.abort(), 15_000);
     setBusy(true); setOutput(null); setError(null);
     try { const value = await readNearTextOutput(task, abort.signal); if (version === generation.current) setOutput({ scope, value }); }
-    catch { if (version === generation.current) { setOutput(null); setError("The answer failed current ownership, settled-cost or local readback checks. No answer is displayed."); } }
+    catch { if (version === generation.current) { setOutput(null); setError("The answer failed current ownership, request-record or local readback checks. No answer is displayed."); } }
     finally { window.clearTimeout(timeout); if (version === generation.current) setBusy(false); }
   }
   if (task && task.capability_id !== NEAR_TEXT_CAPABILITY) return null;
   const contents = <section aria-label="NEAR text question" className="grid gap-3 rounded border border-white/15 bg-slate-950 p-4 text-slate-100">
     <div className="flex justify-between gap-2"><h3 className="font-semibold">NEAR text question</h3>{onClose && <button type="button" onClick={onClose} disabled={busy}>Close NEAR question</button>}</div>
     <p className="text-xs">{NEAR_TEXT_DISCLOSURE} Private artifacts restrict local access. This uses HTTPS with {NEAR_TEXT_MODEL}; TEE verification and end-to-end encryption are not provided.</p>
-    <p className="text-xs">One request, one attempt, no automatic retry or learning. A settled provider charge and local readback are required before an answer can be shown. A charge may exceed the local reserve.</p>
+    <p className="text-xs">One request, one attempt, no automatic retry or learning. The completed request record and local readback are required before an answer can be shown. Its charge is recorded when NEAR reports it; nothing waits on it.</p>
     {!owned && <div role="alert">A current owned operator session is required.</div>}
     {error && <div role="alert">{error}</div>}
     {!task && <>

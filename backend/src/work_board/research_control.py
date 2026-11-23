@@ -179,7 +179,7 @@ async def snapshot(jobs, db, owner, task_id):
         "recoverable": bool(safe), "cancel_available": not attempt.ended_at and parent.status != "succeeded",
         "report_available": authority_valid and parent.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
         "no_learning": True, "semantic_truth_verified": False,
-        "recovery_limit": "Only the original verified precontact phase or reserved completed output may resume; uncertain contacts remain held."}
+        "recovery_limit": "Only the original verified precontact phase or reserved completed output may resume; an uncertain contact is never sent again."}
 
 
 async def reserve_recovery(jobs, owner, task_id, request):
@@ -217,7 +217,7 @@ async def reserve_recovery(jobs, owner, task_id, request):
                 raise BoardError("research_group_changed", "Research child lineage changed", status_code=409)
             cost = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.job_id == child.run_identity))
             if cost and (cost.state in {"contact_started", "unknown"} or cost.recovery_reason == "provider_contact_denied"):
-                raise BoardError("research_contact_unresolved", "The original contact liability remains held; no provider retry is allowed", status_code=409)
+                raise BoardError("research_contact_unresolved", "The original contact outcome is uncertain; it is never sent again", status_code=409)
             if child.status == "running":
                 # Output is written only after the actual broker callback and
                 # settlement returned. An expired lease alone is insufficient.

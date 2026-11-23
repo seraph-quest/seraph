@@ -37,7 +37,10 @@ plan or accepts a reviewed planner proposal. After selected-source consent, up t
 three manually approved patch iterations run under the original deadline, call and
 iteration limits with Python pytest or Node 24 npm test/build checks (no
 original-cost or iteration dollar limit since #1284,
-[ADR-037](./decisions/037-no-local-cost-limits.md)). Each run
+[ADR-037](./decisions/037-no-local-cost-limits.md)). Repository evidence binds
+each request record's contact identity, not its charge, so recording the charge
+of an unpriced iteration during or after the repair leaves the repair, its stop
+and its recovery intact (#1291). Each run
 records a local patch artifact and the actual requested command output. A requested
 check that exits non-zero continues into the next bounded iteration without renewing
 those limits. Base drift or a dirty live tree blocks before execution; the live tree

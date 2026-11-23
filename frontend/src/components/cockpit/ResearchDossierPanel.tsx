@@ -6,6 +6,8 @@ import { newResearchCreation, readResearchPending, readResearchReport, readResea
   researchStorageKey, submitResearchControl, submitResearchCreation, validateResearchInput } from "../../lib/researchDossier";
 import type { ResearchPending, ResearchSource, ResearchState } from "../../lib/researchDossier";
 import type { GoalInfo, WorkBoardTask } from "../../types";
+import { spendStateLabel } from "../settings/InferenceAccountingPanel";
+import { dollars } from "../settings/ModelCard";
 
 interface Props {
   ownerPrincipalId?: string | null; ownerSessionId?: string | null;
@@ -128,7 +130,7 @@ export function ResearchDossierPanel({ ownerPrincipalId, ownerSessionId, task, g
       <p className="mt-2 text-sm">{state.status} · {state.phase ?? "terminal or executing"} · original deadline {state.deadline_at}</p>
       <p className="break-all text-xs">Parent {state.parent_id} · attempt {state.attempt_id}</p>
       <ul className="my-2 text-xs">{state.children.map((child) => <li key={child.job_id} className="break-all">{child.job_id}: {child.status}{child.reason ? ` · ${child.reason}` : ""}{child.lease_present ? " · worker lease present" : ""}</li>)}</ul>
-      <ul className="my-2 text-xs">{state.costs.map((cost) => <li key={cost.operation_id}>{cost.state === "unknown" ? "finished" : cost.state} · charge {cost.actual_cost_microusd === null ? "not priced yet" : `${cost.actual_cost_microusd} microUSD`}{cost.reason ? ` · ${cost.reason}` : ""}</li>)}</ul>
+      <ul className="my-2 text-xs">{state.costs.map((cost) => <li key={cost.operation_id}>{spendStateLabel(cost.state, cost.reason)}{cost.state === "settled" && cost.actual_cost_microusd !== null ? ` · ${dollars(cost.actual_cost_microusd)}` : ""}{cost.reason && cost.state !== "unknown" ? ` · ${cost.reason}` : ""}</li>)}</ul>
       <p className="text-xs">{state.recovery_limit}</p>
       <p className="text-xs">Spend that is not priced yet blocks nothing. You can record the charge in Settings → Model Fabric → Spend history.</p>
     </>}

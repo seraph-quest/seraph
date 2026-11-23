@@ -27,6 +27,16 @@ _SHA = re.compile(r"^[0-9a-f]{64}$")
 # A request record whose provider call has finished: settled, or ``unknown``
 # (finished, not priced yet; ADR-037, #1284).
 _FINISHED_REQUEST_STATES = frozenset({"settled", "unknown"})
+# Recording a charge later (ADR-037, #1284) turns a finished ``unknown`` row
+# into ``settled`` and changes only its charge fields: state, amount, recovery
+# reason, appended evidence, revision and timestamp. Repository evidence binds
+# the fields that identify the provider contact, which a charge record never
+# changes, so a later charge record cannot break an ongoing repair (#1291).
+_REQUEST_RECORD_IDENTITY_SCHEMA = "repository.request_record_identity.v1"
+_REQUEST_RECORD_IDENTITY_FIELDS = ("operation_id", "deployment_id", "job_id", "owner_id", "goal_id",
+    "goal_revision", "payload_digest", "policy_digest", "runtime_path", "profile_id", "period_id",
+    "settings_revision", "ceiling_microusd", "bound_microusd", "owner_ceiling_microusd", "sequence",
+    "priority", "deadline_at", "job_fencing_token", "contact_started_at", "created_at")
 _task_publication = ContextVar("repository_task_publication", default=None)
 _startup_fence = ContextVar("repository_startup_fence", default=None)
 _UNCERTAINTY_COLUMNS = frozenset({"status", "failure_reason", "finished_at", "lease_owner",
@@ -562,6 +572,91 @@ async def complete_repository_stop_in_writer(db, witness, *, jobs):
 def _source_digest(value):
     from src.security.trust_contract import canonical_digest
     return canonical_digest(value)
+
+
+def _request_record_json(row) -> dict:
+    return row if isinstance(row, dict) else row.model_dump(mode="json")
+
+
+def request_record_identity(row) -> dict:
+    """The fields of a request record that identify its provider contact."""
+    data = _request_record_json(row)
+    return {"schema": _REQUEST_RECORD_IDENTITY_SCHEMA,
+        **{name: data[name] for name in _REQUEST_RECORD_IDENTITY_FIELDS}}
+
+
+def request_record_digest(row) -> str:
+    return _source_digest(request_record_identity(row))
+
+
+def request_records_digest(rows) -> str:
+    return _source_digest([request_record_identity(row)
+        for row in sorted(rows, key=lambda item: _request_record_json(item)["operation_id"])])
+
+
+def request_record_digest_matches(row, recorded) -> bool:
+    """Evidence written since #1291 binds the contact identity; evidence
+    written before it bound the whole row and still verifies unchanged."""
+    return recorded in {request_record_digest(row), _source_digest(_request_record_json(row))}
+
+
+def request_records_digest_matches(rows, recorded) -> bool:
+    """List form of ``request_record_digest_matches``; the legacy whole-row
+    digest keeps the caller's row order, as it was written."""
+    rows = list(rows)
+    return recorded in {request_records_digest(rows),
+        _source_digest([_request_record_json(row) for row in rows])}
+
+
+def request_record_unchanged(row, expected) -> bool:
+    """A request record staged earlier is unchanged, or a charge was recorded.
+
+    ``expected`` is the canonical row JSON that was staged. Only a finished row
+    may differ, only in its charge: an ``unknown`` row may become ``settled``
+    with an amount, a known provider request id never changes, and evidence is
+    only appended. The contact identity and finished state must hold.
+    """
+    from src.workflows.job_runtime import _canonical
+    current = _request_record_json(row)
+    if _canonical(current) == expected:
+        return True
+    try:
+        before = json.loads(expected) if isinstance(expected, str) else dict(expected)
+        before_evidence, current_evidence = json.loads(before["evidence_json"]), json.loads(current["evidence_json"])
+        same_contact = request_record_identity(current) == request_record_identity(before)
+    except (KeyError, TypeError, ValueError):
+        return False
+    charge_recorded = ((before["state"], before["actual_cost_microusd"]) == (current["state"], current["actual_cost_microusd"])
+        or (before["state"] == "unknown" and before["actual_cost_microusd"] is None
+            and current["state"] == "settled" and type(current["actual_cost_microusd"]) is int))
+    return bool(same_contact and charge_recorded
+        and before["state"] in _FINISHED_REQUEST_STATES and current["state"] in _FINISHED_REQUEST_STATES
+        and (before["provider_operation_id"] is None or current["provider_operation_id"] == before["provider_operation_id"])
+        and type(before_evidence) is list and type(current_evidence) is list
+        and current_evidence[:len(before_evidence)] == before_evidence)
+
+
+def _recorded_final_accounting_digest(rows, evidence) -> str:
+    """The final accounting digest as recorded, when it still names these rows."""
+    recorded = evidence.get("final_accounting_digest") if isinstance(evidence, dict) else None
+    return recorded if request_records_digest_matches(rows, recorded) else request_records_digest(rows)
+
+
+def request_records_unchanged(rows, expected) -> bool:
+    """``{operation_id: staged canonical row}`` still names the same records."""
+    rows = list(rows)
+    current = {row.operation_id: row for row in rows}
+    return (len(current) == len(rows) and set(current) == set(expected)
+        and all(request_record_unchanged(current[key], raw) for key, raw in expected.items()))
+
+
+def committed_row_unchanged(row, expected) -> bool:
+    """A staged SQL row is unchanged; a request record may only gain a charge."""
+    from src.db.models import InferenceCostReservation
+    from src.workflows.job_runtime import _canonical
+    if isinstance(row, InferenceCostReservation):
+        return request_record_unchanged(row, expected)
+    return _canonical(row.model_dump(mode="json")) == expected
 
 
 def _repository_route_identity(*, required=True):
@@ -1568,7 +1663,7 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
     from src.work_board.contracts import RepositoryReview, RepositoryNativeLimitEvidenceV1, RepositoryNativeStopClosureV1
     from src.workflows.general_task_guard import child_binding, read_general_task_native_cancel
     from src.workflows.job_runtime import DurableJobRepository, DurableJobLeaseError, _binding, _as_utc, _utc_now
-    from src.workflows.repo_repair_stop import AUTOMATIC_REASONS, _static, _key, _accounting
+    from src.workflows.repo_repair_stop import AUTOMATIC_REASONS, _static, _key, _accounting_matches
     original, work, _, group, binding, task_source = read_repository_original(run)
     if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
         raise DurableJobLeaseError("original repository discovery owner changed")
@@ -1680,7 +1775,8 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
         artifacts_unchanged = all(row is not None and stop["static_rows"].get(
             type(row).__tablename__ + ":" + str(_key(row))) == _static(row, artifact_context)
             for row in (artifact, repo_artifact))
-        accounting_digest = await _accounting(db, {"group": group, "run": run, "work": work, "original": original})
+        accounting_matches = await _accounting_matches(db, {"group": group, "run": run, "work": work,
+            "original": original}, closure.all_original_accounting_digest)
         if (set(terminal) != {"schema", "closure", "no_learning"}
                 or terminal["schema"] != "repository.stop_terminal.v1" or terminal["no_learning"] is not True
                 or closure.original_binding != binding or closure.repository_job_id != run.run_identity
@@ -1689,7 +1785,7 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
                 or closure.source_checkpoint_digest != _source_digest(original)
                 or closure.original_input_digest != _source_digest(original["original_input"])
                 or closure.original_group_digest != _source_digest(group.model_dump(mode="json"))
-                or closure.all_original_accounting_digest != accounting_digest
+                or not accounting_matches
                 or closure.source_binding_digest != task_source.binding_digest
                 or closure.original_deadline_at.isoformat() != original["original_deadline_at"]
                 or (closure.limit_evidence.model_dump(mode="json") if closure.limit_evidence else None) != evidence
@@ -2356,7 +2452,7 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
             closed = {"schema": "repository.model_response.v1", "operation_id": witness.operation_id,
                 "request_body_digest": prepared["request_body_digest"], "response_artifact_ref": response_ref,
                 "response_artifact_digest": response_digest, "callback_returned": True,
-                "accounting_digest": _source_digest(cost.model_dump(mode="json")), "returned_at": _utc_now().isoformat()}
+                "accounting_digest": request_record_digest(cost), "returned_at": _utc_now().isoformat()}
             closed["callback_quiescence_digest"] = _source_digest(closed)
             _append_repository_record(current, "repository:response:" + ticket.iteration_id, closed, inventory=inventory)
             _append_repository_record(current, "repository:accounting:" + ticket.iteration_id,
@@ -2501,7 +2597,7 @@ async def validate_repository_child_wait_witness(db, witness, *, parent, task,
     rows = list((await db.scalars(select(InferenceCostReservation))).all())
     cost = next((row for row in rows if row.operation_id == response["operation_id"]), None)
     if (cost is None or cost.state not in _FINISHED_REQUEST_STATES or cost.contact_started_at is None
-            or _source_digest(cost.model_dump(mode="json")) != response["accounting_digest"]):
+            or not request_record_digest_matches(cost, response["accounting_digest"])):
         raise DurableJobLeaseError("original contacted response accounting changed")
     accounting = RepositoryIterationAccountingWitness(
         **{**iteration["accounting_binding"], "group": group,
@@ -3173,7 +3269,7 @@ async def _recheck_recovered_finalizer_rows(db, jobs, state, witness):
     await validate_group_owner(db, context["group"])
     accounting = await _repository_original_accounting_rows(db, context, job_id=bound["job_id"])
     expected_accounting = {key: raw for (model, key), raw in state["rows"].items() if model is InferenceCostReservation}
-    if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting} != expected_accounting:
+    if not request_records_unchanged(accounting, expected_accounting):
         raise DurableJobLeaseError("recovered finalizer reservation membership changed")
     if any(row.job_id == bound["job_id"] and row.state not in _FINISHED_REQUEST_STATES for row in accounting):
         raise DurableJobLeaseError("recovered finalizer original request is unfinished")
@@ -3522,7 +3618,8 @@ async def _validate_recovered_repository_final_evidence(service, jobs, *, comple
     derived = {"final_patch_digest": execution["patch_sha256"], "final_manifest_digest": readback["manifest_digest"],
         "final_readback_digest": readback["artifact_digest"], "final_command_receipt_digest": _source_digest(execution),
         "final_cleanup_digest": cleanup["artifact_digest"],
-        "final_accounting_digest": _source_digest([row.model_dump(mode="json") for row in costs if row.job_id == job_id]),
+        "final_accounting_digest": _recorded_final_accounting_digest(
+            [row for row in costs if row.job_id == job_id], evidence),
         "final_artifact_id": matches[0]["artifact_id"], "final_artifact_digest": sha,
         "requested_check_exits_digest": _source_digest(exits), "all_iteration_ids_digest": _source_digest(identities)}
     if _canonical(derived) != _canonical(evidence):
@@ -3725,7 +3822,7 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
     evidence = {"final_patch_digest": execution["patch_sha256"],
         "final_manifest_digest": readback["manifest_digest"], "final_readback_digest": readback["artifact_digest"],
         "final_command_receipt_digest": _source_digest(execution), "final_cleanup_digest": cleanup_record["artifact_digest"],
-        "final_accounting_digest": _source_digest([row.model_dump(mode="json") for row in costs
+        "final_accounting_digest": request_records_digest([row for row in costs
             if row.job_id == job_id]), "final_artifact_id": reference.artifact_id,
         "final_artifact_digest": reference.digest, "requested_check_exits_digest": _source_digest(check_exits),
         "all_iteration_ids_digest": _source_digest(identities)}
@@ -3926,8 +4023,8 @@ async def validate_repository_child_final_witness(db, witness, *, parent, task, 
             or cleanup["artifact_digest"] != witness.final_cleanup_digest
             or _source_digest(execution) != witness.final_command_receipt_digest
             or execution["patch_sha256"] != witness.final_patch_digest
-            or _source_digest([row.model_dump(mode="json") for row in rows if row.job_id == run.run_identity])
-                != witness.final_accounting_digest or cost is None or cost.state not in _FINISHED_REQUEST_STATES
+            or not request_records_digest_matches([row for row in rows if row.job_id == run.run_identity],
+                witness.final_accounting_digest) or cost is None or cost.state not in _FINISHED_REQUEST_STATES
             or cost.contact_started_at is None):
         raise DurableJobLeaseError("actual original final readback accounting or cleanup changed")
     accounting = RepositoryIterationAccountingWitness(**{**iteration["accounting_binding"], "group": group,
@@ -4685,7 +4782,8 @@ async def _validate_recovered_repository_accounting_source(db, source, witness, 
         cost = existing[0]
         if (type(cost) is not InferenceCostReservation
                 or await db.get(InferenceCostReservation, operation_id, populate_existing=True) is not cost
-                or state["rows"].get((InferenceCostReservation, operation_id)) != _canonical(cost.model_dump(mode="json"))
+                or (InferenceCostReservation, operation_id) not in state["rows"]
+                or not request_record_unchanged(cost, state["rows"][(InferenceCostReservation, operation_id)])
                 or cost.state not in _FINISHED_REQUEST_STATES or cost.contact_started_at is None
                 or cost.job_fencing_token != run.fencing_token
                 or payload_digest != cost.payload_digest or witness._request_body_digest != cost.payload_digest

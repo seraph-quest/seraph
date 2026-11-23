@@ -236,11 +236,15 @@ REMOTE_INFERENCE_EFFECT_STATUSES = {
 }
 # Job kinds whose one governed remote inference call is the job's whole
 # external effect (#1302). Only these may be closed as ``succeeded`` by stale
-# recovery from a settled broker receipt. A job that makes several calls
-# (repository repair iterations on one root, Goal discovery's three steps) can
-# crash between calls; its first settled receipt proves nothing about the
-# rest, so it takes the ordinary blocked recovery and its owner resumes or
-# holds it. Recovery never re-sends a contacted request either way.
+# recovery from a settled broker receipt. A job that makes several calls can
+# crash between calls, and its first settled receipt proves nothing about the
+# rest. Goal discovery is left running by this sweep (it cannot pass the
+# programme writer fence) and held by its programme owner; native repository
+# repair roots (v3/v4) are protected lineage and skipped. Any other kind, such
+# as a historical ordinary (v1/v2) repository root, is left ``blocked``
+# (``stale_lease_requires_reconciliation``) for the operator to reconcile,
+# then retry or cancel; nothing resumes it automatically. Recovery never
+# re-sends a contacted request either way.
 SINGLE_REMOTE_CALL_JOB_KINDS = frozenset({
     "calendar_meeting_prep",
     "guardian_opportunity_assess",

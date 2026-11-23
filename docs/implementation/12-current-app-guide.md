@@ -3840,10 +3840,13 @@ startup recovery closes a child whose answered request has a broker receipt as
 succeeded, priced or not, and leaves an answered unpriced request record as it
 is. Only a job kind whose one inference call is the whole job (a research child,
 for example) closes this way, and only when its ledger holds exactly that one
-settled call; a job that makes several calls, such as Goal discovery or
-repository repair iterations, can crash between calls, so its first receipt
-proves nothing about the rest and it takes the ordinary blocked recovery
-instead (#1302); only a request with no recorded answer becomes a lost outcome. Contacted work
+settled call. A job that makes several calls can crash between calls, so its
+first receipt proves nothing about the rest (#1302): Goal discovery is left
+running by the sweep and held by its programme owner, native repository repair
+roots are protected and skipped, and any other job, such as a historical
+ordinary repository root, is left blocked (`stale_lease_requires_reconciliation`)
+for the operator to reconcile, then retry or cancel; nothing resumes it
+automatically; only a request with no recorded answer becomes a lost outcome. Contacted work
 without verified output retains Unknown cost and effects; it is never blindly
 retried. Generic retry
 and unblock cannot create a replacement attempt for an admitted research task.

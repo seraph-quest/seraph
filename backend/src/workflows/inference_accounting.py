@@ -169,11 +169,15 @@ def _pre_1284_lost_outcome(row: InferenceCostReservation) -> bool:
     """A row restart recovery classified before #1284 split the reasons.
 
     Its ``provider_cost_readback_required`` label means the outcome was lost,
-    not "answered, not priced". The ``restart_recovery`` evidence entry is the
-    only marker that tells such a row apart (#1302).
+    not "answered, not priced". The marker is a ``restart_recovery`` evidence
+    entry with that same reason: pre-#1284 recovery wrote exactly that, and
+    later recovery never does (#1302). Evidence is append-only, so any other
+    ``restart_recovery`` entry (for example a typed precontact resume before
+    the call was later answered) is not the marker.
     """
     return (row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required" and any(
         isinstance(item, dict) and item.get("kind") == "restart_recovery"
+        and item.get("reason") == "provider_cost_readback_required"
         for item in json.loads(row.evidence_json or "[]")))
 
 

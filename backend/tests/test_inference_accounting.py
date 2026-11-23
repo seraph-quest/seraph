@@ -232,6 +232,53 @@ async def test_restart_recovery_does_not_treat_a_pre_1284_classified_row_as_answ
 
 
 @pytest.mark.asyncio
+async def test_typed_resumed_then_answered_unpriced_row_still_skips_restart_recovery(accounting_db):
+    # #1302 review: evidence is append-only. A mail or calendar row that a
+    # restart first resumed before contact (restart_recovery with reason
+    # typed_owner_precontact_resume), and that was then contacted and answered
+    # unpriced, is answered: a later crash must not reclassify it as lost.
+    import json
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation, WorkflowRunState
+    from src.workflows.inference_accounting import _answered_unpriced, _operator_operation
+    root, engine, factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    calls = []
+    async def no_cost():
+        calls.append("answered")
+        return {"id": "gen-resumed", "usage": {"prompt_tokens": 5}, "choices": [{"message": {"content": "ok"}}]}
+    await broker.execute(request("typed-resumed"), no_cost)
+    lapsed = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+    async with factory.accounting_sessions() as db:
+        row = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.operation_id == "typed-resumed"))
+        history = json.loads(row.evidence_json)
+        # The earlier precontact resume entry, as restart recovery writes it.
+        row.evidence_json = json.dumps([{"kind": "restart_recovery", "state": "reserved",
+            "reason": "typed_owner_precontact_resume", "recorded_at": lapsed.isoformat(),
+            "memory_status": "no_learning"}, *history])
+        db.add(row)
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == row.job_id))
+        run.status, run.lease_owner, run.lease_expires_at = "running", "crashed-worker", lapsed
+        db.add(run)
+    async with factory.accounting_sessions() as db:
+        row = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.operation_id == "typed-resumed"))
+        assert _answered_unpriced(row)
+        assert _operator_operation(row)["recovery_reason"] == "provider_cost_readback_required"
+    before = next(item for item in (await repository.inference_accounting_snapshot())["operations"]
+        if item["operation_id"] == "typed-resumed")
+    assert await DurableJobRepository().recover_inference_accounting() == []
+    after = next(item for item in (await repository.inference_accounting_snapshot())["operations"]
+        if item["operation_id"] == "typed-resumed")
+    assert (after["state"], after["recovery_reason"], after["revision"]) == (
+        "unknown", "provider_cost_readback_required", before["revision"])
+    assert (await repository.get_job(after["job_id"]))["status"] == "running"
+    assert calls == ["answered"]
+
+
+@pytest.mark.asyncio
 async def test_startup_recovery_reseals_every_reclassified_row(accounting_db):
     # #1301: startup recovery that reclassifies two or more rows reseals every
     # changed row's digest. Each iteration's read autoflushes the row the

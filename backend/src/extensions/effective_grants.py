@@ -193,7 +193,9 @@ async def inventory(request):
         others_query=select(GitHubActivitySource)
         if identity_id:
             others_query=others_query.where(GitHubActivitySource.owner_identity_id!=identity_id)
-        for a in (await db.execute(others_query.limit(LIMIT))).scalars().all():
+        # Active rows first, so a bounded list never hides an active foreign source.
+        from src.integrations.github_activity import active_first
+        for a in (await db.execute(active_first(others_query).limit(LIMIT))).scalars().all():
             from src.integrations.github_activity import GRANT_SENTENCE
             rows.append(_entry('github_activity_other_identity',a.id,boundary='observation',purpose='github_activity_evidence',source='local_gh_cli_login',destination='local_evidence',
                 state=a.state,revision=a.revision,limits={'owner':'another_ownership_identity','credential':'local_gh_cli_login','statement':GRANT_SENTENCE},

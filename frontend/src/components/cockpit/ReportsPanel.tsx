@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { listEndOfDayReports, readEndOfDayReport, type ReportDetail, type ReportListItem } from "../../lib/reports";
+import {
+  GITHUB_GRANT_SENTENCE,
+  GITHUB_URL,
+  listEndOfDayReports,
+  readEndOfDayReport,
+  type GitHubEvidence,
+  type GitHubEvidenceItem,
+  type GoalEvidence,
+  type ReportDetail,
+  type ReportListItem,
+} from "../../lib/reports";
 
 // Read-only view of stored end-of-day reports. It only reads reports the
 // scheduled end-of-day job already stored; it cannot generate a report or
@@ -35,6 +45,131 @@ function MixList({ label, entries }: { label: string; entries: Array<[string, nu
   );
 }
 
+const KIND_LABELS: Record<string, string> = {
+  commit: "commit",
+  pr_opened: "PR opened",
+  pr_merged: "PR merged",
+  pr_closed: "PR closed",
+  issue_opened: "issue opened",
+  issue_closed: "issue closed",
+};
+
+// "[G3]" in the model's text becomes a link only when a stored item with a
+// validated GitHub URL carries that ref; anything else stays plain text.
+function LinkedBody({ body, items }: { body: string; items: GitHubEvidenceItem[] }) {
+  const byRef = new Map(items.filter((item) => item.url && GITHUB_URL.test(item.url)).map((item) => [item.ref, item]));
+  const parts = body.split(/(\[G\d{1,4}\])/);
+  return (
+    <>
+      {parts.map((part, index) => {
+        const item = byRef.get(part.slice(1, -1));
+        return /^\[G\d{1,4}\]$/.test(part) && item?.url ? (
+          <a key={index} href={item.url} target="_blank" rel="noreferrer noopener" title={`${item.repository} ${item.title}`}>
+            {part}
+          </a>
+        ) : (
+          <span key={index}>{part}</span>
+        );
+      })}
+    </>
+  );
+}
+
+function itemLabel(item: GitHubEvidenceItem) {
+  const marker = item.number ? `#${item.number}` : (item.short_sha ?? "");
+  const repeated = item.same_title_count > 1 ? ` (${item.same_title_count} commits with this title)` : "";
+  return `${item.ref} · ${KIND_LABELS[item.kind] ?? item.kind} · ${item.repository} ${marker} · ${item.title}${repeated}`;
+}
+
+function GitHubEvidenceCard({ github }: { github: GitHubEvidence }) {
+  return (
+    <section aria-label="GitHub evidence" data-testid="report-github-evidence" className="cockpit-reports-github">
+      <h4>GitHub evidence</h4>
+      <p role="status" data-testid="report-github-status">
+        {github.message ?? `GitHub source state: ${github.status}.`}
+      </p>
+      {github.status !== "not_connected" ? <p className="cockpit-home-muted">{GITHUB_GRANT_SENTENCE}</p> : null}
+      {github.model_context === "not_allowed" ? (
+        <p className="cockpit-home-muted">This activity was not shared with the model for analysis.</p>
+      ) : null}
+      {github.counts.length ? (
+        <p>
+          {github.counts.map(([kind, value]) => `${value} ${KIND_LABELS[kind] ?? kind}`).join(" · ")}
+          {github.repositories.length ? ` · ${github.repositories.join(", ")}` : ""}
+        </p>
+      ) : null}
+      {!github.items_available ? (
+        <p className="cockpit-home-muted">
+          {github.item_count} items recorded. The item list is unavailable: the report archive could not be verified.
+        </p>
+      ) : github.items.length ? (
+        <ul aria-label="GitHub items">
+          {github.items.map((item) => (
+            <li key={item.ref}>
+              {item.url ? (
+                <a href={item.url} target="_blank" rel="noreferrer noopener">
+                  {itemLabel(item)}
+                </a>
+              ) : (
+                itemLabel(item)
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}
+
+function GoalEvidenceTable({ evidence }: { evidence: GoalEvidence }) {
+  if (!evidence.goals.length || evidence.status === "not_requested") return null;
+  const note =
+    evidence.status === "blocked"
+      ? "No model analysis ran, so goals were not compared with evidence."
+      : evidence.status === "unparsed"
+        ? "The analysis did not return a goal-to-evidence mapping."
+        : null;
+  return (
+    <section aria-label="Goals and evidence" data-testid="report-goal-evidence">
+      <h4>Goals and evidence</h4>
+      {note ? <p className="cockpit-home-muted">{note}</p> : null}
+      {evidence.status === "mapped" ? (
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Goal</th>
+              <th scope="col">GitHub</th>
+              <th scope="col">Screen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {evidence.goals.map((goal) => (
+              <tr key={goal.ref}>
+                <td>
+                  {goal.ref} · {goal.title}
+                  {goal.level ? ` (${goal.level})` : ""}
+                  {goal.parent_ref ? ` · under ${goal.parent_ref}` : ""}
+                </td>
+                <td>
+                  {goal.github.length ? goal.github.join(", ") : "none"}
+                  {goal.rolled_up_from.length ? ` · from ${goal.rolled_up_from.join(", ")}` : ""}
+                </td>
+                <td>{goal.screen ? "yes" : "no"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+      {evidence.status === "mapped" && evidence.goals_without_evidence.length ? (
+        <p>Goals without evidence today: {evidence.goals_without_evidence.join(", ")}</p>
+      ) : null}
+      {evidence.status === "mapped" && evidence.github_without_goal.length ? (
+        <p>GitHub records not tied to a goal: {evidence.github_without_goal.join(", ")}</p>
+      ) : null}
+    </section>
+  );
+}
+
 function ReportBody({ detail }: { detail: ReportDetail }) {
   const { summary } = detail;
   return (
@@ -53,9 +188,11 @@ function ReportBody({ detail }: { detail: ReportDetail }) {
         </div>
       ) : (
         <pre className="whitespace-pre-wrap break-words" data-testid="report-body">
-          {detail.body}
+          <LinkedBody body={detail.body} items={detail.github_activity?.items ?? []} />
         </pre>
       )}
+      {detail.github_activity ? <GitHubEvidenceCard github={detail.github_activity} /> : null}
+      {detail.goal_evidence ? <GoalEvidenceTable evidence={detail.goal_evidence} /> : null}
       <p>
         Goals · {detail.active_goal_count} active · {detail.completed_goal_count} completed that day
       </p>

@@ -107,7 +107,7 @@ limitations. Verified with offline local GitHub fixtures and zero
 inference/provider spend. Live GitHub usefulness remains
 **external-unverified**.
 
-**GitHub activity source for reports: Partial (#1264, slice 1).** Settings →
+**GitHub activity source for reports: Partial (#1264).** Settings →
 GitHub → **GitHub activity for reports** lets the operator check their local
 `gh` login, acknowledge that it holds full GitHub access, choose repositories
 and enable a read-only source. **Collect now** stores the day's own commits,
@@ -116,18 +116,29 @@ with Seraph-built URLs; effective grants show and revoke it. A source left
 with an earlier ownership identity (a lost identity, #1270) is visible to
 every login of the workspace in neutral form and can be stopped there. Only fixed GET
 requests are sent, through `gh api` with a scratch environment and a pinned,
-ownership-checked binary. Missing boundaries: the end-of-day report does not
-read the activity yet (slice 2), reviews and comments are not collected, and
-it works only where the backend runs directly on the operator's computer.
-Verified with a fake `gh` runner, a fake `gh` executable and offline route and
-component tests; behaviour with a real `gh` login is **external-unverified**.
+ownership-checked binary. The end-of-day report (scheduled and manual) runs
+one collection for its day first, then reads stored rows only: it adds a
+fenced `## GitHub activity` prompt section with `[G#]` ids and no URLs (the
+prompt is byte-identical when no source exists), asks the model to map goals
+to `[G#]`/`SCREEN` evidence, and validates that mapping in code, rolling
+sub-goal evidence up to parent goals and removing links from the text. Each
+degraded state (not connected, switched off, stopped, blocked, failed,
+partial, not collected, unreadable) is one fixed sentence in the report, the
+cockpit and the e-mail line. Missing boundaries: reviews and comments are not
+collected, it works only where the backend runs directly on the operator's
+computer, and with two active ownership identities the report uses only the
+most recently enabled source. Verified with a fake `gh` runner, a fake `gh`
+executable, a patched model call returning fixed answers, and offline route
+and component tests; behaviour with a real `gh` login or a real model is
+**external-unverified**.
 
 **Cockpit end-of-day report reader: Partial.** The cockpit **Reports**
 section and `GET /api/reports/end-of-day[/{episode_id}]` read stored
 end-of-day goal reports only; they cannot generate a report and make no model
 or external call. A report whose `analysis_provider` is `blocked:<reason>` is
 shown as blocked, not as a report. The mix breakdown is shown only when the
-report's archive verifies by path and SHA-256. Missing boundaries: no
+report's archive verifies by path and SHA-256, and so are the GitHub evidence
+items and their links (#1264). Missing boundaries: no
 cockpit generation, no pagination past 100 reports, and the blocked-run
 scheduler receipt remains [#1140](https://github.com/seraph-quest/seraph/issues/1140).
 Verified with offline backend route tests and frontend component tests.

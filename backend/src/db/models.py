@@ -1106,10 +1106,15 @@ class GitHubActivitySource(SQLModel, table=True):
     and the pinned ``gh`` entry path. It belongs to the operator identity
     (``owner_identity_id``), which survives logins: any live login of that
     identity sees and controls it. ``revision`` changes on every state or
-    scope change. Nothing here expires by time: the source stops only on real
-    changes (toggle-off or revoke, a different gh account, the identity being
-    revoked, a workspace restore, or the enabling local no-login root being
-    retired), never on a login's idle or absolute expiry or a new login.
+    scope change. Nothing here expires by time. The row's ``state`` changes
+    only on real changes: ``revoked`` by the owner's toggle-off or revoke;
+    ``stopped`` with a ``stopped_reason`` for a different gh account
+    (``gh_login_changed``), ownership revoke (``owner_identity_revoked``), a
+    workspace restore or rollback (``workspace_restored``) or a stop from a
+    login of another ownership identity (``stopped_by_another_identity``).
+    An identity revoked another way, or a retired local no-login root, leaves
+    the row ``active`` and blocks each run before ``gh`` starts. A login's idle
+    or absolute expiry, a logout or a new login changes nothing.
     """
 
     __tablename__ = "github_activity_sources"

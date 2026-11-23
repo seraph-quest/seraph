@@ -392,6 +392,9 @@ async def lose_identity(client):
     return await login(client)
 
 
+NEUTRAL_KEYS = {"id", "state", "revision", "owner", "controls", "message"}
+
+
 def _foreign_text_absent(value, *, login_name="octo", gh_path="/opt/homebrew/bin/gh"):
     import json
     text = json.dumps(value)
@@ -414,11 +417,15 @@ async def test_effective_grants_filter_rows_by_owning_identity(client, async_db,
     assert [row["kind"] for row in grants] == ["github_activity_other_identity"]
     (neutral,) = grants
     assert neutral["state"] == "active" and neutral["controls"] == ["revoke"]
+    # Exactly these limits: nothing more about the foreign source can leak through a new key.
+    assert set(neutral["limits"]) == {"owner", "credential", "statement"}
     assert neutral["limits"]["owner"] == "another_ownership_identity"
     assert _foreign_text_absent(grants)
     status = (await client.get("/api/capabilities/github/activity")).json()
     assert status["source"]["state"] == "not_connected" and status["ownership_required"] is False
     assert _foreign_text_absent(status["other_identity_sources"])
+    (foreign,) = status["other_identity_sources"]
+    assert set(foreign) == NEUTRAL_KEYS
     items = (await client.get(f"/api/capabilities/github/activity/items?report_date={NOW.date()}")).json()
     assert items["items"] == [] and items["status"] == "not_connected"
 
@@ -450,6 +457,7 @@ async def test_a_lost_identity_login_sees_and_stops_the_old_source(client, async
     assert (await _source_row(proof["operator_identity_id"])).state == "active"
     stopped = await client.post(stop, headers=HEADERS, json={"expected_revision": 1})
     assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["audit_recorded"] is True
     assert stopped.json()["other_identity_sources"][0]["state"] == "stopped"
     row = await _source_row(proof["operator_identity_id"])
     assert (row.state, row.stopped_reason, row.revision) == ("stopped", "stopped_by_another_identity", 2)
@@ -512,3 +520,63 @@ async def test_an_operator_triggered_run_records_the_requesting_principal(client
     (event,) = [item for item in recorded if item["name"] == "gh_cli"]
     assert event["principal_id"] is None and event["session_id"] is None and event["actor"] == "system"
     assert event["details"]["trigger"] == "scheduled"
+
+
+async def _foreign_rows(*states):
+    """Sources of other identities, newest last in ``states`` order."""
+    from datetime import timedelta
+    from src.db import engine as db_engine
+    from src.db.models import GitHubActivitySource
+    async with db_engine.get_session() as db:
+        for index, state in enumerate(states):
+            db.add(GitHubActivitySource(
+                owner_identity_id=f"foreign-{index}", enabled_principal_id="p", owner_session_id="s",
+                gh_entry_path="/opt/homebrew/bin/gh", gh_install_prefix="/opt/homebrew", state=state,
+                stopped_reason=None if state == "active" else "gh_login_changed", revision=1,
+                scope_json='{"discover_from_activity": true}', scope_digest="d", identity_id=900 + index,
+                identity_login="octo", created_at=NOW, updated_at=NOW + timedelta(minutes=index)))
+
+
+@pytest.mark.asyncio
+async def test_an_active_foreign_source_is_never_pushed_out_of_the_bounded_lists(client, async_db, clock,
+                                                                               gh_service, runner, monkeypatch):
+    """#1296 review: active rows sort first in the panel list and the effective-grants list."""
+    from src.extensions import effective_grants
+    await owner_login(client)
+    # One active source, older than enough stopped ones to fill both bounded lists.
+    await _foreign_rows("active", *["stopped"] * 3)
+    monkeypatch.setattr(github_activity, "MAX_OTHER_SOURCES", 2)
+    monkeypatch.setattr(effective_grants, "LIMIT", 2)
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert [row["state"] for row in status["other_identity_sources"]] == ["active", "stopped"]
+    assert set(status["other_identity_sources"][0]) == NEUTRAL_KEYS
+    grants = [row for row in (await client.get("/api/extensions/effective-grants")).json()["grants"]
+              if row["kind"] == "github_activity_other_identity"]
+    assert [row["state"] for row in grants] == ["active", "stopped"]
+    assert grants[0]["controls"] == ["revoke"]
+
+
+@pytest.mark.asyncio
+async def test_the_owners_own_switch_off_is_audited(client, async_db, clock, gh_service, runner, monkeypatch):
+    """#1296 review: /revoke writes a source_revoke event naming the login, like a foreign stop."""
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    monkeypatch.setattr("src.audit.runtime.log_integration_event", record)
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    revoked = await client.post("/api/capabilities/github/activity/revoke", headers=HEADERS,
+                                json={"expected_revision": 1})
+    assert revoked.status_code == 200 and revoked.json()["audit_recorded"] is True
+    (event,) = [item for item in recorded if item["name"] == "source_revoke"]
+    assert event["outcome"] == "revoked" and event["principal_id"] == owner["principal_id"]
+    assert event["session_id"] == owner["session_id"]
+    assert event["details"]["owner_identity_id"] == owner["identity_id"]
+    assert event["details"]["reason_code"] == "revoked_by_owner"
+    stale = await client.post("/api/capabilities/github/activity/revoke", headers=HEADERS,
+                              json={"expected_revision": 1})
+    assert stale.status_code == 409
+    assert len([item for item in recorded if item["name"] == "source_revoke"]) == 1

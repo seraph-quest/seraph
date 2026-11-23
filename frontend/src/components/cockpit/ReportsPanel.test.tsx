@@ -144,6 +144,108 @@ describe("ReportsPanel", () => {
     expect(screen.getByTestId("report-row-episode-ready")).toBeInTheDocument();
   });
 
+  const github = (overrides: Record<string, unknown> = {}) => ({
+    source: "archive",
+    status: "partial",
+    message: "GitHub activity is incomplete: seraph-quest/x: access denied.",
+    item_count: 3,
+    items_available: true,
+    reason_code: null,
+    identity_login: "octo",
+    model_context: "included",
+    counts: { pr_merged: 1, commit: 2 },
+    repositories: ["seraph-quest/seraph"],
+    limitations: [{ code: "access_denied", repository: "seraph-quest/x" }],
+    items: [
+      { ref: "G1", repository: "seraph-quest/seraph", kind: "pr_merged", number: 1262, short_sha: null, title: "fix: determinism",
+        url: "https://github.com/seraph-quest/seraph/pull/1262", occurred_at: "2026-11-10T12:02:00+00:00", same_title_count: 1 },
+      { ref: "G2", repository: "seraph-quest/seraph", kind: "commit", number: null, short_sha: "abcdef1", title: "a commit",
+        url: "https://evil.example/commit/abc", occurred_at: "2026-11-10T11:00:00+00:00", same_title_count: 2 },
+    ],
+    ...overrides,
+  });
+  const withGitHub = (githubActivity: unknown, goalEvidence: unknown = null) => ({
+    ...detail(item(), "Shipped [G1], touched [G2], cited [G9]."),
+    github_activity: githubActivity,
+    goal_evidence: goalEvidence,
+  });
+
+  async function openReport(payload: unknown) {
+    routes({
+      "/api/reports/end-of-day?limit=30": () => response({ items: [item({ github_activity_status: "partial", github_activity_item_count: 3 })], limit: 30 }),
+      "/api/reports/end-of-day/episode-ready": () => response(payload),
+    });
+    render(<ReportsPanel />);
+    fireEvent.click(await screen.findByTestId("report-row-episode-ready"));
+    return screen.findByTestId("report-body");
+  }
+
+  it("links [G#] only to stored items with a GitHub URL and shows the evidence card", async () => {
+    const body = await openReport(
+      withGitHub(github(), {
+        status: "mapped",
+        goals: [
+          { ref: "A1", title: "Create AGI", level: "vision", domain: "productivity", parent_ref: null, github: ["G1"], screen: true, rolled_up_from: ["A2"] },
+          { ref: "A2", title: "Q4", level: "quarterly", domain: "productivity", parent_ref: "A1", github: ["G1"], screen: false, rolled_up_from: [] },
+          { ref: "A3", title: "Family time", level: "annual", domain: "health", parent_ref: null, github: [], screen: false, rolled_up_from: [] },
+        ],
+        goals_without_evidence: ["A3"],
+        github_without_goal: ["G2"],
+        rejected: { unknown_evidence: 0, unknown_goals: 0, urls_removed: 0 },
+      }),
+    );
+    expect(body.textContent).toBe("Shipped [G1], touched [G2], cited [G9].");
+    const links = Array.from(body.querySelectorAll("a"));
+    expect(links.map((link) => link.textContent)).toEqual(["[G1]"]);
+    expect(links[0].getAttribute("href")).toBe("https://github.com/seraph-quest/seraph/pull/1262");
+    expect(links[0].getAttribute("rel")).toBe("noreferrer noopener");
+
+    const card = screen.getByTestId("report-github-evidence");
+    expect(screen.getByTestId("report-github-status").textContent).toContain("GitHub activity is incomplete");
+    expect(card.textContent).toContain("Uses the operator's local gh login (full gh scope; Seraph only issues read GETs).");
+    expect(card.textContent).toContain("2 commit · 1 PR merged");
+    const cardLinks = Array.from(card.querySelectorAll("a"));
+    expect(cardLinks.map((link) => link.getAttribute("href"))).toEqual(["https://github.com/seraph-quest/seraph/pull/1262"]);
+    expect(card.textContent).toContain("G2 · commit · seraph-quest/seraph abcdef1 · a commit (2 commits with this title)");
+    expect(card.innerHTML).not.toContain("evil.example");
+
+    const table = screen.getByTestId("report-goal-evidence");
+    expect(table.textContent).toContain("A2 · Q4 (quarterly) · under A1");
+    expect(table.textContent).toContain("G1 · from A2");
+    expect(table.textContent).toContain("Goals without evidence today: A3");
+    expect(table.textContent).toContain("GitHub records not tied to a goal: G2");
+  });
+
+  it.each([
+    ["not_connected", "GitHub source not connected."],
+    ["failed", "GitHub source failed: gh did not answer within 30 s and was stopped."],
+    ["blocked", "GitHub source blocked: gh is not logged in to github.com for this user."],
+    ["stopped", "GitHub source stopped: gh is now logged in as @other, not @octo."],
+    ["revoked", "GitHub source was switched off by the operator."],
+    ["not_collected", "GitHub source is on, but no collection ran for this day."],
+    ["unavailable", "GitHub evidence could not be read from the local store."],
+  ])("states the %s GitHub state with its sentence", async (status, message) => {
+    await openReport(withGitHub(github({ status, message, items: [], counts: {} })));
+    expect(screen.getByTestId("report-github-status").textContent).toBe(message);
+    const card = screen.getByTestId("report-github-evidence");
+    expect(card.textContent?.includes("Seraph only issues read GETs")).toBe(status !== "not_connected");
+    expect(card.querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("shows counts only when the archive did not verify, and no evidence block for older reports", async () => {
+    await openReport(withGitHub(github({ source: "episode_metadata", items_available: false, items: [], counts: {} })));
+    expect(screen.getByTestId("report-github-evidence").textContent).toContain("3 items recorded. The item list is unavailable");
+    expect(screen.getByTestId("report-body").querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("renders a report without GitHub evidence exactly as before", async () => {
+    const body = await openReport(detail(item(), "Plain [G1] body."));
+    expect(body.textContent).toBe("Plain [G1] body.");
+    expect(body.querySelectorAll("a")).toHaveLength(0);
+    expect(screen.queryByTestId("report-github-evidence")).toBeNull();
+    expect(screen.queryByTestId("report-goal-evidence")).toBeNull();
+  });
+
   it("does not fetch while the operator is not authenticated", async () => {
     render(<ReportsPanel authenticated={false} />);
     expect(screen.getByRole("status").textContent).toContain("Sign in");

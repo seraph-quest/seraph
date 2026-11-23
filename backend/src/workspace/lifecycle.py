@@ -483,9 +483,12 @@ def _validate_stage_receipt(receipt: object) -> dict[str, Any]:
     required_authority = {
         "status", "tables_present", "operator_sessions_invalidated", "workflow_authority_rows_blocked",
     }
-    if not isinstance(authority, dict) or not required_authority.issubset(authority) or set(authority) - required_authority - {"continuity_credentials_invalidated"}:
+    if not isinstance(authority, dict) or not required_authority.issubset(authority) or set(authority) - required_authority - {
+        "continuity_credentials_invalidated", "github_activity_sources_stopped",
+    }:
         raise WorkspaceLifecycleError("authority invalidation receipt is invalid")
     _bounded_receipt_count(authority.get("continuity_credentials_invalidated", 0), label="invalidated continuity count")
+    _bounded_receipt_count(authority.get("github_activity_sources_stopped", 0), label="stopped GitHub activity count")
     if authority["status"] != "applied":
         raise WorkspaceLifecycleError("authority invalidation receipt is not applied")
     _bounded_identifier_list(authority["tables_present"], label="authority table list")

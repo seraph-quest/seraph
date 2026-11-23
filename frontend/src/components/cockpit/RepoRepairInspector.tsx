@@ -1306,8 +1306,8 @@ export function RepoRepairInspector({
         ? "Original physical cleanup status is unknown."
         : "Physical cleanup is pending verification.";
     const unknownOutcomeStatus = current.source_recovery
-      ? `Unknown outcome. Task and result remain Unknown. Original reservation and contacted cost debt remain held. ${physicalCleanupStatus}`
-      : "Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification.";
+      ? `Unknown outcome. Task and result remain Unknown. The original repository reservation remains held; a contacted request is never sent again. ${physicalCleanupStatus}`
+      : "Unknown outcome. Reconcile the original repository execution and reservation. Physical cleanup is pending verification.";
     return <section className="rounded border border-cyan-400/30 p-3" aria-label="Repository repair execution">
       <div className="font-semibold">Repository repair</div>
       <div>{statusLabel(current.status)}{review.contact_state !== "not_prepared" && <> · iteration {review.iteration_index} of at most 3</>}</div>

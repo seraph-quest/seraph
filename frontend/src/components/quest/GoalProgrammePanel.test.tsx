@@ -124,9 +124,30 @@ describe("Goal programme cockpit journey", () => {
     renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
     await screen.findByText(/External effect: unknown/);
-    expect(screen.getByText("Original accounting liability is unresolved.")).toBeInTheDocument();
+    expect(screen.getByText("A provider request from this run has not finished: it is reserved or in flight, or held after a refused contact.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+  });
+  it("shows a finished run whose requests are not priced yet as closed, beside a held in-flight run (#1295, #1302)", async () => {
+    // The server decides both fields: the backend discovery vertical's
+    // ``completed_unpriced`` scenario proves an answered, unpriced run is
+    // projected with outstanding_held and accounting_liability false. Here
+    // the panel must keep the two runs apart, so a panel that ignored the
+    // fields (or showed every run as held) fails.
+    const base = fetchMock.getMockImplementation()!;
+    const run = { programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3, occurrence_day: "2026-10-08",
+      deadline_at: "2026-10-08T12:05:00Z", outcome: null, no_learning: true };
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true, runs: [
+        { ...run, job_id: `goal-discovery:${"c".repeat(32)}`, status: "succeeded", external_effect_state: "settled",
+          outstanding_held: false, accounting_liability: false, recovery: null },
+        { ...run, job_id: `goal-discovery:${"d".repeat(32)}`, status: "running", external_effect_state: "unknown",
+          outstanding_held: true, accounting_liability: true, recovery: "Original contact unknown; no replay." }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    expect(await screen.findByText(/External effect: settled · Occurrence closed/)).toBeInTheDocument();
+    expect(screen.getByText(/External effect: unknown · Outstanding occurrence held/)).toBeInTheDocument();
+    expect(screen.getAllByText(/has not finished/)).toHaveLength(1);
   });
   it("reads only an explicitly selected completed cited local brief with escaped text", async () => {
     const base = fetchMock.getMockImplementation()!;

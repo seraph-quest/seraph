@@ -349,7 +349,13 @@ running reviewed host or provider, discovery is blocked and visible rather than
 falling back to Python.
 
 Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
-held effects and cost liability. Selecting a completed brief performs an explicit
+held effects and any provider request that has not finished. Only a request
+that is reserved, in flight or held after a refused contact holds the occurrence
+("A provider request from this run has not finished..."); on a running
+occurrence Home shows that as `source_run_in_progress`. A finished request the
+provider has not priced yet holds nothing, so the next daily occurrence is admitted. A
+lost outcome stays held by the run status and effect ledger, and the original
+request is never sent again (#1295). Selecting a completed brief performs an explicit
 local readback under current owner and original generation checks. Private Goal
 text is excluded from the public model/search path. Source quotations remain
 untrusted data; mechanical citation/span verification does not establish semantic
@@ -768,7 +774,7 @@ Operators move a domain live with `GET /api/runtime/composition/domains` and
 confirm_domain}` (authenticated HTTP only through the global Origin/cookie
 middleware, audited as `runtime_composition_operator_transition`, the domain
 validated against the manifest), surfaced as one confirmed action in Settings →
-Cordis runtime host. A Root whose `ownership_continuity` is not `stable` can
+Diagnostics → Runtime host. A Root whose `ownership_continuity` is not `stable` can
 list owners but is refused a move (`operator_ownership_recovery_required`).
 Moving a domain to Cordis requires its prerequisites to be Cordis-owned
 (`composition_prerequisite_not_cordis`), and a rollback to legacy is refused
@@ -1429,7 +1435,7 @@ Activity entry per domain; repeated blocked ticks only update the job's
 persisted status, and the first activation after a block writes one
 `recovered` Activity entry. Per-job lifecycle blocks are stored in the same
 status record as the background-inference toggles
-(`background-inference-status.json`), so Settings → Background inference shows
+(`background-inference-status.json`), so Settings → Automation → Background inference shows
 them for inference jobs; a lifecycle block is cleared only by that job's next
 tick under an active domain.
 
@@ -1521,8 +1527,8 @@ same Node: when the package is missing or stale it runs `cordis build`; like the
 frontend it never installs dependencies, so a fresh checkout first runs
 `npm ci --prefix runtime/cordis --ignore-scripts`. Otherwise it prints the
 blocked reason (`build_dependencies_missing`, `node_unsupported`, ...) and the
-exact fix while core startup continues. Runtime status (Settings → Model →
-Advanced and diagnostics → Cordis runtime host)
+exact fix while core startup continues. Runtime status (Settings → Diagnostics →
+Runtime host)
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
 and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
 `./manage.sh -e dev cordis build`, then restart. The backend container image
@@ -1795,15 +1801,82 @@ limits are set in the NEAR account. Independently of any save, startup publishes
 revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
 is shown as `route_revoke: degraded` under Settings and never stops startup.
 
+### Settings tabs (#1280)
+
+Settings has six tabs and always opens on **Model**. The panels moved from the
+earlier 17 tabs unchanged; a merged tab only adds a heading naming the old tab
+above each panel it absorbed, except where the panel already shows that name
+(General, Workflows, Repo Sandbox, background inference, Skills, Discover, MCP).
+
+| Tab | Holds (old tab) |
+| --- | --- |
+| **Model** | Model card, then one-line **Screenshot analysis** and **Memory search** rows (Model) |
+| **General** | Theme, workspace hints, operator session, interruption mode (General); tool policy, MCP access and approval mode (Policies) |
+| **Accounts** | Telegram, Calendar, Mail, GitHub, Forgejo, Moltbook, Native |
+| **Automation** | Workflows, Guardian, Repo Sandbox, screenshot folder, background inference jobs, end-of-day reports and email delivery |
+| **Extensions** | Skills, Discover, MCP |
+| **Diagnostics** | Closed folds: Runtime host, Model routes, NEAR slots, Retired OpenRouter, NEAR text (legacy), Cost ledger, Capability checks, Audit log |
+
+The service tab is **Accounts**, not "Connections", because the cockpit already
+has a Connections page. Every old section id still works as a deep link
+(`openSettingsSection` in `frontend/src/lib/settingsNavigation.ts`, and the
+WebSocket `settings_section` field): it opens the tab that now holds the panel
+and scrolls that panel into view, for example `native` opens Accounts at
+Native, `policies` opens General at Policies, `audit` opens Diagnostics, and
+`artifacts` and `model` open Model; `background-jobs` opens Automation at
+background inference. The panel stays in view while panels above it load their
+data (a ResizeObserver re-places it, no timer), until the operator scrolls,
+types, touches or clicks inside Settings, or focus moves into it by any route
+(`focusin`), switches tab or closes Settings. The
+tab bar stays visible at the top while Settings scrolls. Only the active tab mounts, so Skills,
+Discover and MCP load (and MCP polls) only while Extensions is open.
+
+#1280 PR 3 emptied the Model tab's old "Advanced and diagnostics" fold. Nothing
+was removed and every control saves through the same endpoint as before:
+
+| Control (old place: Model → Advanced and diagnostics) | Now | Deep link |
+| --- | --- | --- |
+| Screenshot folder path, Choose, Save; analysis switch, provider, counters, inspect address, Scan folder, Clear stale (under the folder's closed **Details**) | Automation → Screenshot Folder | `screenshot-folder` |
+| End-of-day reports (Preview, Send, Test) and Email delivery | Automation → Reports | `reports` |
+| Cordis runtime host (host dump, composition and package hashes, `seraph.*.v1` domain owners) | Diagnostics → Runtime host | `runtime-host` |
+| Inference gateway, model-fabric topology, profiles, routes, fallback, proofs, local runtime | Diagnostics → Model routes | `model-routes` |
+| NEAR TEE text, vision and embedding slot editors, catalog receipts, re-index | Diagnostics → NEAR slots | `near-slots` |
+| OpenRouter setup (retired) | Diagnostics → Retired OpenRouter | `openrouter` |
+| NEAR text (legacy) | Diagnostics → NEAR text (legacy) | `near-text` |
+| Spend history / inference accounting | Diagnostics → Cost ledger | `cost-ledger` |
+| Manual canaries, Prove route, proof lifetime | Diagnostics → Capability checks | `capability-checks` |
+| Audit log (was already on Diagnostics) | Diagnostics → Audit log | `audit` |
+
+Diagnostics folds are closed when the tab opens and mount their content on
+first open, so the audit log fetches only once its fold is opened; a deep link
+opens the fold it names. The cockpit's "inspect accounting" action opens the
+Cost ledger fold.
+
+The **Screenshot analysis** row reads `/api/settings/artifact-storage` (screen
+switch and provider) and the NEAR vision slot. It says Off, Paused (needs your
+OK), One quick test left, Blocked or On. **Turn on** asks for both the plaintext
+OK and the separate screenshot OK (never pre-ticked), saves only the vision
+slot with the stored values and no key, sets the analysis switch to the NEAR
+vision slot, and runs the free catalog check; it makes no paid call. **Run
+test** shows its cost line (four checks) before the click. **Turn off** only
+switches analysis off; withdrawing screenshot consent stays in the NEAR slots
+fold. The **Memory search** row reads the NEAR embedding slot and index
+projection. Since OpenRouter's retirement there is no usable embedding model:
+the NEAR embedding slot stays shut on the ADR-035 evidence gate, so the row says
+"Off. There is no embedding model to use right now." and that search matches
+words, not meaning, with only a **Details** link; it offers nothing to turn on.
+There is no Budget row ([ADR-037](./decisions/037-no-local-cost-limits.md)).
+
 ### The Model card (#1280)
 
-Settings opens on the **Model** tab (formerly "Models & OpenRouter"). Its first
-element is the Model card: one status line saying whether chat works, the model
-in plain words ("DeepSeek V4.1 Flash, hosted by NEAR"), and at most one button.
-Everything the tab showed before (Cordis runtime host, screenshot folder, model
-routes, the shared lane, the retired OpenRouter setup, NEAR text, the detailed
-NEAR TEE panel below, accounting, canaries and background inference) is in one
-closed **Advanced and diagnostics** fold under the card, unchanged.
+The **Model** tab (formerly "Models & OpenRouter") starts with the Model card:
+one status line saying whether chat works, the model in plain words
+("DeepSeek V4.1 Flash, hosted by NEAR"), and at most one button. Below it sit
+the Screenshot analysis and Memory search rows. Everything the tab showed before
+(Cordis runtime host, screenshot folder, model routes, the retired OpenRouter
+setup, NEAR text, the detailed NEAR TEE panel below, accounting and canaries)
+moved unchanged to Automation or a closed Diagnostics fold (#1280 PR 3, table
+above); the card's **Open Diagnostics** button opens the NEAR slots fold.
 
 The card reads `GET /api/settings/model-fabric` and
 `/api/runtime/status.effective_runtime` and shows the first of ten states that
@@ -1822,7 +1895,7 @@ reason code, and reads "&lt;Model&gt;, hosted by NEAR. $3.20 used this month."
 (with "2 requests are not priced by NEAR yet (all months)." when some are
 unpriced, or "Nothing spent this month."). The unpriced count covers every
 month, not only this one. Spend history labels an unpriced request "answered,
-not priced yet" only when NEAR answered; a call that failed after contact reads
+not priced yet" only when the provider answered; a call that failed after contact reads
 "no answer, not priced", one whose outcome restart recovery lost (reason
 `provider_outcome_unknown`, also shown for such rows recovered before #1284)
 reads "outcome unknown, not priced", and one still running "in progress". "NEAR not answering" is only this session's last
@@ -1856,7 +1929,7 @@ Settings** button that opens the Model tab with the card in view.
 
 Status: **Partial** until live operator use; nothing is enabled by default.
 The Model card above covers the usual path. The detailed controls are in
-**Settings → Model → Advanced and diagnostics → NEAR TEE · text slot**:
+**Settings → Diagnostics → NEAR slots → NEAR TEE · text slot**:
 
 1. Enter the NEAR API key (write-only, stored as `vault:near_api_key`, separate
    from the NEAR text key; only a fingerprint is shown), pick a text model from
@@ -2032,8 +2105,9 @@ historical setup contract for retained configuration; its request-cost bound,
 deployment ceiling, reserve review and overrun latch no longer exist
 ([ADR-037](./decisions/037-no-local-cost-limits.md)).
 
-Open **Settings → Model → Advanced and diagnostics** (formerly the Models &
-OpenRouter tab, before that Screenshot/VLM) and
+Open **Settings → Diagnostics → Retired OpenRouter** (formerly the Model tab's
+Advanced and diagnostics fold, the Models & OpenRouter tab, and before that
+Screenshot/VLM) and
 use its **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
 one qualified `provider/model` ID and explicit upstream allow-list for each
@@ -2171,7 +2245,7 @@ Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issu
 is **Partial**:
 
 - **Telegram capture.** With an authenticated capture selection on the existing
-  pairing (Settings → Telegram), a `/task` message from the paired user and chat
+  pairing (Settings → Accounts → Telegram), a `/task` message from the paired user and chat
   creates exactly one review-only Triage Task under the selected Goal. The
   provider event id is reserved before creation, so a replay returns the same
   Task, and the same id with different content is refused as `replay_conflict`.
@@ -2218,7 +2292,7 @@ is **Partial**:
   links (valid for at most five minutes) fail with
   `channel_output_handle_invalid`. A failed Telegram button control returns
   `telegram_canonical_control_unavailable` and keeps its typed cause in Telegram
-  status (`last_error`, shown in Settings → Telegram).
+  status (`last_error`, shown in Settings → Accounts → Telegram).
 
 Live Telegram delivery, provider operation and native macOS/Safari capture remain
 unverified by these provider-free checks.
@@ -2384,7 +2458,7 @@ those omissions never become a superiority claim.
 The bounded #920 profile adds **Send neutral Telegram notice** in the current
 task's inspector, available with the installed reviewed program revision.
 Pair the operator/chat and grant Telegram transit consent in
-**Settings → Telegram** first (numeric user and chat IDs, write-only bot token,
+**Settings → Accounts → Telegram** first (numeric user and chat IDs, write-only bot token,
 grant/revoke transit consent, unpair over the existing `/api/telegram` API). Explicit status review sends enum metadata; exact denial and cancellation
 use current canonical authority. Sensitive approval and recovery remain in the
 cockpit. Unknown delivery requires visible outbox recovery or an explicit fresh
@@ -3758,10 +3832,23 @@ Goal, and recovery cannot renew deadlines, attempts or call counts.
 
 Explicit recovery reserves a current phase on the same original Board attempt.
 It can continue the persisted source-ready, prompt-ready or funded queue, or
-adopt an exact reserved physical child output with settled accounting without
-another provider POST. A current Running worker without that completed-output
-proof remains blocked from recovery. Contacted work without verified output
-retains Unknown cost and effects; it is never blindly retried. Generic retry
+adopt an exact reserved physical child output whose request finished, priced or
+not priced yet, without another provider POST. A current Running worker without that completed-output
+proof remains blocked from recovery. A request still in flight blocks recovery;
+a finished request the provider has not priced yet does not (#1295). After a restart,
+startup recovery closes a child whose answered request has a broker receipt as
+succeeded, priced or not, and leaves an answered unpriced request record as it
+is. Only a job kind whose one inference call is the whole job (a research child,
+for example) closes this way, and only when its ledger holds exactly that one
+settled call. A job that makes several calls can crash between calls, so its
+first receipt proves nothing about the rest (#1302): Goal discovery is left
+running by the sweep and held by its programme owner, native repository repair
+roots are protected and skipped, and any other job, such as a historical
+ordinary repository root, is left blocked (`stale_lease_requires_reconciliation`)
+for the operator to reconcile, then retry or cancel; nothing resumes it
+automatically; only a request with no recorded answer becomes a lost outcome. Contacted work
+without verified output retains Unknown cost and effects; it is never blindly
+retried. Generic retry
 and unblock cannot create a replacement attempt for an admitted research task.
 
 Cancellation first fences the original operation. It closes only verified
@@ -3769,7 +3856,11 @@ lease-free waits or actual owned workers whose awaited completion is recorded.
 An expired lease or an empty process registry does not prove quiescence.
 Completed child outputs and actual charges remain visible. Uncertain
 source or provider work remains Unknown, and missing proof keeps cancellation
-pending. The inspector offers exact retained-request retry and explicit cost
+pending. A succeeded child whose request is not priced yet is finished and does
+not make the cancellation uncertain (#1295). An answered unpriced request whose
+child did not succeed (for example, its output failed verification) still makes
+that child `unknown_external_effect`: cancellation cannot tell its outcome from
+the request record alone. The inspector offers exact retained-request retry and explicit cost
 recovery guidance. Corrupt or unavailable owner/session-scoped session storage
 blocks mutations; the full retained request is bounded to 16 KiB.
 
@@ -4213,7 +4304,7 @@ physical erasure is not claimed.
 ### Exact Gmail reply send
 
 **Partial:** The [ADR-016](./decisions/016-exact-gmail-reply-send.md) operator
-path imports two separate grants in Settings → Mail: readonly + identity and
+path imports two separate grants in Settings → Accounts → Mail: readonly + identity and
 send + identity. Importing credentials grants no provider contact. Choose a
 current finite Goal and explicitly verify both grants against the same mailbox.
 Every refresh requires the exact observed scopes and the same stable identity;
@@ -4489,11 +4580,12 @@ Availability follows the reviewed installed revision described above.
 
 ### GitHub activity evidence for the end-of-day report (#1264) {#github-activity-evidence-1264}
 
-**Partial (slice 1 of [#1264](https://github.com/seraph-quest/seraph/issues/1264)).**
-Seraph can collect the operator's own GitHub activity for a day and store it
-as evidence. The end-of-day report does not read it yet; that is the next
-slice. Code: `backend/src/integrations/github_cli.py` (the only code that
-starts `gh`) and `backend/src/integrations/github_activity.py`.
+**Partial ([#1264](https://github.com/seraph-quest/seraph/issues/1264)).**
+Seraph can collect the operator's own GitHub activity for a day, store it as
+evidence, and use it in the end-of-day report (see **In the end-of-day report**
+below). Code: `backend/src/integrations/github_cli.py` (the only code that
+starts `gh`), `backend/src/integrations/github_activity.py` and
+`backend/src/scheduler/jobs/end_of_day_goal_report.py`.
 
 - **Credential.** It uses the operator's local `gh` login. `gh` holds the
   account's full GitHub access and Seraph cannot narrow it. Seraph never reads
@@ -4505,7 +4597,7 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   (full gh scope; Seraph only issues read GETs)." See the
   [ADR-011 addendum](./decisions/011-finite-github-connection-consent.md#addendum-local-gh-login-as-an-activity-read-source-1264).
 - **Turning it on.** Run `gh auth login` yourself, in your own terminal. Then
-  open Settings → GitHub → **GitHub activity for reports** and press **Check
+  open Settings → Accounts → GitHub → **GitHub activity for reports** and press **Check
   gh login**. Seraph runs `gh --version` and `GET /user` and shows the version,
   path and login; it stores nothing. Choose the repositories, tick the
   acknowledgement (optionally the model-analysis box) and press **Enable**. The
@@ -4520,15 +4612,49 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   network only fail that run; the source resumes when the same account is back.
   The source belongs to your ownership identity, not to one login. Any live
   login of that identity sees it, its items and its effective-grants row, and
-  can switch it off. A new login, a logout or a login's idle or absolute
-  expiry does not stop it and does not need re-enabling. It is stopped by
-  revoking the identity (**Revoke ownership**), by a workspace restore (state
-  `stopped`, reason `workspace_restored`), and, for a source enabled in local
-  no-login mode, by that root being reset or the mode switched off. A password
-  login needs enrolled ownership before it can enable the source. Nothing
-  expires by time. Switching off cannot recall a request already in flight: one
-  read-only GET may still reach GitHub just after you switch off, and its
-  result is discarded.
+  can switch it off; each switch-off writes an audit event
+  (`github_activity` / `source_revoke`) naming the login that did it, and the
+  response says whether that event was recorded (`audit_recorded`). A new
+  login, an explicit logout or a login's idle or
+  absolute expiry does not stop it and does not need re-enabling. Nothing
+  expires by time. What changes it:
+  - **Revoke ownership** sets the row to `stopped`, reason
+    `owner_identity_revoked`, in the same transaction as the revocation. An
+    identity revoked any other way leaves the row `active`, and each run then
+    ends `blocked` / `owner_identity_revoked` before starting `gh`.
+  - A workspace restore or rollback sets it to `stopped`, reason
+    `workspace_restored`; the restore and rollback receipts count it
+    (`github_activity_sources_stopped`).
+  - For a source enabled in local no-login mode, resetting that root or
+    switching the mode off leaves the row `active`, and each run ends
+    `blocked` / `local_root_retired` before starting `gh`.
+  - A stop from a login of another ownership identity sets it to `stopped`,
+    reason `stopped_by_another_identity` (see the next point).
+
+  Switching off cannot recall a request already in flight: one read-only GET
+  may still reach GitHub just after you switch off, and its result is
+  discarded.
+- **A lost ownership identity (#1270).** A password login without the
+  continuity cookie or a recovery code has no ownership identity, and the
+  panel says so: if you enabled the source before, recover that ownership
+  first (log in with your recovery code, or from the browser that holds the
+  continuity cookie). Enrolling a new identity instead leaves the earlier
+  source with the old identity, where it keeps collecting. So every
+  authenticated login of the workspace, with or without an identity, sees the
+  sources of other identities in the panel and as
+  `github_activity_other_identity` rows in effective grants, and can stop an
+  active one (**Stop that source**, or revoke that row;
+  `POST /other-identity-sources/{id}/stop` with its revision). That view
+  carries only the source id, its state and revision, a fixed message and
+  the stop control (the effective-grants row: the owner marker, the credential
+  kind and the fixed sentence): never the GitHub login, the `gh` path, the
+  scope, the stopped reason, timestamps or the items. Active sources are
+  listed first, so a bounded list cannot hide one. Stopping only removes
+  authority. Enabling again, collecting and reading items stay with the
+  owning identity. Each stop writes an audit event (`github_activity` /
+  `source_stop`) naming the login that stopped it; the response's
+  `audit_recorded` says whether it was written. A password login needs an ownership identity before it can
+  enable a source of its own.
 - **Where it works.** Only where the backend runs directly on your computer as
   you (`./manage.sh -e dev local ...`) with `gh` installed. `gh` is looked for
   only at `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`,
@@ -4573,7 +4699,9 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   counts, call count and the binary) and `github_activity_items` (repository,
   kind, number or sha, title, a URL Seraph builds itself, UTC time, and the
   run that first and last saw it). Re-collecting a day updates rows in place.
-  Each run writes one audit event (`github_activity` / `gh_cli`).
+  Each run writes one audit event (`github_activity` / `gh_cli`) with its run
+  id and trigger; a run you start (**Collect now**) also records your login
+  (principal and session) as its lineage, while a scheduled run records none.
 - **Limits.** One `gh` process at a time, at most 120 per run and 10
   repositories, no retry and no sleep. A rate-limit answer, or a response with
   no remaining quota, ends the run and keeps what was read. The calls count
@@ -4589,7 +4717,82 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
 - **Routes** (operator session required), under
   `/api/capabilities/github/activity`: `GET` (status; starts nothing),
   `POST /gh/check`, `PUT /source`, `POST /revoke`, `POST /collect`,
-  `GET /items?report_date=YYYY-MM-DD`.
+  `GET /items?report_date=YYYY-MM-DD`,
+  `POST /other-identity-sources/{id}/stop`.
+- **In the end-of-day report.** The 21:00 job and the manual report route
+  (`POST /api/settings/end-of-day-report/manual`) first run one collection for the report's
+  day (trigger `scheduled` or `manual_report`), then build the report from
+  stored rows only. A manual run collects only when the requesting login
+  belongs to the ownership identity that owns the chosen source, and its
+  audit event names that login. From any other login, or a login without an
+  identity, the report uses the stored rows, writes a `github_activity` /
+  `report_collect` `skipped` audit event, and carries the limitation
+  `manual_collection_skipped_not_source_owner`. There is no
+  second cron and no wait: collection finishes or records why not, then the
+  report reads the store. Neither stage can fail the report.
+  - **Which source.** The report is one per workspace. It uses the active
+    source; if more than one ownership identity has an active source, it uses
+    the most recently enabled one and adds the limitation
+    `multiple_active_sources`. With no active source, the most recently
+    changed source says what happened (switched off, stopped).
+  - **Report keys.** `github_activity` (status, the one sentence, reason code,
+    limitations, run id, collected-until, login, `model_context`
+    `included`/`not_allowed`/`not_sent`, counts by kind, repositories and up
+    to 200 items, each with a `G#` ref and the URL Seraph built) and
+    `goal_evidence` (`mapped`, `unparsed`, `not_requested` or `blocked`; per
+    goal the cited `G#` refs, whether screen evidence was cited, and
+    `rolled_up_from`; `goals_without_evidence`, `github_without_goal` and
+    counts of rejected citations). `body` stays the model's text,
+    `goal_alignment` stays `[]` and the schema stays
+    `seraph.end_of_day_goal_report.v1`. Commits with one title in one
+    repository (rebased or squashed work) collapse into one item that carries
+    `same_title_count`.
+  - **Prompt.** With no source ever enabled the prompt is byte-for-byte what it
+    was before. That promise needs the activity tables to be readable: when
+    the report cannot read them it cannot tell whether a source exists, so the
+    prompt gains a section saying only "GitHub evidence could not be read from
+    the local store." and "Do not infer anything about GitHub work from its
+    absence." Otherwise a `## GitHub activity` section sits before
+    `## Goals`: the source, the collection status and its limitations, a count
+    line, and at most 60 lines / 6,000 characters of
+    `[G#] repository | kind | #n or short sha | title | local time`, inside a
+    fence derived from the run and the items; titles are cut at 120
+    characters, control characters removed and `<<<`/`>>>` runs split. No URL
+    is sent. Consent is checked first: when the model-analysis box was not
+    ticked, the section says only that GitHub evidence exists but was not
+    shared, in every state, with no login, `gh` path or status sentence. When
+    it was ticked and the day's state is failed, blocked, stopped, switched
+    off, not collected or running, the section holds one fixed sentence for
+    that status (never the login, the `gh` path, an exit code or another
+    account) and "Do not infer anything about GitHub work from its absence."
+    The full sentence stays in the report and the cockpit. Titles also lose C0
+    and C1 controls, line and paragraph separators and bidi controls. Goals get `[A#]` refs and their
+    parent, and the model is asked to start with a `<goal_evidence>` block
+    citing only `[G#]` and `SCREEN`.
+  - **After the answer.** Code extracts the block, keeps only citations of
+    refs it sent (unknown goals and ids are dropped and counted), rolls
+    sub-goal evidence up to parent goals through `Goal.parent_id`, and
+    computes the goals without evidence and the records tied to no goal. In
+    the text every link a reader could follow (any `http(s):`, `ftp:`,
+    `javascript:`, `data:`, `vbscript:` or `file:` run, a protocol-relative
+    `//host`, `www.`, or any `github.com` or `githubusercontent.com` host such
+    as `api.github.com` or `gist.github.com`) becomes `[link removed]`, and a `[G#]` that was not sent becomes
+    `[unverified reference]`. With no block the mapping is `unparsed` and the
+    text is kept (links still removed). Links exist only in
+    `github_activity.items[].url`.
+  - **Blocked analysis.** When the model call is skipped or blocked, the
+    report still carries `github_activity`, and `goal_evidence` is `blocked`.
+  - **Stored episode.** Metadata gains `github_activity_status`,
+    `github_activity_item_count`, `github_activity_run_id`,
+    `github_activity_reason_code` and `goal_evidence_status`: codes and
+    counts only, never the sentence (which can name a login or a `gh` path).
+    This metadata is read only by the reports API, not by memory recall or a
+    prompt. Items stay in the private report archive and the activity table,
+    not in memory content.
+  - **E-mail.** Unchanged when no source exists. Otherwise one line, "GitHub
+    evidence:" followed by the status sentence and the counts, is added to the plain text and one row to
+    the HTML; no titles or links are e-mailed. Resend template variables are
+    unchanged.
 - **Residual risk.** Anything already running as you can replace `gh` or run
   `gh auth token` itself; the binary checks do not defend against that. The
   argv builder is the only limit on what is sent, so a change to
@@ -4612,6 +4815,19 @@ It is read-only: it cannot generate a report and starts no model call.
 - `GET /api/reports/end-of-day/{episode_id}` adds the stored body, the
   activity/project/source mix, switch count and the archive SHA-256 values.
   Unknown ids and episodes that are not end-of-day reports return 404.
+- **GitHub evidence (#1264).** List items carry `github_activity_status` and
+  `github_activity_item_count`. Detail adds `github_activity` and
+  `goal_evidence` from the verified archive, each field re-validated: an
+  item URL that is not a GitHub commit, pull request or issue URL is dropped.
+  When the archive does not verify, `github_activity` has only the stored
+  status, reason code, item count and the fixed sentence for that status
+  (`items_available: false`) and
+  `goal_evidence` is `null`; reports from before #1264 have `null` for both.
+  The cockpit shows a **GitHub evidence** card (the sentence, the fixed
+  credential line, the limitations in plain words, such as two ownership
+  identities with active sources, counts and items as links), a **Goals and evidence** table,
+  and turns a `[G#]` in the body into a link only when a stored item with a
+  valid URL carries that ref.
 - Only `observer` memory episodes from `end_of_day_goal_report` whose metadata
   has kind `end_of_day_goal_report` and schema
   `seraph.end_of_day_goal_report.v1` are listed. The repository reads at most
@@ -4681,7 +4897,7 @@ preview with redacted fixtures, not in a live managed cockpit.
 - **Needs you.** At the top of the navigation rail: pending approvals, from
   `/api/approvals/pending`, open the approvals pane. The shell reads one page of
   8, so a full page shows as **8+**. Queued native desktop
-  notifications open Settings → Native. A link leads to Home for next steps,
+  notifications open Settings → Accounts → Native. A link leads to Home for next steps,
   Inbox decisions and blocked work. If approvals have not loaded, the rail says
   so ("Approvals not confirmed · check again") instead of showing zero.
 - **Status.** One trigger shows the chat model and an overall summary.
@@ -5234,7 +5450,7 @@ macOS host readiness, and no measured-quality or learning claim is made.
 
 ### Optional Moltbook adapter profile
 
-The bounded `work.moltbook.v1` adapter uses **Settings → Moltbook** and
+The bounded `work.moltbook.v1` adapter uses **Settings → Accounts → Moltbook** and
 existing owner Vault, Goal, approval and durable-job records. Linux and macOS
 core operation does not depend on Moltbook. Selecting a Vault credential is
 local configuration with no Goal or remote-use permission implied. Account
@@ -5345,7 +5561,7 @@ usefulness claim.
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds two reviewed
 form profiles on the same fixed Forgejo connection: `forgejo.issue-create.v1`
 (new issue in an owned repository) and `forgejo.issue-comment.v1` (comment on an
-existing ordinary issue). In Settings → Forgejo, after the backend session job,
+existing ordinary issue). In Settings → Accounts → Forgejo, after the backend session job,
 explicitly activate the profiles you want (activation contacts no provider and
 grants no POST). Prepare a form with its literal title/body: Seraph reads the
 exact form with scripts disabled and shows a protected literal preview. A
@@ -5363,4 +5579,4 @@ disposable local Forgejo 15.0.9. Production Codeberg remains blocked.
 
 [ADR-021](./decisions/021-exact-forgejo-issue-title.md) accepts one ordinary-issue title edit through the real Forgejo v15.0.9 editor, using backend-only session secrets and an exact separately approved title. The bounded profile has actual signed local Forgejo, Chromium, canonical job and cockpit evidence; availability requires the installed reviewed program revision. Live Codeberg is mechanically blocked pending a separate reviewed account/site/version activation path. Providing a key cannot enable live execution. Provider title history and notifications remain; the provider offers no atomic revision CAS or idempotency key. A lost response stays Unknown, read-only observation never resubmits, and reversal requires a new exact approval. Configuration grants neither Goal budget nor mutation permission.
 
-In Settings → Forgejo, select an owned Vault credential and active Goal, explicitly grant a finite read window, and run the bounded backend session job. The title preview shows exact old/new titles and numeric repository/issue identity before a separate unchecked approval and one Save. Jobs retain their original deadlines and exact request identities across reload and restart. An exact historical retry returns the original receipt without another provider contact. A separate acknowledged GET-only recovery reports the observed title while retaining the original Unknown and reservation; equality cannot establish attribution. The live original Root may explicitly withdraw an accepted job with a protected never-started journal, zero attempts/fence and no lease, execution request, contacts, effects or output, even after provider READ revocation/expiry, credential rotation or an owned Goal correction. This SQL-only withdrawal grants no execution and cannot release a started Unknown job. Revocation invalidates usable session authority and current private reads, and clears the fetched output display. Every outcome records `no_learning`; local mechanism evidence makes no live-account or quality claim.
+In Settings → Accounts → Forgejo, select an owned Vault credential and active Goal, explicitly grant a finite read window, and run the bounded backend session job. The title preview shows exact old/new titles and numeric repository/issue identity before a separate unchecked approval and one Save. Jobs retain their original deadlines and exact request identities across reload and restart. An exact historical retry returns the original receipt without another provider contact. A separate acknowledged GET-only recovery reports the observed title while retaining the original Unknown and reservation; equality cannot establish attribution. The live original Root may explicitly withdraw an accepted job with a protected never-started journal, zero attempts/fence and no lease, execution request, contacts, effects or output, even after provider READ revocation/expiry, credential rotation or an owned Goal correction. This SQL-only withdrawal grants no execution and cannot release a started Unknown job. Revocation invalidates usable session authority and current private reads, and clears the fetched output display. Every outcome records `no_learning`; local mechanism evidence makes no live-account or quality claim.

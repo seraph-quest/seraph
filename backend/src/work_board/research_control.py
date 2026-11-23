@@ -143,7 +143,7 @@ async def snapshot(jobs, db, owner, task_id):
         child.status in {"accepted", "queued", "succeeded"} or child.status == "paused" and child.failure_reason == PROMPT_READY))
         or (creation and verified_reserved_output(child, next((cost for cost in costs if cost.job_id == child.run_identity), None), creation, now))
         for child in children)
-    safe = safe and not any(cost.state in {"contact_started", "unknown"} or cost.recovery_reason == "provider_contact_denied" for cost in costs)
+    safe = safe and not any(cost.state == "contact_started" or cost.recovery_reason == "provider_contact_denied" for cost in costs)
     if safe:
         from src.auth.service import AuthFailure
         from src.workflows.job_runtime import DurableJobError
@@ -179,7 +179,7 @@ async def snapshot(jobs, db, owner, task_id):
         "recoverable": bool(safe), "cancel_available": not attempt.ended_at and parent.status != "succeeded",
         "report_available": authority_valid and parent.status == "succeeded" and task.status in {WorkBoardStatus.done, WorkBoardStatus.review},
         "no_learning": True, "semantic_truth_verified": False,
-        "recovery_limit": "Only the original verified precontact phase or reserved completed output may resume; uncertain contacts remain held."}
+        "recovery_limit": "Only the original verified precontact phase or reserved completed output may resume; an uncertain contact is never sent again."}
 
 
 async def reserve_recovery(jobs, owner, task_id, request):
@@ -216,8 +216,12 @@ async def reserve_recovery(jobs, owner, task_id, request):
                 or authority.get("parent_creation_digest") != creation["creation_digest"]):
                 raise BoardError("research_group_changed", "Research child lineage changed", status_code=409)
             cost = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.job_id == child.run_identity))
-            if cost and (cost.state in {"contact_started", "unknown"} or cost.recovery_reason == "provider_contact_denied"):
-                raise BoardError("research_contact_unresolved", "The original contact liability remains held; no provider retry is allowed", status_code=409)
+            # ADR-037 (#1295): only a request still in flight holds recovery. A
+            # finished unpriced (``unknown``) request is not outstanding; a lost
+            # outcome is held by the child's run status below, and the original
+            # operation id is reserved once, so it is never sent again.
+            if cost and (cost.state == "contact_started" or cost.recovery_reason == "provider_contact_denied"):
+                raise BoardError("research_contact_unresolved", "The original provider request is in flight or was refused at contact; recovery never sends it again", status_code=409)
             if child.status == "running":
                 # Output is written only after the actual broker callback and
                 # settlement returned. An expired lease alone is insufficient.
@@ -342,13 +346,17 @@ async def finish_cancel(jobs, owner, task_id, request):
             for cost in costs:
                 if cost.job_id not in creation["child_ids"]:
                     continue
-                if cost.state in {"contact_started", "unknown"}:
+                child = next(row for row in children if row.run_identity == cost.job_id)
+                # ADR-037 (#1295): a request still in flight is unresolved. A
+                # finished unpriced (``unknown``) request is unresolved only when
+                # its child never succeeded, i.e. its outcome was lost; an
+                # answered child's unpriced request does not hold cancellation.
+                if cost.state == "contact_started" or (cost.state == "unknown" and child.status != "succeeded"):
                     uncertain = True
                     uncertain_ids.add(cost.job_id)
                     continue
                 if cost.state != "reserved":
                     continue
-                child = next(row for row in children if row.run_identity == cost.job_id)
                 proof = checkpoint(_serialize(child), "research:quiescence")
                 # Held denial release also requires the existing real broker's
                 # completion evidence bound to this original contact fence.

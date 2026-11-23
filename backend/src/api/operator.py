@@ -1356,8 +1356,8 @@ def _runtime_status_payload() -> dict[str, Any]:
     # Same chat identity as /api/runtime/status (#1189); local metadata only.
     runtime, _ = _adr035_chat_identity(runtime, _effective_runtime_route_status(runtime, {}))
     return {
-        "version": "2026.11.19",
-        "build_id": "SERAPH_PRIME_v2026.11.19",
+        "version": "2026.11.23",
+        "build_id": "SERAPH_PRIME_v2026.11.23",
         **runtime,
         "provider_profiles": provider_profile_statuses(),
         "timezone": settings.user_timezone,

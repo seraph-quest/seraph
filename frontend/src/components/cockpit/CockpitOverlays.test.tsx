@@ -171,7 +171,7 @@ describe("cockpit overlays", () => {
 
     useChatStore.setState({ settingsPanelOpen: true });
     render(<SettingsPanel />);
-    fireEvent.click(await screen.findByRole("button", { name: "MCP" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Extensions" }));
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/mcp/servers"))).toBe(true);
     });
@@ -190,7 +190,9 @@ describe("cockpit overlays", () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/settings/artifact-storage"))).toBe(true);
     });
-    expect(screen.getByText("Screenshot Folder")).toBeInTheDocument();
+    // #1280 PR 3: the Model tab shows the card and its rows; the folder moved to Automation.
+    expect(screen.getByRole("region", { name: "Screenshot analysis" })).toBeInTheDocument();
+    expect(screen.queryByText("Screenshot Folder")).not.toBeInTheDocument();
     const reopenUrls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(reopenUrls.filter((url) => url.includes("/api/mcp/servers"))).toEqual([]);
   });

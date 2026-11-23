@@ -114,6 +114,39 @@ async def test_genuine_original_stop_one_guard_terminal_readback(
 
 
 @pytest.mark.asyncio
+async def test_charge_recorded_while_stop_is_pending_still_closes_the_stop(
+        accounting_db, monkeypatch, repository_admission_signer):
+    # #1291: the only iteration is unpriced. Its producer cleanup commits with
+    # a completion witness while an operator stop is pending; the operator then
+    # records the charge. The stop completion still closes the original stop.
+    from tests.test_repo_work_original_producer_startup import (
+        _operator_records_unpriced_charge, _assert_charge_recorded)
+    from src.db.models import InferenceCostReservation
+    flow = await _signed_ownerless_fixture(accounting_db, monkeypatch, "test_python",
+        failed=True, stop_requested=True, unknown_model_cost=True)
+    jobs, service, owner = flow["jobs"], flow["service"], flow["kwargs"]["owner"]
+    job_id = flow["kwargs"]["job_id"]
+    async with await _scope(flow):
+        pass  # Actual original publisher commits cleanup with its completion witness.
+    operation_id = await _operator_records_unpriced_charge(accounting_db[2], jobs, job_id=job_id,
+        operator_id=owner.principal_id, amount=555, key="operator-records-charge-during-stop")
+    async with jobs._session() as db:
+        revision = (await jobs._fetch(db, job_id)).revision
+    result = await recovery._reconcile_original_repository_cleanup(service, jobs,
+        job_id=job_id, owner=owner, expected_job_revision=revision)
+    assert result["status"] == "cancelled" and result["no_learning"] is True
+    assert result["source_recovery"]["state"] == "original_stop_committed"
+    async with jobs._session() as db:
+        root = await jobs._fetch(db, job_id)
+        assert source._repository_record(root, "repository:terminal:v1")["schema"] == "repository.stop_terminal.v1"
+        assert jobs._repo_repair_reservation_state(root)["status"] == "released"
+        _assert_charge_recorded(await db.get(InferenceCostReservation, operation_id), 555)
+        rows = list((await db.scalars(select(InferenceCostReservation).where(
+            InferenceCostReservation.job_id == job_id))).all())
+        assert len(rows) == 1 and rows[0].contact_started_at is not None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("language", ["test_python", "test_node"])
 async def test_genuine_committed_unknown_get_fresh_auth_and_exact_scope(
         accounting_db, monkeypatch, repository_admission_signer, language):

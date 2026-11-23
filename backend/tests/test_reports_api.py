@@ -331,3 +331,82 @@ async def test_non_local_requests_are_forbidden(app, async_db, archive_dir, monk
     assert listing.status_code == 403
     assert detail.status_code == 403
     assert "Body 2026-11-02" not in detail.text
+
+
+def _github_report(date: str) -> dict:
+    report = _report(date, body="Shipped [G1]; [G2] stays plain.")
+    report["github_activity"] = {
+        "status": "partial", "message": "GitHub activity is incomplete: seraph-quest/x: access denied.",
+        "reason_code": None, "limitations": [{"code": "access_denied", "repository": "seraph-quest/x"},
+                                             {"code": "Bad Code!"}],
+        "run_id": "run-1", "collected_until": "2026-11-10T20:00:00+00:00", "identity_login": "octo",
+        "model_context": "included", "counts": {"pr_merged": 1, "commit": 1},
+        "repositories": ["seraph-quest/seraph", "not a repo"],
+        "items": [
+            {"ref": "G1", "repository": "seraph-quest/seraph", "kind": "pr_merged", "number": 1262,
+             "short_sha": None, "title": "fix: determinism", "url": "https://github.com/seraph-quest/seraph/pull/1262",
+             "occurred_at": "2026-11-10T12:02:00+00:00", "same_title_count": 1},
+            {"ref": "G2", "repository": "seraph-quest/seraph", "kind": "commit", "number": None,
+             "short_sha": "abcdef1", "title": "a commit", "url": "https://evil.example/commit/abc",
+             "occurred_at": "2026-11-10T11:00:00+00:00", "same_title_count": 2},
+            {"ref": "javascript:", "repository": "seraph-quest/seraph", "kind": "commit"},
+        ],
+    }
+    report["goal_evidence"] = {
+        "status": "mapped",
+        "goals": [{"ref": "A1", "goal_id": "g1", "title": "Create AGI", "level": "vision", "domain": "productivity",
+                   "parent_ref": None, "github": ["G1", "bad"], "screen": True, "rolled_up_from": ["A2"]}],
+        "goals_without_evidence": ["A3"], "github_without_goal": ["G2"],
+        "rejected": {"unknown_evidence": 1, "unknown_goals": 0, "urls_removed": 2},
+    }
+    return report
+
+
+@pytest.mark.asyncio
+async def test_detail_returns_validated_github_evidence_from_a_verified_archive(client, archive_dir):
+    episode_id = await _store(_github_report("2026-11-10"), archive_dir)
+    listed = (await client.get("/api/reports/end-of-day")).json()["items"][0]
+    assert listed["github_activity_status"] == "partial" and listed["github_activity_item_count"] == 2
+
+    detail = (await client.get(f"/api/reports/end-of-day/{episode_id}")).json()
+    github = detail["github_activity"]
+    assert github["source"] == "archive" and github["items_available"] is True
+    assert github["status"] == "partial" and github["identity_login"] == "octo"
+    assert github["counts"] == {"pr_merged": 1, "commit": 1}
+    assert github["repositories"] == ["seraph-quest/seraph"]
+    assert github["limitations"] == [{"code": "access_denied", "repository": "seraph-quest/x"}]
+    assert [item["ref"] for item in github["items"]] == ["G1", "G2"]
+    assert github["items"][0]["url"] == "https://github.com/seraph-quest/seraph/pull/1262"
+    # A URL that is not a GitHub commit, PR or issue URL is dropped.
+    assert github["items"][1]["url"] is None and github["items"][1]["same_title_count"] == 2
+    assert "evil.example" not in json.dumps(detail)
+    evidence = detail["goal_evidence"]
+    assert evidence["status"] == "mapped"
+    assert evidence["goals"][0]["github"] == ["G1"] and evidence["goals"][0]["rolled_up_from"] == ["A2"]
+    assert "goal_id" not in evidence["goals"][0]
+    assert evidence["goals_without_evidence"] == ["A3"] and evidence["github_without_goal"] == ["G2"]
+
+
+@pytest.mark.asyncio
+async def test_tampered_archive_yields_github_status_and_counts_only(client, archive_dir):
+    episode_id = await _store(_github_report("2026-11-10"), archive_dir)
+    (json_file,) = list((archive_dir / "end-of-day").rglob("*.json"))
+    tampered = json.loads(json_file.read_text(encoding="utf-8"))
+    tampered["report"]["github_activity"]["items"][0]["url"] = "https://evil.example/x"
+    json_file.write_text(json.dumps(tampered), encoding="utf-8")
+
+    detail = (await client.get(f"/api/reports/end-of-day/{episode_id}")).json()
+    github = detail["github_activity"]
+    assert github["source"] == "episode_metadata" and github["items_available"] is False
+    assert github["status"] == "partial" and github["item_count"] == 2 and github["items"] == []
+    # Metadata keeps only codes; the fallback sentence is the fixed one for the status.
+    assert github["message"] == "GitHub activity for this day is incomplete."
+    assert detail["goal_evidence"] is None
+
+
+@pytest.mark.asyncio
+async def test_reports_without_github_evidence_keep_their_shape(client, archive_dir):
+    episode_id = await _store(_report("2026-11-10"), archive_dir)
+    detail = (await client.get(f"/api/reports/end-of-day/{episode_id}")).json()
+    assert detail["github_activity"] is None and detail["goal_evidence"] is None
+    assert detail["github_activity_status"] is None and detail["github_activity_item_count"] == 0

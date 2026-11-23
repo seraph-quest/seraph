@@ -302,7 +302,7 @@ export function deriveDesktopItem(
         daemon.recovery_hint ? `To enable it: ${daemon.recovery_hint}` : null,
       ].filter(Boolean).join(" "),
       source: "/api/observer/continuity",
-      action: { kind: "settings", label: "Open Settings → Native", section: "native" },
+      action: { kind: "settings", label: "Open Settings → Accounts → Native", section: "native" },
     };
   }
   return {
@@ -315,7 +315,7 @@ export function deriveDesktopItem(
       daemon.recovery_hint ?? null,
     ].filter(Boolean).join(" "),
     source: "/api/observer/continuity",
-    action: { kind: "settings", label: "Open Settings → Native", section: "native" },
+    action: { kind: "settings", label: "Open Settings → Accounts → Native", section: "native" },
   };
 }
 
@@ -456,7 +456,7 @@ export function derivePolicyItem(tools: string, mcp: string, approvals: string):
     tone: known ? "ok" : "unknown",
     reason: known ? null : "Policy modes have not loaded in this session yet.",
     source: "/api/settings/{tool,mcp}-policy-mode · /api/settings/approval-mode",
-    action: { kind: "settings", label: "Open Settings → Policies", section: "policies" },
+    action: { kind: "settings", label: "Open Settings → General → Policies", section: "policies" },
   };
 }
 

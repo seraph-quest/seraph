@@ -25,12 +25,12 @@ const context = vi.hoisted(() => ({
 vi.mock("../auth/OperatorAuthGate", () => ({ useOptionalOperatorAuth: () => context }));
 vi.mock("./WorkBoardPanel", () => ({ WorkBoardPanel: () => <section aria-label="Work board surface">board</section> }));
 
-const BUILD = "SERAPH_PRIME_v2026.11.19";
+const BUILD = "SERAPH_PRIME_v2026.11.23";
 
 // /api/runtime/status as captured on develop @ 0850178d: a stale configured
 // default at the top level, the real chat route in effective_runtime.
 const runtimeStatus = {
-  version: "2026.11.19",
+  version: "2026.11.23",
   build_id: BUILD,
   provider: "openrouter",
   model: "x-ai/grok-4.1-fast",
@@ -260,7 +260,7 @@ describe("cockpit shell (#1172)", () => {
     expect(desktop).toHaveTextContent("Off by configuration");
     expect(desktop).toHaveTextContent("No action needed");
     expect(desktop).toHaveTextContent("DAEMON_ENABLED=false");
-    expect(within(desktop).getByRole("button", { name: "Open Settings → Native" })).toBeInTheDocument();
+    expect(within(desktop).getByRole("button", { name: "Open Settings → Accounts → Native" })).toBeInTheDocument();
     const context = screen.getByTestId("cockpit-status-item-context");
     expect(context).toHaveTextContent("Not refreshed yet for this session");
     expect(context).toHaveTextContent("No action needed");

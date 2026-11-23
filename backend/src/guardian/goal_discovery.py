@@ -46,6 +46,15 @@ RECOVERY_BY_REASON = {
 }
 
 
+# ADR-037 (#1295): only a provider request still in flight is outstanding.
+# A finished request the provider has not priced (``unknown``) holds neither the lane
+# nor the occurrence, whether it was answered or its outcome was lost. A lost
+# outcome is held by the effect ledger and run status instead, and the
+# original request is never sent again either way (its operation id is
+# reserved once).
+IN_FLIGHT_COST_STATES = frozenset({"reserved", "contact_started"})
+
+
 def _reason_code(value):
     """Operator projections carry only finite reason codes."""
     import re
@@ -352,7 +361,7 @@ class GoalDiscoveryService:
                 continue
             state = discovery_external_effect_state(run)
             costs = (await db.execute(select(InferenceCostReservation).where(InferenceCostReservation.job_id == run.run_identity))).scalars()
-            held = any(row.state not in {"settled", "released"} for row in costs)
+            held = any(row.state in IN_FLIGHT_COST_STATES for row in costs)
             if run.status not in {"succeeded", "degraded", "cancelled"} or state == "unknown" or held:
                 raise ValueError("programme_outstanding_occurrence_requires_recovery")
 
@@ -782,7 +791,7 @@ class GoalDiscoveryService:
                     if entry.get("checkpoint_id") == "discovery:outcome"), None)
                 ledger = discovery_external_effect_state(run)
                 costs = list((await db.execute(select(InferenceCostReservation).where(InferenceCostReservation.job_id == run.run_identity))).scalars())
-                liability = any(row.state not in {"settled", "released"} for row in costs)
+                liability = any(row.state in IN_FLIGHT_COST_STATES for row in costs)
                 held = run.status not in {"succeeded", "degraded", "cancelled"} or ledger == "unknown" or liability
                 runs.append({"job_id": run.run_identity, "programme_id": authority.programme_binding.programme_id,
                     "goal_revision": run.goal_revision, "grant_revision": authority.programme_binding.grant_revision,

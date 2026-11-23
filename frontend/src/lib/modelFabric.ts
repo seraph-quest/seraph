@@ -397,7 +397,7 @@ export interface ModelFabricSettingsStatus {
   inference_block_reason?: string | null;
 }
 
-/** One ledger row: what a request cost, or that NEAR has not priced it yet. */
+/** One ledger row: what a request cost, or that the provider has not priced it yet. */
 export interface InferenceAccountingOperation {
   operation_id: string; job_id: string; owner_id: string; runtime_path: string;
   /** reserved | contact_started | settled | unknown | released */
@@ -417,7 +417,7 @@ export interface InferenceAccountingStatus {
   period_id?: string;
   /** Settled charges in the current UTC month. */
   spent_microusd?: number;
-  /** Requests NEAR has not priced yet (``unknown``), counted over all months. */
+  /** Requests the provider has not priced yet (``unknown``), counted over all months. */
   unpriced_requests?: number;
   /** False once a ledger mismatch was resealed from current content; it does not return to true. */
   history_verified?: boolean;

@@ -157,12 +157,38 @@ describe("GitHub activity panel scope", () => {
 describe("GitHub activity ownership", () => {
   it("keeps Enable off for a login without an ownership identity", async () => {
     vi.stubGlobal("fetch", vi.fn((url: unknown) => response(String(url).endsWith("/gh/check") ? checked
-      : { ...off, ownership_required: true, message: "Enroll ownership for this login before enabling the GitHub activity source." })));
+      : { ...off, ownership_required: true, message: "This login has no ownership identity." })));
     render(<GitHubActivityPanel ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
-    await screen.findByText(/Enroll ownership for this login \(Settings/);
+    const note = await screen.findByText(/recover that ownership first: log in with your recovery code/);
+    expect(screen.queryByText(/^Enroll ownership for this login/)).toBeNull();
+    // #1280 PR 2: enrollment is the ownership bar above the cockpit, not a Settings tab.
+    expect(note).toHaveTextContent("(Operator ownership and recovery, the bar above the cockpit)");
+    expect(note.textContent).not.toContain("Settings");
     fireEvent.click(screen.getByText("Check gh login"));
     await screen.findByText(/logged in as @octo/);
     fireEvent.click(screen.getByLabelText(/Use my local gh login/));
     expect(screen.getByText("Enable").hasAttribute("disabled")).toBe(true);
+  });
+
+  it("shows another identity's source without its login and stops it with that source's revision", async () => {
+    const other = { id: "source-old", state: "active", revision: 3, owner: "another_ownership_identity", controls: ["stop"],
+      message: "A GitHub source enabled under another ownership identity of this workspace is on and collecting with the local gh login." };
+    let stopped = false;
+    const fetch = vi.fn((url: unknown) => {
+      const path = String(url);
+      if (path.endsWith("/other-identity-sources/source-old/stop")) { stopped = true; return response({ stopped: "source-old", other_identity_sources: [] }); }
+      return response({ ...off, ownership_required: true, message: "This login has no ownership identity.",
+        other_identity_sources: stopped ? [{ ...other, state: "stopped", revision: 4, controls: [], message: "A GitHub source of another ownership identity of this workspace is stopped. It does not collect." }] : [other] });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<GitHubActivityPanel ownerPrincipalId="owner-b" ownerSessionId="root-b" />);
+    await screen.findByText(/is on and collecting/);
+    expect(screen.getByText("Collect now").hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("Switch off").hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByText("Stop that source"));
+    await screen.findByText(/is stopped\. It does not collect\./);
+    const call = fetch.mock.calls.find(([url]) => String(url).endsWith("/stop"))! as unknown as [unknown, RequestInit];
+    expect(JSON.parse(call[1].body as string)).toEqual({ expected_revision: 3 });
+    expect(screen.queryByText("Stop that source")).toBeNull();
   });
 });

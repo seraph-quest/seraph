@@ -37,7 +37,14 @@ plan or accepts a reviewed planner proposal. After selected-source consent, up t
 three manually approved patch iterations run under the original deadline, call and
 iteration limits with Python pytest or Node 24 npm test/build checks (no
 original-cost or iteration dollar limit since #1284,
-[ADR-037](./decisions/037-no-local-cost-limits.md)). Each run
+[ADR-037](./decisions/037-no-local-cost-limits.md)). Repository evidence binds
+each request record's contact identity, not its charge, so recording the charge
+of an unpriced iteration during or after the repair leaves the repair, its stop
+and its recovery intact (#1291). Evidence written before that change bound whole
+rows: a repair already in flight at upgrade can still stop if its charge is then
+recorded, and on a pre-v4 root a producer-recovery retry whose cleanup envelope was
+written before the upgrade refuses (`original_producer_orphan_epoch_changed`) after
+a charge is recorded. Each run
 records a local patch artifact and the actual requested command output. A requested
 check that exits non-zero continues into the next bounded iteration without renewing
 those limits. Base drift or a dirty live tree blocks before execution; the live tree
@@ -107,25 +114,38 @@ limitations. Verified with offline local GitHub fixtures and zero
 inference/provider spend. Live GitHub usefulness remains
 **external-unverified**.
 
-**GitHub activity source for reports: Partial (#1264, slice 1).** Settings →
+**GitHub activity source for reports: Partial (#1264).** Settings →
 GitHub → **GitHub activity for reports** lets the operator check their local
 `gh` login, acknowledge that it holds full GitHub access, choose repositories
 and enable a read-only source. **Collect now** stores the day's own commits,
 pull requests opened/merged/closed and issues opened/closed as provenance rows
-with Seraph-built URLs; effective grants show and revoke it. Only fixed GET
+with Seraph-built URLs; effective grants show and revoke it. A source left
+with an earlier ownership identity (a lost identity, #1270) is visible to
+every login of the workspace in neutral form and can be stopped there. Only fixed GET
 requests are sent, through `gh api` with a scratch environment and a pinned,
-ownership-checked binary. Missing boundaries: the end-of-day report does not
-read the activity yet (slice 2), reviews and comments are not collected, and
-it works only where the backend runs directly on the operator's computer.
-Verified with a fake `gh` runner, a fake `gh` executable and offline route and
-component tests; behaviour with a real `gh` login is **external-unverified**.
+ownership-checked binary. The end-of-day report (scheduled and manual) runs
+one collection for its day first, then reads stored rows only: it adds a
+fenced `## GitHub activity` prompt section with `[G#]` ids and no URLs (the
+prompt is byte-identical when no source exists), asks the model to map goals
+to `[G#]`/`SCREEN` evidence, and validates that mapping in code, rolling
+sub-goal evidence up to parent goals and removing links from the text. Each
+degraded state (not connected, switched off, stopped, blocked, failed,
+partial, not collected, unreadable) is one fixed sentence in the report, the
+cockpit and the e-mail line. Missing boundaries: reviews and comments are not
+collected, it works only where the backend runs directly on the operator's
+computer, and with two active ownership identities the report uses only the
+most recently enabled source. Verified with a fake `gh` runner, a fake `gh`
+executable, a patched model call returning fixed answers, and offline route
+and component tests; behaviour with a real `gh` login or a real model is
+**external-unverified**.
 
 **Cockpit end-of-day report reader: Partial.** The cockpit **Reports**
 section and `GET /api/reports/end-of-day[/{episode_id}]` read stored
 end-of-day goal reports only; they cannot generate a report and make no model
 or external call. A report whose `analysis_provider` is `blocked:<reason>` is
 shown as blocked, not as a report. The mix breakdown is shown only when the
-report's archive verifies by path and SHA-256. Missing boundaries: no
+report's archive verifies by path and SHA-256, and so are the GitHub evidence
+items and their links (#1264). Missing boundaries: no
 cockpit generation, no pagination past 100 reports, and the blocked-run
 scheduler receipt remains [#1140](https://github.com/seraph-quest/seraph/issues/1140).
 Verified with offline backend route tests and frontend component tests.
@@ -739,8 +759,11 @@ manifest derivation binds original physical HTTP response readbacks separately
 from artifact digests. Finite search-block causes survive authenticated history
 recovery without query/HTML exposure or provider replay. Untouched invalid queued work can
 close only through the existing canonical deny-only cancellation writer; claimed
-or uncertain effects and any cost-bearing work remain held. Explicit operator
-inspection/readback is available in the Goal panel. See the
+or uncertain effects and any cost-bearing work remain held. Only a request still
+in flight (reserved or contacted) holds the next occurrence: a finished
+occurrence whose requests the provider has not priced yet holds nothing, and a lost
+outcome stays held by its run status and effect ledger, never replayed (#1295).
+Explicit operator inspection/readback is available in the Goal panel. See the
 [operator contract](./12-current-app-guide.md#finite-public-goal-programmes).
 Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
 mechanical contracts and failure boundaries. Whole cumulative independent review
@@ -797,7 +820,7 @@ the Constitution and ADRs remain the target authority.
 | Operator outcome | Declared behavior and boundary |
 | --- | --- |
 | Return to work and recover interruptions | Stable ownership, separately reviewed continuity recovery, a guided first verified result and task attention controls preserve inspectable history. A fresh login does not restore expired execution grants or unknown-effect authority. |
-| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, call-count and recovery state. Verified child outputs gate parent adoption; an uncertain effect is held for reconciliation instead of triggering blind replay. Since #1284 no dollar allowance applies. |
+| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, call-count and recovery state. Verified child outputs gate parent adoption; an uncertain effect is held for reconciliation instead of triggering blind replay. Since #1284 no dollar allowance applies; since #1295 a finished request NEAR has not priced yet does not block research recovery, including after a restart, and does not make cancellation uncertain when its child succeeded; one whose child did not succeed still makes that child `unknown_external_effect` on cancellation. |
 | Review practical execution | Tested repository publication, finite Python/Node repair profiles, exact-site private reading and literal PDF/CSV comparison produce reviewable native receipts and readback. Host-user execution is not OS isolation; optional Linux sandbox enforcement has its own readiness gate. |
 | Use evidence in the next decision | Source-bound working sets, evidence-conflict invalidation and explicit procedure recommendations recheck current provenance. Learning requires separate review; success alone does not authorize memory change or demonstrate improved decision quality. |
 | Understand and revoke capability authority | Effective grants and coordinated revocation expose current permission. Reviewed local and authored packages bind exact versions, digests, schemas and execution profiles; unavailable isolation, quarantine or changed authority blocks new dispatch. Installation alone is not executable trust. |
@@ -1026,8 +1049,13 @@ whose first element names chat's state in plain words with one button, and
 **Allow and turn on chat** saves the operator's own tick (never pre-ticked) on
 the unchanged stored slot without re-entering the key, runs the free catalog
 check, then only the missing chat checks whose cost was shown before the
-click. The previous tab content sits in one closed "Advanced and diagnostics"
-fold. Blocked chat messages are provider-neutral and the WebSocket error frame
+click. The previous tab content sat in one closed "Advanced and diagnostics"
+fold until #1280 PR 3 moved it: the screenshot folder and reports to
+Automation, and the raw runtime, route, NEAR slot, OpenRouter, cost ledger and
+canary output to closed Diagnostics folds; the Model tab now shows the card
+plus one-line Screenshot analysis and Memory search rows (memory search says
+plainly that no embedding model is usable; it has no turn-on control). See the
+[Current App Guide](./12-current-app-guide.md#settings-tabs-1280). Blocked chat messages are provider-neutral and the WebSocket error frame
 carries `code`, `recovery_action` and `settings_section`, rendered as an **Open
 Settings** button; the status line names the effective route ("Chat is using
 DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
@@ -1036,8 +1064,20 @@ DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
 step or input and no month, overrun or budget state: ready reads "$X used this
 month." and Details says "Spending limits are set in your NEAR account." No
 consent or check semantics changed. Evidence is component and
-intercepted-transport tests only; the remaining tab migration is later #1280
-slices. See the [app guide](./12-current-app-guide.md#the-model-card-1280).
+intercepted-transport tests only. See the
+[app guide](./12-current-app-guide.md#the-model-card-1280).
+
+The Settings tab migration (#1280 slice 2) is **Partial** while slices 3-6
+of #1280 remain: 17 tabs became six (Model, General, Accounts, Automation, Extensions,
+Diagnostics), Settings always opens on Model, panels moved unchanged, and
+every old section id (including `artifacts` and `model`) still opens the tab
+that now holds the panel and keeps it in view while panels above it load,
+under a sticky tab bar. Background inference moved
+from the Model tab's fold to Automation; the screenshot folder and raw runtime
+output stay in that fold until a later #1280 slice. Evidence is component
+tests covering every old id and a mocked-API browser check of the Native and
+MCP deep links; the only backend changes are user-facing path strings. See the
+[app guide](./12-current-app-guide.md#settings-tabs-1280).
 
 ## NEAR TEE vision slot and screen pipeline (ADR-035, #1147 PR4)
 
@@ -1218,7 +1258,7 @@ usefulness remain externally unverified. See the [setup guide](./12-current-app-
 
 Daily-use readiness ([#1068](https://github.com/seraph-quest/seraph/issues/1068))
 is **Partial** on this branch: Settings (then "Models & OpenRouter", now the
-Model tab's Advanced and diagnostics fold, #1280) proposes chat-ready
+Diagnostics tab's Retired OpenRouter and Capability checks folds, #1280) proposes chat-ready
 text capabilities (`streaming`, `tool_use`), an explicit context window
 decoupled from the output cap, dollar-denominated ceiling/request bound, a
 selectable proof lifetime up to 24h, and one Prove route action whose canaries
@@ -1228,7 +1268,7 @@ expiry. Scheduled jobs that may call the text route stay ON by default with
 per-job toggles and call estimates; a disabled job makes no model call and
 reports `disabled_by_operator`. Chat distinguishes a mid-turn agent block
 (earlier calls reached the provider) from a preflight block. The former $0.50
-request bound and its overrun latch were removed by ADR-037 (#1284). Settings → Telegram pairs and grants transit
+request bound and its overrun latch were removed by ADR-037 (#1284). Settings → Accounts → Telegram pairs and grants transit
 consent over the existing API. Offline tests intercept all inference; a real
 OpenRouter session remains externally unverified. See the
 [current app guide](./12-current-app-guide.md#daily-use-readiness-1068).
@@ -1240,7 +1280,7 @@ period review, overrun latch or budget state, and spending limits are set in
 the NEAR account. The canonical durable job repository owns one request record
 per provider call (at-most-once execution, the consent revision rechecked at
 contact, durable contact denial, the recorded charge), its UTC-month stamp for
-display, and charges NEAR has not priced yet, which hold nothing. Ledger totals
+display, and charges the provider has not priced yet, which hold nothing. Ledger totals
 are sealed at schema version 2 on first start; an older build refuses them, so
 rollback needs a database from before the upgrade. The existing remote broker remains the sole serial executor. Paid
 execution on revisions containing the reviewed

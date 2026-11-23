@@ -32,7 +32,7 @@ def _revision(row):
 
 def _entry(kind, record_id, *, boundary, purpose, source, destination, state, revision,
            expiry=None, goal_id=None, limits=None, controls=None, jobs=None):
-    capability={'calendar_consent':'calendar.observe_due_events.v1','mail_consent':'mail.read.v1','goal':'goal.proactive.v1','source_watch':'guardian.research-watch.v1','github':'github.followthrough.v1','telegram':'telegram.transport.v1','node':'paired.observation.v1','github_activity':'github.activity-read.v1'}.get(kind.removesuffix('_model'),kind)
+    capability={'calendar_consent':'calendar.observe_due_events.v1','mail_consent':'mail.read.v1','goal':'goal.proactive.v1','source_watch':'guardian.research-watch.v1','github':'github.followthrough.v1','telegram':'telegram.transport.v1','node':'paired.observation.v1','github_activity':'github.activity-read.v1','github_activity_other_identity':'github.activity-read.v1'}.get(kind.removesuffix('_model'),kind)
     return dict(grant_id=f'{kind}:{record_id}', kind=kind, capability_id=capability, record_id=record_id,
         boundary=boundary, purpose=purpose, source=source, destination=destination,
         state=state, revision=revision, expires_at=_iso(expiry), goal_id=goal_id,
@@ -188,6 +188,18 @@ async def inventory(request):
                 state=a.state,revision=a.revision,limits=limits,controls=['revoke']))
             rows.append(_entry('github_activity_model',a.id,boundary='inference_egress',purpose='github_activity_model_context',source='local_gh_cli_login',destination='governed_provider',
                 state=a.state if a.model_context_allowed else 'denied',revision=a.revision,limits=limits,controls=['revoke']))
+        # #1270: a source of another ownership identity (a lost identity) stays
+        # visible and stoppable, in neutral form: no login, gh path or scope.
+        others_query=select(GitHubActivitySource)
+        if identity_id:
+            others_query=others_query.where(GitHubActivitySource.owner_identity_id!=identity_id)
+        # Active rows first, so a bounded list never hides an active foreign source.
+        from src.integrations.github_activity import active_first
+        for a in (await db.execute(active_first(others_query).limit(LIMIT))).scalars().all():
+            from src.integrations.github_activity import GRANT_SENTENCE
+            rows.append(_entry('github_activity_other_identity',a.id,boundary='observation',purpose='github_activity_evidence',source='local_gh_cli_login',destination='local_evidence',
+                state=a.state,revision=a.revision,limits={'owner':'another_ownership_identity','credential':'local_gh_cli_login','statement':GRANT_SENTENCE},
+                controls=['revoke'] if a.state=='active' else []))
     # Paired inventory uses raw owner proof; foreign state yields only a neutral
     # reset requirement, never pairing ids, device names or credentials.
     from src.api.nodes import _node_inventory_for_owner
@@ -269,6 +281,9 @@ async def revoke(request, body):
             result=await goals.update_goal(record,goals.GoalUpdate(proactive_enabled=False,expected_revision=body.expected_revision),target)
         elif kind=='schedule':
             result=await calendar.revoke_schedule(_with_body(request,{'expected_binding_revision':body.expected_revision,'idempotency_key':body.idempotency_key}),record)
+        elif kind=='github_activity_other_identity':
+            from src.integrations.github_activity import stop_other_identity_github_activity,GitHubActivityRevokeRequest
+            result=await stop_other_identity_github_activity(record,GitHubActivityRevokeRequest(expected_revision=body.expected_revision),target)
         elif kind.startswith('github_activity'):
             from src.integrations.github_activity import revoke_github_activity,GitHubActivityRevokeRequest
             result=await revoke_github_activity(GitHubActivityRevokeRequest(expected_revision=body.expected_revision),target)

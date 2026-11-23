@@ -291,7 +291,7 @@ describe("GuardianInboxPanel", () => {
     await screen.findByTestId("guardian-inbox-row-silent");
     expect(screen.getByText("Silent assessment history; no proposed action.")).toBeInTheDocument();
     expect(screen.getByText(/Goal review required/)).toBeInTheDocument();
-    expect(screen.getByText(/Outcome Unknown; retained inference liability/)).toBeInTheDocument();
+    expect(screen.getByText(/Outcome Unknown\. No automatic replay\./)).toBeInTheDocument();
     expect(screen.getByTestId("guardian-inbox-row-cancelled")).toHaveAttribute("data-state", "cancelled");
     expect(screen.queryByRole("button", { name: "Accept follow-up" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel assessment" })).not.toBeInTheDocument();
@@ -394,7 +394,7 @@ describe("GuardianInboxPanel", () => {
       reason_code: "outcome_unknown", cancel_requested: true, quiescent: true }));
     render(<GuardianInboxPanel pollIntervalMs={0} />);
     fireEvent.click(await screen.findByRole("button", { name: "Cancel assessment" }));
-    await screen.findByText(/Native work is quiescent; Unknown outcome and cost liability remain retained/);
+    await screen.findByText(/Native work is quiescent; the Unknown outcome is kept for review/);
     expect(screen.getByTestId("guardian-inbox-row-opportunity-1")).toHaveAttribute("data-state", "unknown");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

@@ -373,6 +373,109 @@ async def test_unpriced_second_iteration_runs_a_new_third_iteration_and_startup_
     assert await exact_canonical_bytes(factory) == before
 
 
+async def _operator_records_unpriced_charge(factory, jobs, *, job_id, operator_id, amount, key):
+    """The Settings "Record the charge" action on the one unpriced row (#1291)."""
+    async with factory() as db:
+        rows = [row for row in (await db.scalars(select(InferenceCostReservation).where(
+            InferenceCostReservation.job_id == job_id))).all() if row.state == "unknown"]
+    assert len(rows) == 1 and rows[0].contact_started_at is not None and rows[0].actual_cost_microusd is None
+    row = rows[0]
+    recorded = await jobs.settle_inference_cost(row.operation_id, job_id=row.job_id,
+        expected_revision=row.revision, actual_cost_microusd=amount, evidence_digest="c" * 64,
+        operator_id=operator_id, idempotency_key=key)
+    assert recorded["state"] == "settled" and recorded["actual_cost_microusd"] == amount
+    return row.operation_id
+
+
+def _assert_charge_recorded(row, amount):
+    assert row.state == "settled" and row.actual_cost_microusd == amount
+    assert row.recovery_reason is None and row.contact_started_at is not None
+    assert json.loads(row.evidence_json)[-1]["provenance"] == "manual_externally_unverified"
+
+
+@pytest.mark.asyncio
+async def test_charge_recorded_mid_repair_keeps_the_repair_and_startup_unchanged(
+        accounting_db, monkeypatch, repository_admission_signer):
+    # #1291: the second iteration is unpriced. Right after its response is
+    # closed (accounting digest bound), and before its approval and execution,
+    # the operator records the charge. The repair goes on to a third, new
+    # iteration and succeeds, nothing is contacted twice, and startup
+    # recovery afterwards changes nothing.
+    captured, responses, charged = {}, [], []
+    original_grant = source.grant_repository_iteration_consent
+    from tests.test_near_tee_text_slot import NearFixture
+    original_handler = NearFixture.handler
+
+    async def grant_then_record_charge(service, jobs, **kwargs):
+        captured.update(jobs=jobs, job_id=kwargs["job_id"])
+        result = await original_grant(service, jobs, **kwargs)
+        if len(responses) == 2 and not charged:
+            charged.append(await _operator_records_unpriced_charge(accounting_db[2], jobs,
+                job_id=kwargs["job_id"], operator_id=kwargs["owner"].principal_id, amount=4_321,
+                key="operator-records-second-charge"))
+        return result
+
+    def missing_second_bill(fixture, request):
+        path = request.url.raw_path.decode()
+        if request.method == "POST" and path == "/v1/chat/completions":
+            responses.append(path)
+            fixture.billing_missing = len(responses) == 2
+        return original_handler(fixture, request)
+
+    monkeypatch.setattr(source, "grant_repository_iteration_consent", grant_then_record_charge)
+    monkeypatch.setattr(NearFixture, "handler", missing_second_bill)
+    await _actual_source_callback_journey(accounting_db, monkeypatch, True, "test_python")
+    assert len(responses) == 3 and len(charged) == 1
+    factory, jobs, job_id = accounting_db[2], captured["jobs"], captured["job_id"]
+    async with factory() as db:
+        root = await jobs._fetch(db, job_id)
+        assert root.status == "succeeded"
+        original, _, _, _, _, _ = source.read_repository_original(root)
+        identities = [source.iteration_identity(job_id, original["repository_attempt_id"],
+            source._source_digest(original["original_input"]), index) for index in (1, 2, 3)]
+        reservations = {row.operation_id: row for row in (await db.scalars(select(InferenceCostReservation))).all()
+            if row.operation_id.startswith("remote:repo-work:")}
+        assert sorted(reservations) == sorted("remote:repo-work:" + identity for identity in identities)
+        assert charged == ["remote:repo-work:" + identities[1]]
+        _assert_charge_recorded(reservations[charged[0]], 4_321)
+        # The response evidence binds the contact identity, which the charge
+        # record left unchanged; the whole row changed.
+        response = source._repository_record(root, "repository:response:" + identities[1])
+        assert response["accounting_digest"] == source.request_record_digest(reservations[charged[0]])
+        assert response["accounting_digest"] != source._source_digest(reservations[charged[0]].model_dump(mode="json"))
+        assert source._repository_record(root, "repository:accounting:" + identities[1])["state"] == "unknown"
+    before = await exact_canonical_bytes(factory)
+    observed = datetime.now(timezone.utc) + timedelta(days=1)
+    assert await jobs.recover_inference_accounting(now=observed) == []
+    assert await jobs.recover_stale_jobs(now=observed) == []
+    assert await exact_canonical_bytes(factory) == before
+
+
+@pytest.mark.asyncio
+async def test_charge_recorded_before_wait_recovery_keeps_the_original_response(
+        accounting_db, monkeypatch, repository_admission_signer):
+    # #1291: the only iteration is unpriced; the operator records its charge
+    # before restart recovery of the contacted wait. Recovery still verifies
+    # the original response (no second contact) and the repair succeeds.
+    charged = []
+    original_recover = source.recover_repository_wait_witness
+
+    async def record_charge_then_recover(service, jobs, **kwargs):
+        if not charged:
+            charged.append(await _operator_records_unpriced_charge(accounting_db[2], jobs,
+                job_id=kwargs["job_id"], operator_id=kwargs["owner"].principal_id, amount=987,
+                key="operator-records-only-charge"))
+        return await original_recover(service, jobs, **kwargs)
+
+    monkeypatch.setattr(source, "recover_repository_wait_witness", record_charge_then_recover)
+    journey = await _actual_source_callback_journey(accounting_db, monkeypatch, False, "test_python",
+        unknown_model_cost=True)
+    assert len(charged) == 1
+    async with accounting_db[2]() as db:
+        assert (await journey["jobs"]._fetch(db, journey["root_id"])).status == "succeeded"
+        _assert_charge_recorded(await db.get(InferenceCostReservation, charged[0]), 987)
+
+
 async def undispatched_original_source(accounting_db, monkeypatch, *, work_limits=None):
     """Actual NEW admission/preparation; no producer registration or command."""
     from src.auth.service import authenticate_session

@@ -870,6 +870,7 @@ def reconcile_production_restore(
     invalidated_sessions = 0
     invalidated_continuity = 0
     invalidated_authority = 0
+    stopped_github_activity = 0
     tables_present: list[str] = []
     try:
         connection = sqlite3.connect(database_path)
@@ -900,7 +901,7 @@ def reconcile_production_restore(
                     "WHERE revoked_at IS NULL"
                 )
             invalidated_continuity = _invalidate_continuity_credentials(connection)
-            _stop_github_activity_sources(connection)
+            stopped_github_activity = _stop_github_activity_sources(connection)
             _invalidate_transport_credentials(connection)
             if "production_workflow_authority_states" in table_names:
                 tables_present.append("production_workflow_authority_states")
@@ -958,6 +959,7 @@ def reconcile_production_restore(
             "operator_sessions_invalidated": invalidated_sessions,
             "continuity_credentials_invalidated": invalidated_continuity,
             "workflow_authority_rows_blocked": invalidated_authority,
+            "github_activity_sources_stopped": stopped_github_activity,
         },
         "token_invalidation": {
             "status": "applied",
@@ -1022,6 +1024,7 @@ def reconcile_production_rollback(
     invalidated_sessions = 0
     invalidated_continuity = 0
     blocked_authority = 0
+    stopped_github_activity = 0
     try:
         source = sqlite3.connect(active_db)
         target_connection = sqlite3.connect(target_db)
@@ -1069,7 +1072,7 @@ def reconcile_production_rollback(
                 )
 
             invalidated_continuity = _invalidate_continuity_credentials(target_connection)
-            _stop_github_activity_sources(target_connection)
+            stopped_github_activity = _stop_github_activity_sources(target_connection)
             _invalidate_transport_credentials(target_connection)
             if "production_workflow_authority_states" in target_tables:
                 columns = set(
@@ -1118,6 +1121,7 @@ def reconcile_production_rollback(
         "operator_sessions_invalidated": invalidated_sessions,
             "continuity_credentials_invalidated": invalidated_continuity,
         "workflow_authority_rows_blocked": blocked_authority,
+        "github_activity_sources_stopped": stopped_github_activity,
         "optional_credentials_invalidated": ["google_calendar_token.json"]
         if optional_token_invalidated
         else [],

@@ -4538,7 +4538,7 @@ function WorkBoardPanel({
           onPrepareReschedule={input => collectCommunication("reschedule", input)}
           onPendingChange={setCalendarPending}
           onClose={closeCalendarPrep}
-          onOpenSettings={() => setAnnouncement("Open Settings → Calendar to configure an active read-only connection.")}
+          onOpenSettings={() => setAnnouncement("Open Settings → Accounts → Calendar to configure an active read-only connection.")}
           onCreated={async (task, receipt) => {
             if (pendingCreateScope) pendingCalendarSubmissions.delete(pendingCreateScope);
             setCalendarPrepReceipt(receipt);

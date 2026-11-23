@@ -124,7 +124,7 @@ describe("Goal programme cockpit journey", () => {
     renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
     await screen.findByText(/External effect: unknown/);
-    expect(screen.getByText("A provider request from this run is still in flight.")).toBeInTheDocument();
+    expect(screen.getByText("A provider request from this run has not finished: it is reserved or in flight, or held after a refused contact.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
   });
@@ -138,7 +138,7 @@ describe("Goal programme cockpit journey", () => {
     renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
     expect(await screen.findByText(/Occurrence closed/)).toBeInTheDocument();
-    expect(screen.queryByText(/still in flight/)).toBeNull();
+    expect(screen.queryByText(/has not finished/)).toBeNull();
   });
   it("reads only an explicitly selected completed cited local brief with escaped text", async () => {
     const base = fetchMock.getMockImplementation()!;

@@ -363,6 +363,22 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             fresh_broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
             use_inference_broker(monkeypatch, fresh_broker)
             monkeypatch.setattr(work_board, "dispatcher", WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions))
+            if scenario in written_outputs:
+                # What a real restart runs first (app startup -> recover_stale_jobs).
+                # An answered request, priced or not priced yet, is finished:
+                # each child closes from its broker receipt, never as a lost
+                # outcome, and no request record is reclassified (#1295).
+                before_costs = {row["operation_id"]: row for row in (await jobs.inference_accounting_snapshot())["operations"]
+                    if row["operation_id"].startswith("remote:research:")}
+                assert len(before_costs) == 2
+                await DurableJobRepository().recover_stale_jobs()
+                for row in before_costs.values():
+                    child = await jobs.get_job(row["job_id"])
+                    assert (child["status"], child["failure_reason"]) == ("succeeded", "remote_terminal_settlement_recovered"), child
+                after_costs = {row["operation_id"]: row for row in (await jobs.inference_accounting_snapshot())["operations"]
+                    if row["operation_id"].startswith("remote:research:")}
+                assert after_costs == before_costs
+                assert len(calls) == 5
             if scenario in snapshot_scenarios:
                 if scenario == "snapshot_stale_goal":
                     changed = await client.patch("/api/goals/actual-research-goal", json={"title": "Current Goal changed", "expected_revision": 1})

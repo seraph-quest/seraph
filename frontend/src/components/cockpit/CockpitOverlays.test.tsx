@@ -171,7 +171,7 @@ describe("cockpit overlays", () => {
 
     useChatStore.setState({ settingsPanelOpen: true });
     render(<SettingsPanel />);
-    fireEvent.click(await screen.findByRole("button", { name: "MCP" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Extensions" }));
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/mcp/servers"))).toBe(true);
     });

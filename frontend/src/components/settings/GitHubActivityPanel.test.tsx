@@ -159,8 +159,11 @@ describe("GitHub activity ownership", () => {
     vi.stubGlobal("fetch", vi.fn((url: unknown) => response(String(url).endsWith("/gh/check") ? checked
       : { ...off, ownership_required: true, message: "This login has no ownership identity." })));
     render(<GitHubActivityPanel ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
-    await screen.findByText(/recover that ownership first: log in with your recovery code/);
+    const note = await screen.findByText(/recover that ownership first: log in with your recovery code/);
     expect(screen.queryByText(/^Enroll ownership for this login/)).toBeNull();
+    // #1280 PR 2: enrollment is the ownership bar above the cockpit, not a Settings tab.
+    expect(note).toHaveTextContent("(Operator ownership and recovery, the bar above the cockpit)");
+    expect(note.textContent).not.toContain("Settings");
     fireEvent.click(screen.getByText("Check gh login"));
     await screen.findByText(/logged in as @octo/);
     fireEvent.click(screen.getByLabelText(/Use my local gh login/));

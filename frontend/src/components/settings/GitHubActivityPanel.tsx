@@ -146,7 +146,7 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
       : status.message || source?.state.replace(/_/g, " ")}</p>
     {showSentence && <p>{GITHUB_ACTIVITY_GRANT_SENTENCE}</p>}
     <p>The source belongs to your ownership identity: any of your logins can see and switch it off, and a new login or an expired one does not stop it.</p>
-    {status?.ownership_required && <p role="note">This login has no ownership identity. If you enabled this source before, recover that ownership first: log in with your recovery code, or from the browser that holds your continuity cookie. Enrolling a new identity (Settings → Account) leaves an earlier source with the old one.</p>}
+    {status?.ownership_required && <p role="note">This login has no ownership identity. If you enabled this source before, recover that ownership first: log in with your recovery code, or from the browser that holds your continuity cookie. Enrolling a new identity (Operator ownership and recovery, the bar above the cockpit) leaves an earlier source with the old one.</p>}
     {!!status?.other_identity_sources.length && <ul aria-label="GitHub sources of other ownership identities">
       {status.other_identity_sources.map(other => <li key={other.id}>{other.message || `A source of another ownership identity is ${other.state}.`}
         {other.stoppable && <button disabled={pending} onClick={() => void stopOther(other.id, other.revision)}>Stop that source</button>}

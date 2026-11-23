@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
+import { useState, useEffect, useCallback, useLayoutEffect, useRef, type ReactNode } from "react";
 import { API_URL } from "../config/constants";
 import { apiFetch } from "../lib/api";
 import { useChatStore } from "../stores/chatStore";
@@ -24,7 +24,16 @@ import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 import { isLocalNoLoginSession, LocalNoLoginBadge } from "./auth/localNoLogin";
-import { SETTINGS_MODEL_CARD_ID, SETTINGS_OPEN_SECTION_EVENT, type SettingsOpenSectionEvent } from "../lib/settingsNavigation";
+import {
+  resolveSettingsSection,
+  settingsAnchorId,
+  settingsSectionFrom,
+  SETTINGS_MODEL_CARD_ID,
+  SETTINGS_OPEN_SECTION_EVENT,
+  SETTINGS_TABS,
+  type SettingsOpenSectionEvent,
+  type SettingsTabId,
+} from "../lib/settingsNavigation";
 import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
@@ -148,27 +157,21 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "telegram" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
-
-const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
-  { id: "artifacts", label: "Model" },
-  { id: "general", label: "General" },
-  { id: "native", label: "Native" },
-  { id: "telegram", label: "Telegram" },
-  { id: "repo-sandbox", label: "Repo Sandbox" },
-  { id: "policies", label: "Policies" },
-  { id: "audit", label: "Audit" },
-  { id: "workflows", label: "Workflows" },
-  { id: "guardian", label: "Guardian" },
-  { id: "calendar", label: "Calendar" },
-  { id: "github", label: "GitHub" },
-  { id: "moltbook", label: "Moltbook" },
-  { id: "forgejo", label: "Forgejo" },
-  { id: "mail", label: "Mail" },
-  { id: "skills", label: "Skills" },
-  { id: "discover", label: "Discover" },
-  { id: "mcp", label: "MCP" },
-];
+/**
+ * One old tab's content inside a merged tab (#1280 PR 2). The anchor keeps the
+ * old deep link working; the heading is added only where the moved panel does
+ * not already carry the old tab's name.
+ */
+function SettingsGroup({ anchor, title, children }: { anchor: string; title?: string; children: ReactNode }) {
+  return (
+    <section id={settingsAnchorId(anchor)} data-settings-anchor={anchor} aria-label={title} className="flex flex-col gap-4">
+      {title && (
+        <div className="px-1 text-[10px] uppercase tracking-wider text-retro-border font-bold">{title}</div>
+      )}
+      {children}
+    </section>
+  );
+}
 
 function McpServerRow({
   server,
@@ -459,14 +462,14 @@ export function SettingsPanel() {
   const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
   const [installing, setInstalling] = useState<string | null>(null);
   const [configuringServer, setConfiguringServer] = useState<McpServer | null>(null);
-  const [activeSection, setActiveSection] = useState<SettingsSection>("artifacts");
+  const [activeSection, setActiveSection] = useState<SettingsTabId>("model");
   const accountingSessionRef = useRef(operatorAuth?.session);
   accountingSessionRef.current = operatorAuth?.session;
   useEffect(() => {
     const inspectAccounting = (event: { principalId: string; sessionId: string }) => {
       const session = accountingSessionRef.current;
       if (!session || event.principalId !== session.principal_id || event.sessionId !== session.session_id || !(Date.parse(session.absolute_expires_at) > Date.now()) || !(Date.parse(session.idle_expires_at) > Date.now())) return;
-      setActiveSection("artifacts"); setSettingsPanelOpen(true);
+      setActiveSection("model"); setSettingsPanelOpen(true);
     };
     appEventBus.on("settings:inspect-accounting", inspectAccounting);
     return () => appEventBus.off("settings:inspect-accounting", inspectAccounting);
@@ -474,20 +477,30 @@ export function SettingsPanel() {
   const wasOpenRef = useRef(false);
 
   // A deep link (#1172: status items name the section that resolves them)
-  // survives the open transition, which otherwise resets to the first section.
-  const requestedSectionRef = useRef<SettingsSection | null>(null);
-  // A "model-card" focus hint (#1280) scrolls the Model card into view once
-  // the section renders; the counter re-runs it on every request.
-  const [modelCardFocus, setModelCardFocus] = useState(0);
+  // survives the open transition, which otherwise resets to the Model tab.
+  // Old tab ids resolve to the tab that now holds them (#1280 PR 2).
+  const requestedSectionRef = useRef<SettingsTabId | null>(null);
+  // A deep link keeps its target in view (#1280 PR 2): a "model-card" focus
+  // hint targets the Model card, an anchor the moved panel. The counter makes
+  // every request a new anchor.
+  const [anchor, setAnchor] = useState<{ count: number; elementId: string } | null>(null);
+  const anchorCountRef = useRef(0);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const tabBarRef = useRef<HTMLDivElement>(null);
+  const tabContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const openSection = (event: SettingsOpenSectionEvent | undefined) => {
-      // "model" is the Model card, which lives on the first tab until the tab migration.
-      const section = event?.section === "model" ? "artifacts" : event?.section;
-      if (!section || !SETTINGS_SECTIONS.some((entry) => entry.id === section)) return;
-      requestedSectionRef.current = section;
-      setActiveSection(section);
+      const section = settingsSectionFrom(event?.section);
+      if (!section) return;
+      const target = resolveSettingsSection(section);
+      requestedSectionRef.current = target.tab;
+      setActiveSection(target.tab);
       setSettingsPanelOpen(true);
-      if (event?.focus === "model-card") setModelCardFocus((value) => value + 1);
+      const elementId = event?.focus === "model-card"
+        ? SETTINGS_MODEL_CARD_ID
+        : target.anchor ? settingsAnchorId(target.anchor) : null;
+      anchorCountRef.current += 1;
+      setAnchor(elementId ? { count: anchorCountRef.current, elementId } : null);
     };
     appEventBus.on(SETTINGS_OPEN_SECTION_EVENT, openSection);
     return () => appEventBus.off(SETTINGS_OPEN_SECTION_EVENT, openSection);
@@ -495,17 +508,38 @@ export function SettingsPanel() {
 
   useLayoutEffect(() => {
     if (settingsPanelOpen && !wasOpenRef.current) {
-      setActiveSection(requestedSectionRef.current ?? "artifacts");
+      setActiveSection(requestedSectionRef.current ?? "model");
     } else if (!settingsPanelOpen && wasOpenRef.current) {
-      setActiveSection("artifacts");
+      setActiveSection("model");
+      setAnchor(null);
     }
     requestedSectionRef.current = null;
     wasOpenRef.current = settingsPanelOpen;
   }, [settingsPanelOpen]);
+  // Panels above the target load their data after the tab mounts and push it
+  // down. Re-place the target whenever the tab content (or the sticky tab bar)
+  // changes size, until the operator scrolls, types, touches or clicks inside
+  // Settings, switches tab, or closes it. No timer decides when it settles.
   useEffect(() => {
-    if (!modelCardFocus || !settingsPanelOpen || activeSection !== "artifacts") return;
-    document.getElementById(SETTINGS_MODEL_CARD_ID)?.scrollIntoView?.({ block: "start" });
-  }, [modelCardFocus, settingsPanelOpen, activeSection]);
+    const body = bodyRef.current;
+    if (!settingsPanelOpen || !anchor || !body) return;
+    const place = () => {
+      const bar = tabBarRef.current;
+      if (bar) body.style.setProperty("--settings-tabbar-offset", `${bar.offsetHeight + 8}px`);
+      document.getElementById(anchor.elementId)?.scrollIntoView?.({ block: "start" });
+    };
+    place();
+    const release = () => setAnchor((current) => current?.count === anchor.count ? null : current);
+    const interactions = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    for (const name of interactions) body.addEventListener(name, release, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    if (tabContentRef.current) observer?.observe(tabContentRef.current);
+    if (tabBarRef.current) observer?.observe(tabBarRef.current);
+    return () => {
+      for (const name of interactions) body.removeEventListener(name, release);
+      observer?.disconnect();
+    };
+  }, [anchor, settingsPanelOpen, activeSection]);
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -545,18 +579,16 @@ export function SettingsPanel() {
 
   useEffect(() => {
     if (!settingsPanelOpen) return;
-    if (activeSection === "skills") {
+    if (activeSection === "extensions") {
       fetchSkills();
-    } else if (activeSection === "mcp") {
-      fetchServers();
-    } else if (activeSection === "discover") {
       fetchCatalog();
+      fetchServers();
     }
   }, [settingsPanelOpen, activeSection, fetchSkills, fetchServers, fetchCatalog]);
 
-  // Poll MCP servers only while the MCP section is visible.
+  // Poll MCP servers only while the Extensions tab (which holds MCP) is visible.
   useEffect(() => {
-    if (!settingsPanelOpen || activeSection !== "mcp") return;
+    if (!settingsPanelOpen || activeSection !== "extensions") return;
     const id = setInterval(fetchServers, 5000);
     return () => clearInterval(id);
   }, [settingsPanelOpen, activeSection, fetchServers]);
@@ -665,9 +697,9 @@ export function SettingsPanel() {
             x
           </button>
         </div>
-        <div className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
-          <div className="flex flex-wrap gap-1 px-1">
-            {SETTINGS_SECTIONS.map((section) => (
+        <div ref={bodyRef} className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
+          <div ref={tabBarRef} className="cockpit-settings-tabbar flex flex-wrap gap-1 px-1">
+            {SETTINGS_TABS.map((section) => (
               <button
                 key={section.id}
                 type="button"
@@ -677,246 +709,280 @@ export function SettingsPanel() {
                     : "border-retro-text/15 text-retro-text/45 hover:text-retro-text"
                 }`}
                 aria-pressed={activeSection === section.id}
-                onClick={() => setActiveSection(section.id)}
+                onClick={() => { setAnchor(null); setActiveSection(section.id); }}
               >
                 {section.label}
               </button>
             ))}
           </div>
 
+          <div ref={tabContentRef} className="flex flex-col gap-4">
           {activeSection === "general" && (
-          <div className="px-1">
-            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
-              General
-            </div>
-            {onboardingCompleted === true && (
-              <button
-                onClick={async () => {
-                  await restartOnboarding();
-                  loadSessions();
-                  setSettingsPanelOpen(false);
-                }}
-                className="text-[10px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
-              >
-                Restart intro
-              </button>
-            )}
-            <div className="cockpit-settings-inline-row">
-              <div className="cockpit-settings-copy">
-                <div className="cockpit-settings-label">Theme</div>
-                <div className="cockpit-settings-note">
-                  Choose the guardian surface for this workspace, or follow the system appearance.
-                </div>
+          <>
+          <SettingsGroup anchor="general">
+            <div className="px-1">
+              <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-2">
+                General
               </div>
-              <div className="cockpit-settings-choice-group" role="group" aria-label="Theme preference">
-                {(["system", "dark", "light"] as const).map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    className={`cockpit-settings-choice ${themePreference === option ? "is-active" : ""}`}
-                    onClick={() => setThemePreference(option)}
-                    aria-pressed={themePreference === option}
-                  >
-                    {option}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="cockpit-settings-inline-row">
-              <div className="cockpit-settings-copy">
-                <div className="cockpit-settings-label">Workspace hints</div>
-                <div className="cockpit-settings-note">
-                  Show workspace and window guidance across the live workspace.
-                </div>
-              </div>
-              <button
-                type="button"
-                className={`cockpit-settings-toggle ${cockpitHintsEnabled ? "is-active" : ""}`}
-                onClick={() => setCockpitHintsEnabled(!cockpitHintsEnabled)}
-              >
-                {cockpitHintsEnabled ? "On" : "Off"}
-              </button>
-            </div>
-
-            {operatorAuth && (
+              {onboardingCompleted === true && (
+                <button
+                  onClick={async () => {
+                    await restartOnboarding();
+                    loadSessions();
+                    setSettingsPanelOpen(false);
+                  }}
+                  className="text-[10px] text-retro-text/60 hover:text-retro-highlight text-left px-1 py-1 uppercase tracking-wider"
+                >
+                  Restart intro
+                </button>
+              )}
               <div className="cockpit-settings-inline-row">
                 <div className="cockpit-settings-copy">
-                  <div className="cockpit-settings-label">Operator session</div>
+                  <div className="cockpit-settings-label">Theme</div>
                   <div className="cockpit-settings-note">
-                    {isLocalNoLoginSession(operatorAuth.session)
-                      ? <>{operatorAuth.session.principal_id} · <LocalNoLoginBadge /></>
-                      : <>{operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}</>}
+                    Choose the guardian surface for this workspace, or follow the system appearance.
                   </div>
                 </div>
-                {!isLocalNoLoginSession(operatorAuth.session) && <div className="flex gap-1">
-                  <button
-                    type="button"
-                    className="cockpit-settings-choice"
-                    onClick={() => void operatorAuth.refreshSession()}
-                  >
-                    Refresh
-                  </button>
-                  <button
-                    type="button"
-                    className="cockpit-settings-choice"
-                    onClick={() => void operatorAuth.logout()}
-                  >
-                    Sign out
-                  </button>
-                </div>}
+                <div className="cockpit-settings-choice-group" role="group" aria-label="Theme preference">
+                  {(["system", "dark", "light"] as const).map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={`cockpit-settings-choice ${themePreference === option ? "is-active" : ""}`}
+                      onClick={() => setThemePreference(option)}
+                      aria-pressed={themePreference === option}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
-          </div>
-          )}
 
-          {activeSection === "general" && <InterruptionModeToggle />}
-
-          {activeSection === "native" && <DaemonStatus />}
-          {activeSection === "native" && <SelectedContextPairing ownerPrincipalId={operatorAuth?.session.principal_id} ownerSessionId={operatorAuth?.session.session_id}/>}
-
-          {activeSection === "telegram" && <TelegramPairingPanel />}
-
-          {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
-
-          {activeSection === "artifacts" && <ArtifactStoragePanel advanced={<BackgroundInferencePanel />} />}
-
-          {activeSection === "policies" && <ToolPolicyModeToggle />}
-
-          {activeSection === "policies" && <McpPolicyModeToggle />}
-
-          {activeSection === "policies" && <ApprovalModeToggle />}
-
-          {activeSection === "audit" && <AuditLogPanel />}
-
-          {activeSection === "workflows" && <WorkflowPanel />}
-
-          {activeSection === "guardian" && <SourceWatchPanel />}
-
-          {activeSection === "calendar" && <CalendarConnectionPanel
-            service="calendar_readonly"
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-          {activeSection === "calendar" && <CalendarRescheduleProfiles
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-
-          {activeSection === "github" && <GitHubConnectionPanel
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-          {activeSection === "github" && <GitHubActivityPanel
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-
-          {activeSection === "moltbook" && <MoltbookConnectionPanel
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-
-          {activeSection === "forgejo" && <ForgejoTitlePanel
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-
-          {activeSection === "mail" && <MailConnectionPanel
-            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
-            ownerSessionId={operatorAuth?.session.session_id ?? null}
-          />}
-
-          {activeSection === "skills" && (
-          <div className="px-1">
-            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
-              Skills
-            </div>
-            {skills.length > 0 ? (
-              <div className="border border-retro-text/10 rounded mb-1">
-                {skills.map((s) => (
-                  <SkillRow
-                    key={s.name}
-                    skill={s}
-                    onToggle={handleSkillToggle}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="text-[9px] text-retro-text/30 mb-1 px-1">No skills loaded</div>
-            )}
-            <button
-              onClick={handleSkillReload}
-              className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
-            >
-              Reload skills
-            </button>
-          </div>
-          )}
-
-          {activeSection === "discover" && (
-          <div className="px-1">
-            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
-              Discover
-            </div>
-            {catalogItems.length > 0 ? (
-              <div className="border border-retro-text/10 rounded mb-1">
-                {catalogItems.map((item) => (
-                  <CatalogRow
-                    key={item.catalog_id ?? `${item.type}:${item.name}`}
-                    item={item}
-                    onInstall={handleInstall}
-                    installing={installing}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="text-[9px] text-retro-text/30 mb-1 px-1">No catalog items available</div>
-            )}
-          </div>
-          )}
-
-          {activeSection === "mcp" && (
-          <div className="px-1">
-            <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
-              MCP Servers
-            </div>
-            {servers.length > 0 ? (
-              <div className="border border-retro-text/10 rounded mb-1">
-                {servers.map((s) => (
-                  <div key={s.name}>
-                    <McpServerRow
-                      server={s}
-                      onToggle={handleToggle}
-                      onRemove={handleRemove}
-                      onTest={handleTest}
-                      onSetup={setConfiguringServer}
-                    />
-                    {configuringServer?.name === s.name && (
-                      <TokenConfigForm
-                        server={s}
-                        onClose={() => setConfiguringServer(null)}
-                        onSaved={() => {
-                          fetchServers();
-                          useChatStore.getState().fetchToolRegistry();
-                        }}
-                      />
-                    )}
+              <div className="cockpit-settings-inline-row">
+                <div className="cockpit-settings-copy">
+                  <div className="cockpit-settings-label">Workspace hints</div>
+                  <div className="cockpit-settings-note">
+                    Show workspace and window guidance across the live workspace.
                   </div>
-                ))}
+                </div>
+                <button
+                  type="button"
+                  className={`cockpit-settings-toggle ${cockpitHintsEnabled ? "is-active" : ""}`}
+                  onClick={() => setCockpitHintsEnabled(!cockpitHintsEnabled)}
+                >
+                  {cockpitHintsEnabled ? "On" : "Off"}
+                </button>
               </div>
-            ) : (
-              <div className="text-[9px] text-retro-text/30 mb-1 px-1">No servers configured</div>
-            )}
-            {testResult && (
-              <div className="text-[9px] text-retro-highlight px-1 mb-1">{testResult}</div>
-            )}
-            <AddServerForm onAdd={() => {
-              fetchServers();
-              useChatStore.getState().fetchToolRegistry();
-            }} />
-          </div>
+
+              {operatorAuth && (
+                <div className="cockpit-settings-inline-row">
+                  <div className="cockpit-settings-copy">
+                    <div className="cockpit-settings-label">Operator session</div>
+                    <div className="cockpit-settings-note">
+                      {isLocalNoLoginSession(operatorAuth.session)
+                        ? <>{operatorAuth.session.principal_id} · <LocalNoLoginBadge /></>
+                        : <>{operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}</>}
+                    </div>
+                  </div>
+                  {!isLocalNoLoginSession(operatorAuth.session) && <div className="flex gap-1">
+                    <button
+                      type="button"
+                      className="cockpit-settings-choice"
+                      onClick={() => void operatorAuth.refreshSession()}
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      className="cockpit-settings-choice"
+                      onClick={() => void operatorAuth.logout()}
+                    >
+                      Sign out
+                    </button>
+                  </div>}
+                </div>
+              )}
+            </div>
+            <InterruptionModeToggle />
+          </SettingsGroup>
+          <SettingsGroup anchor="policies" title="Policies">
+            <ToolPolicyModeToggle />
+            <McpPolicyModeToggle />
+            <ApprovalModeToggle />
+          </SettingsGroup>
+          </>
           )}
+
+          {activeSection === "accounts" && (
+          <>
+          <SettingsGroup anchor="telegram" title="Telegram">
+            <TelegramPairingPanel />
+          </SettingsGroup>
+          <SettingsGroup anchor="calendar" title="Calendar">
+            <CalendarConnectionPanel
+              service="calendar_readonly"
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+            <CalendarRescheduleProfiles
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+          </SettingsGroup>
+          <SettingsGroup anchor="mail" title="Mail">
+            <MailConnectionPanel
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+          </SettingsGroup>
+          <SettingsGroup anchor="github" title="GitHub">
+            <GitHubConnectionPanel
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+            <GitHubActivityPanel
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+          </SettingsGroup>
+          <SettingsGroup anchor="forgejo" title="Forgejo">
+            <ForgejoTitlePanel
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+          </SettingsGroup>
+          <SettingsGroup anchor="moltbook" title="Moltbook">
+            <MoltbookConnectionPanel
+              ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+              ownerSessionId={operatorAuth?.session.session_id ?? null}
+            />
+          </SettingsGroup>
+          <SettingsGroup anchor="native" title="Native">
+            <DaemonStatus />
+            <SelectedContextPairing ownerPrincipalId={operatorAuth?.session.principal_id} ownerSessionId={operatorAuth?.session.session_id}/>
+          </SettingsGroup>
+          </>
+          )}
+
+          {activeSection === "model" && <ArtifactStoragePanel />}
+
+          {activeSection === "automation" && (
+          <>
+          <SettingsGroup anchor="workflows">
+            <WorkflowPanel />
+          </SettingsGroup>
+          <SettingsGroup anchor="guardian" title="Guardian">
+            <SourceWatchPanel />
+          </SettingsGroup>
+          <SettingsGroup anchor="repo-sandbox">
+            <RepoSandboxPanel />
+          </SettingsGroup>
+          <SettingsGroup anchor="background-jobs">
+            <BackgroundInferencePanel />
+          </SettingsGroup>
+          </>
+          )}
+
+          {activeSection === "extensions" && (
+          <>
+          <SettingsGroup anchor="skills">
+            <div className="px-1">
+              <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
+                Skills
+              </div>
+              {skills.length > 0 ? (
+                <div className="border border-retro-text/10 rounded mb-1">
+                  {skills.map((s) => (
+                    <SkillRow
+                      key={s.name}
+                      skill={s}
+                      onToggle={handleSkillToggle}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="text-[9px] text-retro-text/30 mb-1 px-1">No skills loaded</div>
+              )}
+              <button
+                onClick={handleSkillReload}
+                className="text-[9px] text-retro-text/40 hover:text-retro-highlight px-1 py-0.5 uppercase tracking-wider"
+              >
+                Reload skills
+              </button>
+            </div>
+          </SettingsGroup>
+          <SettingsGroup anchor="discover">
+            <div className="px-1">
+              <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
+                Discover
+              </div>
+              {catalogItems.length > 0 ? (
+                <div className="border border-retro-text/10 rounded mb-1">
+                  {catalogItems.map((item) => (
+                    <CatalogRow
+                      key={item.catalog_id ?? `${item.type}:${item.name}`}
+                      item={item}
+                      onInstall={handleInstall}
+                      installing={installing}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="text-[9px] text-retro-text/30 mb-1 px-1">No catalog items available</div>
+              )}
+            </div>
+          </SettingsGroup>
+          <SettingsGroup anchor="mcp">
+            <div className="px-1">
+              <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">
+                MCP Servers
+              </div>
+              {servers.length > 0 ? (
+                <div className="border border-retro-text/10 rounded mb-1">
+                  {servers.map((s) => (
+                    <div key={s.name}>
+                      <McpServerRow
+                        server={s}
+                        onToggle={handleToggle}
+                        onRemove={handleRemove}
+                        onTest={handleTest}
+                        onSetup={setConfiguringServer}
+                      />
+                      {configuringServer?.name === s.name && (
+                        <TokenConfigForm
+                          server={s}
+                          onClose={() => setConfiguringServer(null)}
+                          onSaved={() => {
+                            fetchServers();
+                            useChatStore.getState().fetchToolRegistry();
+                          }}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-[9px] text-retro-text/30 mb-1 px-1">No servers configured</div>
+              )}
+              {testResult && (
+                <div className="text-[9px] text-retro-highlight px-1 mb-1">{testResult}</div>
+              )}
+              <AddServerForm onAdd={() => {
+                fetchServers();
+                useChatStore.getState().fetchToolRegistry();
+              }} />
+            </div>
+          </SettingsGroup>
+          </>
+          )}
+
+          {activeSection === "diagnostics" && (
+          <SettingsGroup anchor="audit" title="Audit">
+            <AuditLogPanel />
+          </SettingsGroup>
+          )}
+
+          </div>
 
           <div className="flex-1" />
           <div className="text-[9px] text-retro-text/20 px-1 pb-1">

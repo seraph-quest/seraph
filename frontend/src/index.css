@@ -1582,6 +1582,25 @@ body {
   padding: 16px 20px 20px;
 }
 
+/* #1280: the Settings tab bar stays visible while a deep link holds a panel in
+   view; anchors stop below it. The offset is measured from the bar. */
+.cockpit-settings-tabbar {
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  margin-top: -16px;
+  padding-top: 16px;
+  padding-bottom: 8px;
+  background: var(--cockpit-modal-card-bg);
+  /* The card gradient is slightly translucent; a solid base hides content scrolling beneath. */
+  background-color: var(--cockpit-bg);
+}
+
+.cockpit-settings-scope [data-settings-anchor],
+.cockpit-settings-scope #settings-model-card {
+  scroll-margin-top: var(--settings-tabbar-offset, 48px);
+}
+
 .cockpit-settings-scope,
 .cockpit-goals-scope {
   font-size: 13px;

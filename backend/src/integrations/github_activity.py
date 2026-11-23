@@ -187,17 +187,17 @@ def activity_status_message(status: str, reason_code: str | None = None, *, logi
         if reason_code == "gh_login_changed":
             now_as = f"@{current_login}" if current_login else "another account"
             return (f"GitHub source stopped: gh is now logged in as {now_as}, not @{login}. "
-                    "Enable it again in Settings → GitHub to use this login.")
+                    "Enable it again in Settings → Accounts → GitHub to use this login.")
         if reason_code == "workspace_restored":
             return ("GitHub source stopped: the workspace was restored. Review it and enable the source again "
-                    "in Settings → GitHub.")
+                    "in Settings → Accounts → GitHub.")
         if reason_code == "owner_identity_revoked":
             return ("GitHub source stopped: the ownership identity that enabled it was revoked. "
-                    "Enable it again in Settings → GitHub from a current login.")
+                    "Enable it again in Settings → Accounts → GitHub from a current login.")
         if reason_code == "stopped_by_another_identity":
             return ("GitHub source stopped from a login of another ownership identity of this workspace. "
-                    "Enable it again in Settings → GitHub.")
-        return "GitHub source stopped. Enable it again in Settings → GitHub."
+                    "Enable it again in Settings → Accounts → GitHub.")
+        return "GitHub source stopped. Enable it again in Settings → Accounts → GitHub."
     if status == "blocked":
         if reason_code == "gh_unavailable":
             return ("GitHub source blocked: no gh command is available where Seraph's backend runs. "
@@ -210,14 +210,14 @@ def activity_status_message(status: str, reason_code: str | None = None, *, logi
                     "Run gh auth login in your terminal.")
         if reason_code == "owner_identity_revoked":
             return ("GitHub source blocked: the ownership identity that enabled it was revoked. "
-                    "Enable it again in Settings → GitHub from a current login.")
+                    "Enable it again in Settings → Accounts → GitHub from a current login.")
         if reason_code == "local_root_retired":
             return ("GitHub source blocked: it was enabled in local no-login mode, which has since been switched "
-                    "off or reset. Enable it again in Settings → GitHub.")
+                    "off or reset. Enable it again in Settings → Accounts → GitHub.")
         if reason_code == "gh_login_changed":
             now_as = f"@{current_login}" if current_login else "another account"
             return (f"GitHub source stopped: gh is now logged in as {now_as}, not @{login}. "
-                    "Enable it again in Settings → GitHub to use this login.")
+                    "Enable it again in Settings → Accounts → GitHub to use this login.")
         if reason_code in {"source_revoked", "source_changed"}:
             return "GitHub collection stopped: the source was switched off or changed while it ran."
         return f"GitHub source blocked: {reason_code or 'unknown reason'}."
@@ -1280,7 +1280,7 @@ OWNERSHIP_REQUIRED_MESSAGE = (
     "This login has no ownership identity. If you or another login enabled the GitHub activity source before, "
     "recover that ownership first: log in with your recovery code, or from the browser that holds your "
     "continuity cookie. Enrolling a new ownership identity leaves an earlier source with the old identity. "
-    "Enroll only if you never had one (Settings → Account).")
+    "Enroll only if you never had one (Operator ownership and recovery, the bar above the cockpit).")
 
 
 @github_activity_router.get("")

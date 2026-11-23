@@ -1045,8 +1045,20 @@ DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
 step or input and no month, overrun or budget state: ready reads "$X used this
 month." and Details says "Spending limits are set in your NEAR account." No
 consent or check semantics changed. Evidence is component and
-intercepted-transport tests only; the remaining tab migration is later #1280
-slices. See the [app guide](./12-current-app-guide.md#the-model-card-1280).
+intercepted-transport tests only. See the
+[app guide](./12-current-app-guide.md#the-model-card-1280).
+
+The Settings tab migration (#1280 slice 2) is **Partial** while slices 3-6
+of #1280 remain: 17 tabs became six (Model, General, Accounts, Automation, Extensions,
+Diagnostics), Settings always opens on Model, panels moved unchanged, and
+every old section id (including `artifacts` and `model`) still opens the tab
+that now holds the panel and keeps it in view while panels above it load,
+under a sticky tab bar. Background inference moved
+from the Model tab's fold to Automation; the screenshot folder and raw runtime
+output stay in that fold until a later #1280 slice. Evidence is component
+tests covering every old id and a mocked-API browser check of the Native and
+MCP deep links; the only backend changes are user-facing path strings. See the
+[app guide](./12-current-app-guide.md#settings-tabs-1280).
 
 ## NEAR TEE vision slot and screen pipeline (ADR-035, #1147 PR4)
 
@@ -1237,7 +1249,7 @@ expiry. Scheduled jobs that may call the text route stay ON by default with
 per-job toggles and call estimates; a disabled job makes no model call and
 reports `disabled_by_operator`. Chat distinguishes a mid-turn agent block
 (earlier calls reached the provider) from a preflight block. The former $0.50
-request bound and its overrun latch were removed by ADR-037 (#1284). Settings → Telegram pairs and grants transit
+request bound and its overrun latch were removed by ADR-037 (#1284). Settings → Accounts → Telegram pairs and grants transit
 consent over the existing API. Offline tests intercept all inference; a real
 OpenRouter session remains externally unverified. See the
 [current app guide](./12-current-app-guide.md#daily-use-readiness-1068).

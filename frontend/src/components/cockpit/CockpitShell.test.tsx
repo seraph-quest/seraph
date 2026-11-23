@@ -260,7 +260,7 @@ describe("cockpit shell (#1172)", () => {
     expect(desktop).toHaveTextContent("Off by configuration");
     expect(desktop).toHaveTextContent("No action needed");
     expect(desktop).toHaveTextContent("DAEMON_ENABLED=false");
-    expect(within(desktop).getByRole("button", { name: "Open Settings → Native" })).toBeInTheDocument();
+    expect(within(desktop).getByRole("button", { name: "Open Settings → Accounts → Native" })).toBeInTheDocument();
     const context = screen.getByTestId("cockpit-status-item-context");
     expect(context).toHaveTextContent("Not refreshed yet for this session");
     expect(context).toHaveTextContent("No action needed");

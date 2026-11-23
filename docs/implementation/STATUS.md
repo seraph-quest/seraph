@@ -748,8 +748,11 @@ manifest derivation binds original physical HTTP response readbacks separately
 from artifact digests. Finite search-block causes survive authenticated history
 recovery without query/HTML exposure or provider replay. Untouched invalid queued work can
 close only through the existing canonical deny-only cancellation writer; claimed
-or uncertain effects and any cost-bearing work remain held. Explicit operator
-inspection/readback is available in the Goal panel. See the
+or uncertain effects and any cost-bearing work remain held. Only a request still
+in flight (reserved or contacted) holds the next occurrence: a finished
+occurrence whose requests NEAR has not priced yet holds nothing, and a lost
+outcome stays held by its run status and effect ledger, never replayed (#1295).
+Explicit operator inspection/readback is available in the Goal panel. See the
 [operator contract](./12-current-app-guide.md#finite-public-goal-programmes).
 Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
 mechanical contracts and failure boundaries. Whole cumulative independent review
@@ -806,7 +809,7 @@ the Constitution and ADRs remain the target authority.
 | Operator outcome | Declared behavior and boundary |
 | --- | --- |
 | Return to work and recover interruptions | Stable ownership, separately reviewed continuity recovery, a guided first verified result and task attention controls preserve inspectable history. A fresh login does not restore expired execution grants or unknown-effect authority. |
-| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, call-count and recovery state. Verified child outputs gate parent adoption; an uncertain effect is held for reconciliation instead of triggering blind replay. Since #1284 no dollar allowance applies. |
+| Run bounded plans and research | Durable inference request records, priorities, reviewed artifact dependencies and finite read-only research children retain owner, deadline, call-count and recovery state. Verified child outputs gate parent adoption; an uncertain effect is held for reconciliation instead of triggering blind replay. Since #1284 no dollar allowance applies; since #1295 a finished request NEAR has not priced yet does not block research recovery, including after a restart, and does not make cancellation uncertain when its child succeeded; one whose child did not succeed still makes that child `unknown_external_effect` on cancellation. |
 | Review practical execution | Tested repository publication, finite Python/Node repair profiles, exact-site private reading and literal PDF/CSV comparison produce reviewable native receipts and readback. Host-user execution is not OS isolation; optional Linux sandbox enforcement has its own readiness gate. |
 | Use evidence in the next decision | Source-bound working sets, evidence-conflict invalidation and explicit procedure recommendations recheck current provenance. Learning requires separate review; success alone does not authorize memory change or demonstrate improved decision quality. |
 | Understand and revoke capability authority | Effective grants and coordinated revocation expose current permission. Reviewed local and authored packages bind exact versions, digests, schemas and execution profiles; unavailable isolation, quarantine or changed authority blocks new dispatch. Installation alone is not executable trust. |

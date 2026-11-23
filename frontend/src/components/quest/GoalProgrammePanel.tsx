@@ -166,7 +166,7 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
     {runs.map((run) => <article key={run.job_id} aria-label={`Discovery ${run.job_id}`}>
       <div>{run.occurrence_day} · {run.status} · grant revision {run.grant_revision} · original deadline {run.deadline_at}</div>
       <div>External effect: {run.external_effect_state} · {run.outstanding_held ? "Outstanding occurrence held" : "Occurrence closed"} · no_learning</div>
-      {run.accounting_liability && <div>A provider request from this run is in progress or not priced yet.</div>}
+      {run.accounting_liability && <div>A provider request from this run has not finished: it is reserved or in flight, or held after a refused contact.</div>}
       {run.denial_cause && <div>Untouched occurrence cancelled: {run.denial_cause}. No contact or replay was admitted.</div>}
       {run.search_blocked_reason && <div role="status">Public search blocked: {run.search_blocked_reason}. Inspect the original occurrence; provider replay is forbidden.</div>}
       {run.research_blocked_reason && <div role="status">Research blocked: {displayReason(run.research_blocked_reason)}. Inspect the original occurrence; provider replay is forbidden.</div>}

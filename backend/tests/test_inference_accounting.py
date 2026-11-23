@@ -147,6 +147,51 @@ async def test_unknown_cost_explicit_revision_settlement(accounting_db):
 
 
 @pytest.mark.asyncio
+async def test_restart_recovery_leaves_an_answered_unpriced_request_finished(accounting_db):
+    # #1295: startup recovery reclassifies a stale running job's request only
+    # when no answer was recorded. An answered request NEAR has not priced yet
+    # is finished, like a settled one; a call that failed after contact still
+    # becomes a lost outcome. Neither is ever sent again.
+    from src.db.models import WorkflowRunState
+    root, engine, factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    calls = []
+    async def no_cost():
+        calls.append("answered")
+        return {"id": "gen-unpriced", "usage": {"prompt_tokens": 5}, "choices": [{"message": {"content": "ok"}}]}
+    async def failing_after_contact():
+        calls.append("failed")
+        raise RuntimeError("provider connection dropped after the request was sent")
+    await broker.execute(request("answered-unpriced"), no_cost)
+    with pytest.raises(RuntimeError, match="dropped"):
+        await broker.execute(request("failed-after-contact"), failing_after_contact, uncertain_on_error=False)
+    before = {row["operation_id"]: row for row in (await repository.inference_accounting_snapshot())["operations"]}
+    assert before["answered-unpriced"]["recovery_reason"] == "provider_cost_readback_required"
+    assert before["failed-after-contact"]["recovery_reason"] == "provider_call_failed"
+    # Both jobs look like a crashed worker: running with a lapsed lease.
+    lapsed = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+    async with factory.accounting_sessions() as db:
+        for operation_id in before:
+            from sqlalchemy import select
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == before[operation_id]["job_id"]))
+            run.status, run.lease_owner, run.lease_expires_at = "running", "crashed-worker", lapsed
+            db.add(run)
+    recovered = await DurableJobRepository().recover_inference_accounting()
+    assert [item["operation_id"] for item in recovered] == ["failed-after-contact"]
+    after = {row["operation_id"]: row for row in (await repository.inference_accounting_snapshot())["operations"]}
+    assert after["answered-unpriced"] == before["answered-unpriced"]
+    assert (after["failed-after-contact"]["state"], after["failed-after-contact"]["recovery_reason"]) == (
+        "unknown", "provider_outcome_unknown")
+    failed = await repository.get_job(before["failed-after-contact"]["job_id"])
+    assert failed["status"] == "unknown_external_effect"
+    assert (await repository.get_job(before["answered-unpriced"]["job_id"]))["status"] == "running"
+    assert calls == ["answered", "failed"]
+
+
+@pytest.mark.asyncio
 async def test_failed_call_after_contact_is_recorded_as_no_answer_not_succeeded(accounting_db):
     # #1284: an unpriced record from a call that raised after contact says
     # "no answer"; its ephemeral job is never reported as succeeded. The

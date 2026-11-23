@@ -336,6 +336,13 @@ class InferenceAccountingRepositoryMixin:
                         continue
                     if row.state not in {"reserved", "contact_started", "unknown"}:
                         continue
+                    if row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required":
+                        # Answered, not priced yet (#1295): the call finished,
+                        # so the record holds nothing, as a settled row does.
+                        # Stale-job recovery decides the run from its effect
+                        # ledger alone; no answer was lost, so the record is
+                        # not reclassified as a lost outcome.
+                        continue
                     run = await self._fetch(db, row.job_id)
                     if run.status != "running" or (run.lease_expires_at is not None and _utc(run.lease_expires_at) > observed):
                         continue

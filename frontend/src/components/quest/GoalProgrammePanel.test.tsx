@@ -124,9 +124,21 @@ describe("Goal programme cockpit journey", () => {
     renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
     await screen.findByText(/External effect: unknown/);
-    expect(screen.getByText("A provider request from this run is in progress or not priced yet.")).toBeInTheDocument();
+    expect(screen.getByText("A provider request from this run has not finished: it is reserved or in flight, or held after a refused contact.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+  });
+  it("shows a finished run whose requests are not priced yet as closed, not held (#1295)", async () => {
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true, runs: [{ job_id: `goal-discovery:${"c".repeat(32)}`,
+        programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3, occurrence_day: "2026-10-08",
+        status: "succeeded", deadline_at: "2026-10-08T12:05:00Z", external_effect_state: "settled", outstanding_held: false,
+        accounting_liability: false, outcome: null, no_learning: true, recovery: null }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    expect(await screen.findByText(/Occurrence closed/)).toBeInTheDocument();
+    expect(screen.queryByText(/has not finished/)).toBeNull();
   });
   it("reads only an explicitly selected completed cited local brief with escaped text", async () => {
     const base = fetchMock.getMockImplementation()!;

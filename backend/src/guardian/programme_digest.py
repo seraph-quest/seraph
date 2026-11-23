@@ -497,8 +497,12 @@ def source_schedule(programme, history, now):
         return unavailable("programme_cadence_unavailable")
     held = [run for run in history if run["outstanding_held"]]
     if held:
+        # A running occurrence with a provider request in flight is ordinary
+        # progress; the same request on a run that is not running needs
+        # recovery (#1295). A finished unpriced request is never a liability.
         ordinary = all(run["status"] in {"accepted", "queued", "running"}
-            and run["external_effect_state"] != "unknown" and not run["accounting_liability"] for run in held)
+            and run["external_effect_state"] != "unknown"
+            and (not run["accounting_liability"] or run["status"] == "running") for run in held)
         return SourceSchedule(next_source_state="held", next_source_reason="source_run_in_progress" if ordinary
             else "programme_outstanding_occurrence_requires_recovery")
     from src.runtime_plugins.profiles import scheduler_enabled

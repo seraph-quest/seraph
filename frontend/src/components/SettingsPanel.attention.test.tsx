@@ -7,7 +7,9 @@ import { useChatStore } from "../stores/chatStore";
 
 const auth = vi.hoisted(() => ({ session: { principal_id: "owner", session_id: "root", idle_expires_at: "2099-01-01T00:00:00Z", absolute_expires_at: "2099-01-02T00:00:00Z" } }));
 vi.mock("./auth/OperatorAuthGate", () => ({ useOptionalOperatorAuth: () => auth }));
-vi.mock("./settings/ArtifactStoragePanel", () => ({ ArtifactStoragePanel: () => <div aria-label="Inference accounting">Owning accounting inspector</div> }));
+// #1280 PR 3: the accounting inspector lives in the Diagnostics "Cost ledger" fold.
+vi.mock("./settings/ModelTab", () => ({ ModelTab: () => <div aria-label="Model tab">Model tab</div> }));
+vi.mock("./settings/InferenceAccountingPanel", () => ({ InferenceAccountingPanel: () => <div aria-label="Inference accounting">Owning accounting inspector</div> }));
 beforeEach(() => {
   useChatStore.setState({ settingsPanelOpen: false });
   auth.session = { principal_id: "owner", session_id: "root", idle_expires_at: "2099-01-01T00:00:00Z", absolute_expires_at: "2099-01-02T00:00:00Z" };
@@ -19,6 +21,7 @@ it("opens the existing accounting section from a closed mount and resets another
   render(<SettingsPanel />);
   act(() => appEventBus.emit("settings:inspect-accounting", { principalId: "owner", sessionId: "root" }));
   expect(await screen.findByLabelText("Inference accounting")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Diagnostics" })).toHaveAttribute("aria-pressed", "true");
   fireEvent.click(screen.getByRole("button", { name: "General" }));
   expect(screen.queryByLabelText("Inference accounting")).not.toBeInTheDocument();
   act(() => appEventBus.emit("settings:inspect-accounting", { principalId: "owner", sessionId: "root" }));
@@ -42,7 +45,7 @@ it("opens Settings on the exact section a shell status action names (#1172)", as
   expect(screen.queryByLabelText("Inference accounting")).not.toBeInTheDocument();
   act(() => useChatStore.getState().setSettingsPanelOpen(false));
   act(() => openSettingsSection("artifacts"));
-  expect(await screen.findByLabelText("Inference accounting")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Model tab")).toBeInTheDocument();
 });
 
 it("opens the Model tab with the Model card in view from the chat's \"model\" link (#1280)", async () => {
@@ -57,7 +60,7 @@ it("opens the Model tab with the Model card in view from the chat's \"model\" li
     act(() => openSettingsSection("model"));
     expect(useChatStore.getState().settingsPanelOpen).toBe(true);
     expect(screen.getByRole("button", { name: "Model" })).toHaveAttribute("aria-pressed", "true");
-    expect(await screen.findByLabelText("Inference accounting")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Model tab")).toBeInTheDocument();
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
   } finally {
     target.remove();

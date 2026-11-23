@@ -774,7 +774,7 @@ Operators move a domain live with `GET /api/runtime/composition/domains` and
 confirm_domain}` (authenticated HTTP only through the global Origin/cookie
 middleware, audited as `runtime_composition_operator_transition`, the domain
 validated against the manifest), surfaced as one confirmed action in Settings →
-Cordis runtime host. A Root whose `ownership_continuity` is not `stable` can
+Diagnostics → Runtime host. A Root whose `ownership_continuity` is not `stable` can
 list owners but is refused a move (`operator_ownership_recovery_required`).
 Moving a domain to Cordis requires its prerequisites to be Cordis-owned
 (`composition_prerequisite_not_cordis`), and a rollback to legacy is refused
@@ -1527,8 +1527,8 @@ same Node: when the package is missing or stale it runs `cordis build`; like the
 frontend it never installs dependencies, so a fresh checkout first runs
 `npm ci --prefix runtime/cordis --ignore-scripts`. Otherwise it prints the
 blocked reason (`build_dependencies_missing`, `node_unsupported`, ...) and the
-exact fix while core startup continues. Runtime status (Settings → Model →
-Advanced and diagnostics → Cordis runtime host)
+exact fix while core startup continues. Runtime status (Settings → Diagnostics →
+Runtime host)
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
 and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
 `./manage.sh -e dev cordis build`, then restart. The backend container image
@@ -1810,12 +1810,12 @@ above each panel it absorbed, except where the panel already shows that name
 
 | Tab | Holds (old tab) |
 | --- | --- |
-| **Model** | Model card and the **Advanced and diagnostics** fold (Model) |
+| **Model** | Model card, then one-line **Screenshot analysis** and **Memory search** rows (Model) |
 | **General** | Theme, workspace hints, operator session, interruption mode (General); tool policy, MCP access and approval mode (Policies) |
 | **Accounts** | Telegram, Calendar, Mail, GitHub, Forgejo, Moltbook, Native |
-| **Automation** | Workflows, Guardian, Repo Sandbox, background inference jobs |
+| **Automation** | Workflows, Guardian, Repo Sandbox, screenshot folder, background inference jobs, end-of-day reports and email delivery |
 | **Extensions** | Skills, Discover, MCP |
-| **Diagnostics** | Audit |
+| **Diagnostics** | Closed folds: Runtime host, Model routes, NEAR slots, Retired OpenRouter, NEAR text (legacy), Cost ledger, Capability checks, Audit log |
 
 The service tab is **Accounts**, not "Connections", because the cockpit already
 has a Connections page. Every old section id still works as a deep link
@@ -1826,22 +1826,57 @@ Native, `policies` opens General at Policies, `audit` opens Diagnostics, and
 `artifacts` and `model` open Model; `background-jobs` opens Automation at
 background inference. The panel stays in view while panels above it load their
 data (a ResizeObserver re-places it, no timer), until the operator scrolls,
-types, touches or clicks inside Settings, switches tab or closes Settings. The
+types, touches or clicks inside Settings, or focus moves into it by any route
+(`focusin`), switches tab or closes Settings. The
 tab bar stays visible at the top while Settings scrolls. Only the active tab mounts, so Skills,
-Discover and MCP load (and MCP polls) only while Extensions is open. The
-screenshot folder and the raw runtime output stay in the Model tab's fold until
-a later #1280 slice moves them.
+Discover and MCP load (and MCP polls) only while Extensions is open.
+
+#1280 PR 3 emptied the Model tab's old "Advanced and diagnostics" fold. Nothing
+was removed and every control saves through the same endpoint as before:
+
+| Control (old place: Model → Advanced and diagnostics) | Now | Deep link |
+| --- | --- | --- |
+| Screenshot folder path, Choose, Save; analysis switch, provider, counters, inspect address, Scan folder, Clear stale (under the folder's closed **Details**) | Automation → Screenshot Folder | `screenshot-folder` |
+| End-of-day reports (Preview, Send, Test) and Email delivery | Automation → Reports | `reports` |
+| Cordis runtime host (host dump, composition and package hashes, `seraph.*.v1` domain owners) | Diagnostics → Runtime host | `runtime-host` |
+| Inference gateway, model-fabric topology, profiles, routes, fallback, proofs, local runtime | Diagnostics → Model routes | `model-routes` |
+| NEAR TEE text, vision and embedding slot editors, catalog receipts, re-index | Diagnostics → NEAR slots | `near-slots` |
+| OpenRouter setup (retired) | Diagnostics → Retired OpenRouter | `openrouter` |
+| NEAR text (legacy) | Diagnostics → NEAR text (legacy) | `near-text` |
+| Spend history / inference accounting | Diagnostics → Cost ledger | `cost-ledger` |
+| Manual canaries, Prove route, proof lifetime | Diagnostics → Capability checks | `capability-checks` |
+| Audit log (was already on Diagnostics) | Diagnostics → Audit log | `audit` |
+
+Diagnostics folds are closed when the tab opens and mount their content on
+first open, so the audit log fetches only once its fold is opened; a deep link
+opens the fold it names. The cockpit's "inspect accounting" action opens the
+Cost ledger fold.
+
+The **Screenshot analysis** row reads `/api/settings/artifact-storage` (screen
+switch and provider) and the NEAR vision slot. It says Off, Paused (needs your
+OK), One quick test left, Blocked or On. **Turn on** asks for both the plaintext
+OK and the separate screenshot OK (never pre-ticked), saves only the vision
+slot with the stored values and no key, sets the analysis switch to the NEAR
+vision slot, and runs the free catalog check; it makes no paid call. **Run
+test** shows its cost line (four checks) before the click. **Turn off** only
+switches analysis off; withdrawing screenshot consent stays in the NEAR slots
+fold. The **Memory search** row reads the NEAR embedding slot and index
+projection. Since OpenRouter's retirement there is no usable embedding model:
+the NEAR embedding slot stays shut on the ADR-035 evidence gate, so the row says
+"Off. There is no embedding model to use right now." and that search matches
+words, not meaning, with only a **Details** link; it offers nothing to turn on.
+There is no Budget row ([ADR-037](./decisions/037-no-local-cost-limits.md)).
 
 ### The Model card (#1280)
 
 The **Model** tab (formerly "Models & OpenRouter") starts with the Model card:
 one status line saying whether chat works, the model in plain words
-("DeepSeek V4.1 Flash, hosted by NEAR"), and at most one button. Everything the
-tab showed before (Cordis runtime host, screenshot folder, model routes, the
-shared lane, the retired OpenRouter setup, NEAR text, the detailed NEAR TEE
-panel below, accounting and canaries) is in one closed **Advanced and
-diagnostics** fold under the card, unchanged. Background inference moved to
-**Automation**.
+("DeepSeek V4.1 Flash, hosted by NEAR"), and at most one button. Below it sit
+the Screenshot analysis and Memory search rows. Everything the tab showed before
+(Cordis runtime host, screenshot folder, model routes, the retired OpenRouter
+setup, NEAR text, the detailed NEAR TEE panel below, accounting and canaries)
+moved unchanged to Automation or a closed Diagnostics fold (#1280 PR 3, table
+above); the card's **Open Diagnostics** button opens the NEAR slots fold.
 
 The card reads `GET /api/settings/model-fabric` and
 `/api/runtime/status.effective_runtime` and shows the first of ten states that
@@ -1894,7 +1929,7 @@ Settings** button that opens the Model tab with the card in view.
 
 Status: **Partial** until live operator use; nothing is enabled by default.
 The Model card above covers the usual path. The detailed controls are in
-**Settings → Model → Advanced and diagnostics → NEAR TEE · text slot**:
+**Settings → Diagnostics → NEAR slots → NEAR TEE · text slot**:
 
 1. Enter the NEAR API key (write-only, stored as `vault:near_api_key`, separate
    from the NEAR text key; only a fingerprint is shown), pick a text model from
@@ -2070,8 +2105,9 @@ historical setup contract for retained configuration; its request-cost bound,
 deployment ceiling, reserve review and overrun latch no longer exist
 ([ADR-037](./decisions/037-no-local-cost-limits.md)).
 
-Open **Settings → Model → Advanced and diagnostics** (formerly the Models &
-OpenRouter tab, before that Screenshot/VLM) and
+Open **Settings → Diagnostics → Retired OpenRouter** (formerly the Model tab's
+Advanced and diagnostics fold, the Models & OpenRouter tab, and before that
+Screenshot/VLM) and
 use its **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
 one qualified `provider/model` ID and explicit upstream allow-list for each

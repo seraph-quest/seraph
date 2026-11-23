@@ -22,9 +22,9 @@ Seraph starts without a provider key. Deployment settings live in `.env.dev` at
 the project root, but the governed OpenRouter route is configured in the app,
 not through environment model variables.
 
-### OpenRouter (retired; historical, Settings → Model → Advanced and diagnostics)
+### OpenRouter (retired; historical, Settings → Diagnostics → Retired OpenRouter)
 
-1. Open **Settings → Model**, expand **Advanced and diagnostics**, and fill in the **text** route:
+1. Open **Settings → Diagnostics**, expand **Retired OpenRouter**, and fill in the **text** route:
    an OpenRouter model ID (`provider/model`), an explicit upstream allow-list,
    and the write-only API key (stored in the vault; only a fingerprint is shown).
 2. Keep the default text capabilities (`text`, `tool use`, `structured output`,
@@ -72,7 +72,7 @@ report analysis, the screenshot observation digest, guardian opportunity
 assessment (one call per queued opportunity, at most 16 per tick) and
 screenshot folder analysis (one vision call per pending screenshot). They are on
 by default.
-**Settings → Model → Advanced and diagnostics → Background inference** lists each job with
+**Settings → Automation → Background inference** lists each job with
 its approximate calls/day and lets you switch it off; a switched-off job makes
 no model call and shows `skipped: disabled by operator`. The memory
 consolidation switch also stops the consolidation that otherwise runs after a
@@ -162,7 +162,7 @@ These control when proactive features run (briefings, reviews, working hours):
 | `ACTIVITY_DIGEST_HOUR` | `20` | Hour for the daily screen activity digest |
 | `WEEKLY_REVIEW_HOUR` | `18` | Hour for the Sunday weekly activity review |
 | `SCREEN_OBSERVATION_RETENTION_DAYS` | `90` | Days to keep screen observations before cleanup |
-| `SCHEDULER_ENABLED` | `true` | Enable/disable background scheduler (per-job model toggles are in Settings → Model → Advanced and diagnostics) |
+| `SCHEDULER_ENABLED` | `true` | Enable/disable background scheduler (per-job model toggles are in Settings → Automation) |
 
 ### Optional observer settings
 

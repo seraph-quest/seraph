@@ -7,10 +7,13 @@ import { DaemonStatus } from "./settings/DaemonStatus";
 import { ToolPolicyModeToggle } from "./settings/ToolPolicyModeToggle";
 import { McpPolicyModeToggle } from "./settings/McpPolicyModeToggle";
 import { ApprovalModeToggle } from "./settings/ApprovalModeToggle";
-import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
-import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
+import { ModelTab } from "./settings/ModelTab";
+import { DiagnosticsTab } from "./settings/DiagnosticsTab";
+import { ScreenshotFolderPanel } from "./settings/ScreenshotFolderPanel";
+import { ReportDeliveryPanel } from "./settings/ReportDeliveryPanel";
+import { ArtifactStorageScope } from "./settings/settingsData";
 import { BackgroundInferencePanel } from "./settings/BackgroundInferencePanel";
 import { TelegramPairingPanel } from "./settings/TelegramPairingPanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
@@ -25,6 +28,7 @@ import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 import { isLocalNoLoginSession, LocalNoLoginBadge } from "./auth/localNoLogin";
 import {
+  openSettingsSection,
   resolveSettingsSection,
   settingsAnchorId,
   settingsSectionFrom,
@@ -469,11 +473,12 @@ export function SettingsPanel() {
     const inspectAccounting = (event: { principalId: string; sessionId: string }) => {
       const session = accountingSessionRef.current;
       if (!session || event.principalId !== session.principal_id || event.sessionId !== session.session_id || !(Date.parse(session.absolute_expires_at) > Date.now()) || !(Date.parse(session.idle_expires_at) > Date.now())) return;
-      setActiveSection("model"); setSettingsPanelOpen(true);
+      // The cost ledger moved to a Diagnostics fold (#1280 PR 3); the deep link opens it.
+      openSettingsSection("cost-ledger");
     };
     appEventBus.on("settings:inspect-accounting", inspectAccounting);
     return () => appEventBus.off("settings:inspect-accounting", inspectAccounting);
-  }, [setSettingsPanelOpen]);
+  }, []);
   const wasOpenRef = useRef(false);
 
   // A deep link (#1172: status items name the section that resolves them)
@@ -519,7 +524,8 @@ export function SettingsPanel() {
   // Panels above the target load their data after the tab mounts and push it
   // down. Re-place the target whenever the tab content (or the sticky tab bar)
   // changes size, until the operator scrolls, types, touches or clicks inside
-  // Settings, switches tab, or closes it. No timer decides when it settles.
+  // Settings (focus arriving by any route counts, #1280 PR 3), switches tab,
+  // or closes it. No timer decides when it settles.
   useEffect(() => {
     const body = bodyRef.current;
     if (!settingsPanelOpen || !anchor || !body) return;
@@ -530,7 +536,7 @@ export function SettingsPanel() {
     };
     place();
     const release = () => setAnchor((current) => current?.count === anchor.count ? null : current);
-    const interactions = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    const interactions = ["wheel", "touchstart", "keydown", "pointerdown", "focusin"] as const;
     for (const name of interactions) body.addEventListener(name, release, { passive: true });
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
     if (tabContentRef.current) observer?.observe(tabContentRef.current);
@@ -864,7 +870,7 @@ export function SettingsPanel() {
           </>
           )}
 
-          {activeSection === "model" && <ArtifactStoragePanel />}
+          {activeSection === "model" && <ModelTab />}
 
           {activeSection === "automation" && (
           <>
@@ -877,9 +883,20 @@ export function SettingsPanel() {
           <SettingsGroup anchor="repo-sandbox">
             <RepoSandboxPanel />
           </SettingsGroup>
+          {/* The screenshot folder and reports share one artifact-storage read (#1280 PR 3). */}
+          <ArtifactStorageScope>{(storage) => (
+          <>
+          <SettingsGroup anchor="screenshot-folder">
+            <ScreenshotFolderPanel storage={storage} />
+          </SettingsGroup>
           <SettingsGroup anchor="background-jobs">
             <BackgroundInferencePanel />
           </SettingsGroup>
+          <SettingsGroup anchor="reports" title="Reports">
+            <ReportDeliveryPanel storage={storage} />
+          </SettingsGroup>
+          </>
+          )}</ArtifactStorageScope>
           </>
           )}
 
@@ -976,11 +993,7 @@ export function SettingsPanel() {
           </>
           )}
 
-          {activeSection === "diagnostics" && (
-          <SettingsGroup anchor="audit" title="Audit">
-            <AuditLogPanel />
-          </SettingsGroup>
-          )}
+          {activeSection === "diagnostics" && <DiagnosticsTab openAnchor={anchor?.elementId ?? null} />}
 
           </div>
 

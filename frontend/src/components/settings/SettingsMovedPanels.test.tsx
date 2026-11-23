@@ -1,9 +1,27 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ArtifactStoragePanel, captureStoreLabel } from "./ArtifactStoragePanel";
+import { ArtifactStorageScope, captureStoreLabel } from "./settingsData";
+import { DiagnosticsTab } from "./DiagnosticsTab";
+import { ReportDeliveryPanel } from "./ReportDeliveryPanel";
+import { ScreenshotFolderPanel } from "./ScreenshotFolderPanel";
 import { isGreenModelFabricCanary } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
+
+/**
+ * #1280 PR 3 split the old first tab (ArtifactStoragePanel) into the
+ * screenshot folder and reports panels on Automation and the Diagnostics
+ * folds. These are its tests, pointed at the component that now owns each
+ * control. Diagnostics folds mount on first open, so the helper opens them
+ * (all but the audit log, which has its own tests).
+ */
+function renderDiagnostics() {
+  const result = render(<DiagnosticsTab />);
+  for (const summary of Array.from(document.querySelectorAll('[data-settings-anchor]:not([data-settings-anchor="audit"]) > summary'))) {
+    fireEvent.click(summary);
+  }
+  return result;
+}
 
 function mockResponse(data: unknown, ok = true, status = ok ? 200 : 503) {
   return {
@@ -184,7 +202,7 @@ function settingsFromScreenAnalysisFixture(screen: {
   };
 }
 
-describe("ArtifactStoragePanel", () => {
+describe("Panels moved out of the old first tab (#1280 PR 3)", () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
@@ -212,7 +230,7 @@ describe("ArtifactStoragePanel", () => {
       }));
       return Promise.resolve(mockResponse({ model_fabric: { status: "configured" } }));
     });
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
     await screen.findByRole("region", { name: "NEAR text settings" });
     // ADR-035: OpenRouter is retired; its controls are present but cannot activate it.
     for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeDisabled();
@@ -307,7 +325,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unexpected ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
 
     expect(await screen.findByText("Model fabric")).toBeInTheDocument();
     expect(await screen.findByText("blocked · node_unsupported")).toBeInTheDocument();
@@ -360,7 +378,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unexpected ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
     const runButton = await screen.findByRole("button", { name: "Run canary" });
     expect(screen.getByRole("option", { name: "health" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "latency ms" })).toBeInTheDocument();
@@ -421,7 +439,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unexpected ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
     const prove = await screen.findByRole("button", { name: "Prove route" });
     expect(screen.getByText(/Each canary is one real, billed OpenRouter call/)).toBeInTheDocument();
     await waitFor(() => expect(prove).toBeEnabled());
@@ -501,7 +519,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unexpected ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
     await waitFor(() => expect(screen.getByLabelText("OpenRouter text model ID")).toHaveValue("fixture/text"));
     const mutationCalls = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT");
     const settingsReads = () => fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/api/settings/model-fabric") && init?.method !== "PUT");
@@ -577,7 +595,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error("metadata offline"));
     });
 
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
 
     expect(
       await screen.findByText("Model-fabric metadata is temporarily unavailable; showing last-known settings."),
@@ -588,7 +606,8 @@ describe("ArtifactStoragePanel", () => {
   });
 
   it("renders screen, report, and email artifact configuration", async () => {
-    fetchMock.mockResolvedValueOnce(
+    // Each moved panel reads artifact storage itself; every other read fails.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => String(input).includes("/api/settings/artifact-storage") ? Promise.resolve(
       mockResponse({
         screen: {
           analysis_enabled: true,
@@ -752,13 +771,16 @@ describe("ArtifactStoragePanel", () => {
             allowlist: "EMAIL_REPORTS_TO_ALLOWLIST",
           },
         },
-      }),
+      })) : Promise.reject(new Error("offline")),
     );
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <><ScreenshotFolderPanel storage={storage} /><ReportDeliveryPanel storage={storage} /></>}</ArtifactStorageScope>);
+    renderDiagnostics();
 
     expect(await screen.findByText("Seraph analysis")).toBeInTheDocument();
-    expect(await screen.findByText(/15 images/)).toBeInTheDocument();
+    // The plain first line (#1280 PR 3); the counters moved under Details.
+    expect(await screen.findByTestId("screenshot-folder-status")).toHaveTextContent(/^On\. 15 images, \d+ waiting for analysis\.$/);
+    expect(screen.getByTestId("screenshot-folder-details")).not.toHaveAttribute("open");
     expect(screen.getByText("Screenshot Folder")).toBeInTheDocument();
     expect(screen.getByText("scans a local screenshot folder; reports stay in Seraph")).toBeInTheDocument();
     expect(screen.getByText("Local screenshot images")).toBeInTheDocument();
@@ -846,9 +868,10 @@ describe("ArtifactStoragePanel", () => {
         queue_status: { checked: true, ok: true, status_code: 200, error: "" },
       },
     };
-    fetchMock.mockResolvedValueOnce(mockResponse(artifactStorage));
+    fetchMock.mockImplementation((input: RequestInfo | URL) => String(input).includes("/api/settings/artifact-storage")
+      ? Promise.resolve(mockResponse(artifactStorage)) : Promise.reject(new Error("offline")));
 
-    render(<ArtifactStoragePanel />);
+    renderDiagnostics();
 
     expect(await screen.findByText("openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF")).toBeInTheDocument();
     expect(screen.getByText("direct route failing · chat:missing")).toBeInTheDocument();
@@ -898,7 +921,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unavailable ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ReportDeliveryPanel storage={storage} />}</ArtifactStorageScope>);
 
     const sendButton = await screen.findByRole("button", { name: "Send" });
     expect(sendButton).toBeDisabled();
@@ -983,7 +1006,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     const scanButton = await screen.findByRole("button", { name: "Scan folder" });
     await waitFor(() => expect(scanButton).not.toBeDisabled());
@@ -1057,7 +1080,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unavailable ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     expect(await screen.findByText(/2 cleanup candidates · 1 missing · 1 old root/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Clear stale" }));
@@ -1101,7 +1124,7 @@ describe("ArtifactStoragePanel", () => {
       .mockResolvedValueOnce(mockResponse({ ok: true }))
       .mockResolvedValueOnce(mockResponse(refreshedStorage));
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     const folderInput = await screen.findByDisplayValue(artifactStorage.screenshot_folder.path ?? "");
     fireEvent.change(folderInput, { target: { value: nextRoot } });
@@ -1159,7 +1182,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unavailable ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     fireEvent.click(await screen.findByRole("button", { name: "Choose" }));
 
@@ -1248,7 +1271,7 @@ describe("ArtifactStoragePanel", () => {
           }),
       );
 
-    const { unmount } = render(<ArtifactStoragePanel />);
+    const { unmount } = render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     fetchMock.mockClear();
 
@@ -1281,7 +1304,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(await screen.findByText("Folder metadata is still loading; analysis controls are live.")).toBeInTheDocument();
@@ -1316,7 +1339,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.reject(new Error(`unavailable ${url}`));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(
@@ -1352,7 +1375,7 @@ describe("ArtifactStoragePanel", () => {
       return Promise.resolve(mockResponse({}));
     });
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     expect(
       await screen.findByText(
@@ -1370,7 +1393,7 @@ describe("ArtifactStoragePanel", () => {
   it("does not present fallback screenshot folder metadata as editable truth", async () => {
     fetchMock.mockRejectedValue(new Error("settings unavailable"));
 
-    render(<ArtifactStoragePanel />);
+    render(<ArtifactStorageScope>{(storage) => <ScreenshotFolderPanel storage={storage} />}</ArtifactStorageScope>);
 
     expect(await screen.findByText("Seraph analysis", undefined, { timeout: 1_000 })).toBeInTheDocument();
     expect(screen.getByLabelText("Screenshot folder")).toBeDisabled();

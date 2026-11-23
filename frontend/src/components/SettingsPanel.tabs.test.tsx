@@ -18,7 +18,17 @@ import { useChatStore } from "../stores/chatStore";
 // checks where each one lands, not what it renders.
 vi.mock("./auth/OperatorAuthGate", () => ({ useOptionalOperatorAuth: () => null }));
 const { stub } = vi.hoisted(() => ({ stub: (name: string) => () => <div data-testid={`panel-${name}`} /> }));
-vi.mock("./settings/ArtifactStoragePanel", () => ({ ArtifactStoragePanel: stub("artifacts") }));
+vi.mock("./settings/ModelTab", () => ({ ModelTab: stub("model-tab") }));
+vi.mock("./settings/ScreenshotFolderPanel", () => ({ ScreenshotFolderPanel: stub("screenshot-folder") }));
+vi.mock("./settings/ReportDeliveryPanel", () => ({ ReportDeliveryPanel: stub("reports") }));
+// The Diagnostics tab is real (its folds are under test); what each fold holds is a stub.
+vi.mock("./settings/CordisRuntimePanel", () => ({ CordisRuntimePanel: stub("runtime-host") }));
+vi.mock("./settings/ModelRoutesPanel", () => ({ ModelRoutesPanel: stub("model-routes") }));
+vi.mock("./settings/NearTeePanel", () => ({ NearTeePanel: stub("near-slots") }));
+vi.mock("./settings/OpenRouterSetupPanel", () => ({ OpenRouterSetupPanel: stub("openrouter") }));
+vi.mock("./settings/NearTextPanel", () => ({ NearTextPanel: stub("near-text") }));
+vi.mock("./settings/InferenceAccountingPanel", () => ({ InferenceAccountingPanel: stub("cost-ledger") }));
+vi.mock("./settings/CapabilityChecksPanel", () => ({ CapabilityChecksPanel: stub("capability-checks") }));
 vi.mock("./settings/InterruptionModeToggle", () => ({ InterruptionModeToggle: stub("interruption") }));
 vi.mock("./settings/ToolPolicyModeToggle", () => ({ ToolPolicyModeToggle: stub("tool-policy") }));
 vi.mock("./settings/McpPolicyModeToggle", () => ({ McpPolicyModeToggle: stub("mcp-policy") }));
@@ -45,8 +55,8 @@ vi.mock("./settings/AuditLogPanel", () => ({ AuditLogPanel: stub("audit") }));
  * content the Extensions tab renders from the (empty) API responses.
  */
 const OLD_SECTIONS: ReadonlyArray<[SettingsSectionId, SettingsTabId, string | null, string]> = [
-  ["model", "model", null, "panel-artifacts"],
-  ["artifacts", "model", null, "panel-artifacts"],
+  ["model", "model", null, "panel-model-tab"],
+  ["artifacts", "model", null, "panel-model-tab"],
   ["general", "general", "general", "panel-interruption"],
   ["policies", "general", "policies", "panel-tool-policy"],
   ["telegram", "accounts", "telegram", "panel-telegram"],
@@ -65,6 +75,21 @@ const OLD_SECTIONS: ReadonlyArray<[SettingsSectionId, SettingsTabId, string | nu
   ["mcp", "extensions", "mcp", "text:No servers configured"],
   ["audit", "diagnostics", "audit", "panel-audit"],
 ];
+
+/** Ids added in #1280 PR 3 for the pieces of the old "Advanced and diagnostics" fold. */
+const MOVED_SECTIONS: ReadonlyArray<[SettingsSectionId, SettingsTabId, string, string]> = [
+  ["screenshot-folder", "automation", "screenshot-folder", "panel-screenshot-folder"],
+  ["reports", "automation", "reports", "panel-reports"],
+  ["runtime-host", "diagnostics", "runtime-host", "panel-runtime-host"],
+  ["model-routes", "diagnostics", "model-routes", "panel-model-routes"],
+  ["near-slots", "diagnostics", "near-slots", "panel-near-slots"],
+  ["openrouter", "diagnostics", "openrouter", "panel-openrouter"],
+  ["near-text", "diagnostics", "near-text", "panel-near-text"],
+  ["cost-ledger", "diagnostics", "cost-ledger", "panel-cost-ledger"],
+  ["capability-checks", "diagnostics", "capability-checks", "panel-capability-checks"],
+];
+
+const DIAGNOSTICS_FOLDS = ["runtime-host", "model-routes", "near-slots", "openrouter", "near-text", "cost-ledger", "capability-checks", "audit"];
 
 const scrollIntoView = vi.fn();
 const original = Element.prototype.scrollIntoView;
@@ -95,7 +120,7 @@ describe("Settings tabs (#1280 PR 2)", () => {
     const tabs = within(tabBar()).getAllByRole("button").map((button) => button.textContent);
     expect(tabs).toEqual(["Model", "General", "Accounts", "Automation", "Extensions", "Diagnostics"]);
     expect(screen.getByRole("button", { name: "Model" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("panel-artifacts")).toBeInTheDocument();
+    expect(screen.getByTestId("panel-model-tab")).toBeInTheDocument();
   });
 
   it("uses Accounts, not Connections, because the cockpit already has a Connections page", () => {
@@ -105,9 +130,9 @@ describe("Settings tabs (#1280 PR 2)", () => {
   it.each([
     ["General", ["panel-interruption", "panel-tool-policy", "panel-mcp-policy", "panel-approval"]],
     ["Accounts", ["panel-telegram", "panel-calendar", "panel-calendar-reschedule", "panel-mail", "panel-github", "panel-github-activity", "panel-forgejo", "panel-moltbook", "panel-native", "panel-selected-context"]],
-    ["Automation", ["panel-workflows", "panel-guardian", "panel-repo-sandbox", "panel-background-jobs"]],
+    ["Automation", ["panel-workflows", "panel-guardian", "panel-repo-sandbox", "panel-screenshot-folder", "panel-background-jobs", "panel-reports"]],
     ["Extensions", ["settings-section-skills", "settings-section-discover", "settings-section-mcp"]],
-    ["Diagnostics", ["panel-audit"]],
+    ["Diagnostics", DIAGNOSTICS_FOLDS.map((fold) => settingsAnchorId(fold))],
   ])("%s holds every panel it absorbs", (label, panels) => {
     useChatStore.setState({ settingsPanelOpen: true });
     render(<SettingsPanel />);
@@ -115,7 +140,46 @@ describe("Settings tabs (#1280 PR 2)", () => {
     for (const panel of panels) {
       expect(document.querySelector(`[data-testid="${panel}"], #${panel}`)).not.toBeNull();
     }
-    expect(screen.queryByTestId("panel-artifacts")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("panel-model-tab")).not.toBeInTheDocument();
+  });
+
+  it("reads artifact storage once for the screenshot folder and reports on Automation", () => {
+    useChatStore.setState({ settingsPanelOpen: true });
+    render(<SettingsPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "Automation" }));
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => String(input));
+    expect(urls.filter((url) => url.includes("/api/settings/artifact-storage"))).toHaveLength(1);
+  });
+
+  it("opens Diagnostics with every fold closed and nothing inside mounted", () => {
+    useChatStore.setState({ settingsPanelOpen: true });
+    render(<SettingsPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    for (const fold of DIAGNOSTICS_FOLDS) {
+      const element = document.getElementById(settingsAnchorId(fold))!;
+      expect(element.tagName).toBe("DETAILS");
+      expect(element).not.toHaveAttribute("open");
+      expect(within(element).queryByTestId(`panel-${fold}`)).not.toBeInTheDocument();
+    }
+    // The audit log fetches only once its fold is opened.
+    const audit = document.getElementById(settingsAnchorId("audit"))!;
+    fireEvent.click(audit.querySelector("summary")!);
+    expect(audit).toHaveAttribute("open");
+    expect(within(audit).getByTestId("panel-audit")).toBeInTheDocument();
+    fireEvent.click(audit.querySelector("summary")!);
+    expect(audit).not.toHaveAttribute("open");
+  });
+
+  it.each(MOVED_SECTIONS)("new id %s opens %s and its fold or panel", (section, tab, anchor, marker) => {
+    expect(resolveSettingsSection(section)).toEqual({ tab, anchor });
+    expect(settingsSectionFrom(section)).toBe(section);
+    render(<SettingsPanel />);
+    act(() => openSettingsSection(section));
+    expect(screen.getByRole("button", { name: tabLabel(tab) })).toHaveAttribute("aria-pressed", "true");
+    const target = document.getElementById(settingsAnchorId(anchor))!;
+    expect(within(target).getByTestId(marker)).toBeInTheDocument();
+    if (tab === "diagnostics") expect(target).toHaveAttribute("open");
+    expect(scrollIntoView.mock.contexts[0]).toBe(target);
   });
 
   it("does not mount background jobs on the Model tab any more", () => {
@@ -257,11 +321,26 @@ describe("Settings tabs (#1280 PR 2)", () => {
       expect(scrollIntoView.mock.contexts.every((context) => context === target)).toBe(true);
     });
 
-    it.each(["wheel", "touchstart", "keydown", "pointerdown"])("lets go after the operator's %s", (name) => {
+    it.each(["wheel", "touchstart", "keydown", "pointerdown", "focusin"])("lets go after the operator's %s", (name) => {
       render(<SettingsPanel />);
       act(() => openSettingsSection("mcp"));
       const body = document.querySelector(".cockpit-modal-body")!;
       act(() => { body.dispatchEvent(new Event(name, { bubbles: true })); });
+      scrollIntoView.mockReset();
+      grow();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it("lets go when focus moves into Settings with no key or pointer event (#1298 review)", () => {
+      render(<SettingsPanel />);
+      act(() => openSettingsSection("native"));
+      grow();
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+      // Programmatic focus (assistive tech, a script) fires focusin and nothing else.
+      const target = within(document.getElementById(settingsAnchorId("native"))!).getByTestId("panel-native");
+      const field = document.createElement("input");
+      target.appendChild(field);
+      act(() => field.focus());
       scrollIntoView.mockReset();
       grow();
       expect(scrollIntoView).not.toHaveBeenCalled();

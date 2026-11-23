@@ -94,11 +94,18 @@ _GITHUB_KIND_LABELS = {
     "pr_merged": ("PR merged", "PRs merged"), "pr_closed": ("PR closed", "PRs closed"),
     "issue_opened": ("issue opened", "issues opened"), "issue_closed": ("issue closed", "issues closed"),
 }
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+# C0 and C1 controls, line/paragraph separators and bidi overrides/isolates.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
 _GOAL_EVIDENCE_BLOCK = re.compile(r"<goal_evidence>(.*?)</goal_evidence>", re.S | re.I)
 _GOAL_LINE = re.compile(r"^\s*[-*]?\s*\[?([A-Za-z]\d{1,4})\]?\s*:\s*(.*)$")
 _ID_TOKEN = re.compile(r"^[A-Za-z]{1,6}\d{1,4}$")
-_LINK = re.compile(r"(?:https?://|www\.)\S+|(?<![\w.@/-])github\.com/\S*", re.I)
+# Anything a reader could follow: a scheme (http, javascript, data, ...), a
+# protocol-relative //host, www., or any github.com / githubusercontent.com host.
+_LINK = re.compile(
+    r"\b(?:https?|ftp|javascript|data|vbscript|file):\S+"
+    r"|(?<![\w:/])//[\w-]+(?:\.[\w-]+)+\S*"
+    r"|\bwww\.\S+"
+    r"|(?<![\w@/-])(?:[\w-]+\.)*github(?:usercontent)?\.com\b\S*", re.I)
 _G_REF = re.compile(r"\[G(\d{1,4})\]")
 
 _SCREENSHOT_DIGEST_TOOL_NAME = "screenshot_observation_digest"
@@ -684,28 +691,35 @@ def _github_item_line(item: dict[str, Any], tz: ZoneInfo) -> str:
 
 def _github_prompt_block(github: dict[str, Any], tz: ZoneInfo) -> tuple[str, list[str]]:
     """The "## GitHub activity" section and the refs it actually sent. No URL ever appears."""
-    from src.integrations.github_activity import REPORT_SILENT_STATES
+    from src.integrations.github_activity import REPORT_FIXED_SENTENCES, REPORT_SILENT_STATES
     from src.integrations.github_cli import valid_login
 
     status = str(github.get("status") or "unavailable")
+    lines = ["## GitHub activity"]
+    no_inference = "Do not infer anything about GitHub work from its absence."
+    if status == "unavailable":
+        # Nothing about the source could be read, so nothing about it is sent.
+        lines += [REPORT_FIXED_SENTENCES["unavailable"], no_inference]
+        return "\n".join(lines) + "\n\n", []
+    # Consent first (#1300 review B1): without the model-analysis box no
+    # GitHub fact reaches the model, in any state: no login, path or sentence.
+    if not github.get("model_context_allowed"):
+        lines += ["GitHub evidence for this day exists in the report but was not shared for analysis.", no_inference]
+        return "\n".join(lines) + "\n\n", []
+    if status in REPORT_SILENT_STATES:
+        # Allowed, but nothing to reason from: a fixed sentence per status,
+        # never the login, the gh path, an exit code or another account.
+        lines += [REPORT_FIXED_SENTENCES.get(status, "GitHub collection did not produce evidence for this day."),
+                  no_inference]
+        return "\n".join(lines) + "\n\n", []
     login = github.get("identity_login")
     account = f", account @{login}" if isinstance(login, str) and valid_login(login) else ""
-    lines = ["## GitHub activity"]
-    if status in REPORT_SILENT_STATES:
-        lines += [f"Source: GitHub REST through the local gh login{account}. Collection status: {status}.",
-                  _prompt_title_sentence(github.get("message")),
-                  "Do not infer anything about GitHub work from its absence."]
-        return "\n".join(lines) + "\n\n", []
-    if not github.get("model_context_allowed"):
-        lines += ["GitHub evidence for this day exists in the report but was not shared for analysis.",
-                  "Do not infer anything about GitHub work from its absence."]
-        return "\n".join(lines) + "\n\n", []
     lines += [f"Source: GitHub REST through the local gh login{account}. "
               f"Collection status: {_github_status_text(github)}.",
               _github_count_line(github)]
     items = list(github.get("items") or [])
     if not items:
-        lines.append(_prompt_title_sentence(github.get("message")))
+        lines.append("No GitHub activity was found in the chosen repositories for this day.")
         return "\n".join(lines) + "\n\n", []
     fence = "GITHUB-" + hashlib.sha256(json.dumps(
         [github.get("run_id"), [[item["ref"], item.get("title"), item.get("occurred_at")] for item in items]],
@@ -1075,7 +1089,8 @@ def _report_llm_label(runtime_profile: str) -> str:
     return model
 
 
-async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[str, Any]:
+async def build_end_of_day_goal_report(report_day: date | None = None, *,
+                                       github_collection: dict[str, Any] | None = None) -> dict[str, Any]:
     tz = _safe_timezone()
     target_day = report_day or datetime.now(tz).date()
     from src.integrations.github_activity import github_activity_for_report
@@ -1085,7 +1100,7 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         _screenshot_digests_for_local_day(target_day, tz),
         _goals_for_report(target_day),
         # Reads stored rows only and never raises; collection ran before this.
-        github_activity_for_report(target_day, tz),
+        github_activity_for_report(target_day, tz, collection=github_collection),
     )
     active_goals, completed_goals = goal_results
     github_variant = _github_variant(github)
@@ -1256,7 +1271,8 @@ def _github_episode_metadata(report: dict[str, Any]) -> dict[str, Any]:
         "github_activity_status": github.get("status"),
         "github_activity_item_count": sum(int(value) for value in (github.get("counts") or {}).values()),
         "github_activity_run_id": github.get("run_id"),
-        "github_activity_message": github.get("message"),
+        # A fixed reason code only: the sentence can name a login or a gh path.
+        "github_activity_reason_code": github.get("reason_code"),
         "goal_evidence_status": evidence.get("status") if isinstance(evidence, dict) else None,
     }
 
@@ -1367,8 +1383,8 @@ async def run_manual_end_of_day_goal_report(
     requested_by: Any = None,
 ) -> dict[str, Any]:
     target_day = report_day or datetime.now(_safe_timezone()).date()
-    await _collect_github_activity(target_day, trigger="manual_report", requested_by=requested_by)
-    report = await build_end_of_day_goal_report(target_day)
+    collection = await _collect_github_activity(target_day, trigger="manual_report", requested_by=requested_by)
+    report = await build_end_of_day_goal_report(target_day, github_collection=collection)
     episode_id = await store_end_of_day_goal_report(report)
     email_result = (
         await deliver_report_email(report, preview_acknowledged=preview_acknowledged)
@@ -1405,10 +1421,11 @@ async def run_manual_end_of_day_goal_report(
     }
 
 
-async def _collect_github_activity(target_day: date, *, trigger: str, requested_by: Any = None) -> None:
+async def _collect_github_activity(target_day: date, *, trigger: str,
+                                   requested_by: Any = None) -> dict[str, Any] | None:
     from src.integrations.github_activity import collect_github_activity_for_report
 
-    await collect_github_activity_for_report(target_day, _safe_timezone(), trigger=trigger,  # type: ignore[arg-type]
+    return await collect_github_activity_for_report(target_day, _safe_timezone(), trigger=trigger,  # type: ignore[arg-type]
                                              requested_by=requested_by)
 
 

@@ -75,6 +75,28 @@ function LinkedBody({ body, items }: { body: string; items: GitHubEvidenceItem[]
   );
 }
 
+const LIMITATION_WORDS: Record<string, string> = {
+  multiple_active_sources: "More than one ownership identity has an active GitHub source; this report uses the most recently enabled one",
+  manual_collection_skipped_not_source_owner:
+    "This manual report did not collect: the source belongs to another ownership identity, so stored activity is shown",
+  access_denied: "access denied",
+  not_found: "not found",
+  repository_cap_reached: "more than 10 repositories; the rest were not read",
+  call_budget_exhausted: "the 120-call budget ran out",
+  rate_limited: "GitHub rate limit reached",
+  events_discovery_may_lag: "GitHub's event feed can lag, so very recent work may be missing",
+  events_window_unavailable: "the day is older than GitHub's 30-day event feed",
+  unlinked_commit_emails: "some commits use an e-mail not linked to the account and are not counted",
+  gh_binary_changed_since_last_run: "the gh binary changed since the last run",
+  report_items_truncated: "only the first 200 items are shown",
+  branch_name_skipped: "a branch name could not be read",
+};
+
+export function limitationText(limitation: { code: string; repository?: string }) {
+  const words = LIMITATION_WORDS[limitation.code] ?? limitation.code.replace(/_/g, " ");
+  return limitation.repository ? `${limitation.repository}: ${words}` : words;
+}
+
 function itemLabel(item: GitHubEvidenceItem) {
   const marker = item.number ? `#${item.number}` : (item.short_sha ?? "");
   const repeated = item.same_title_count > 1 ? ` (${item.same_title_count} commits with this title)` : "";
@@ -91,6 +113,13 @@ function GitHubEvidenceCard({ github }: { github: GitHubEvidence }) {
       {github.status !== "not_connected" ? <p className="cockpit-home-muted">{GITHUB_GRANT_SENTENCE}</p> : null}
       {github.model_context === "not_allowed" ? (
         <p className="cockpit-home-muted">This activity was not shared with the model for analysis.</p>
+      ) : null}
+      {github.limitations.length ? (
+        <ul aria-label="GitHub limitations" data-testid="report-github-limitations">
+          {github.limitations.map((limitation, index) => (
+            <li key={`${limitation.code}-${limitation.repository ?? ""}-${index}`}>{limitationText(limitation)}</li>
+          ))}
+        </ul>
       ) : null}
       {github.counts.length ? (
         <p>

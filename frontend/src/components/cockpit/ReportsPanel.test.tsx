@@ -204,6 +204,9 @@ describe("ReportsPanel", () => {
     expect(screen.getByTestId("report-github-status").textContent).toContain("GitHub activity is incomplete");
     expect(card.textContent).toContain("Uses the operator's local gh login (full gh scope; Seraph only issues read GETs).");
     expect(card.textContent).toContain("2 commit · 1 PR merged");
+    expect(screen.getByTestId("report-github-limitations").textContent).toContain(
+      "seraph-quest/x: access denied",
+    );
     const cardLinks = Array.from(card.querySelectorAll("a"));
     expect(cardLinks.map((link) => link.getAttribute("href"))).toEqual(["https://github.com/seraph-quest/seraph/pull/1262"]);
     expect(card.textContent).toContain("G2 · commit · seraph-quest/seraph abcdef1 · a commit (2 commits with this title)");
@@ -230,6 +233,15 @@ describe("ReportsPanel", () => {
     const card = screen.getByTestId("report-github-evidence");
     expect(card.textContent?.includes("Seraph only issues read GETs")).toBe(status !== "not_connected");
     expect(card.querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("states limitations such as two active sources in plain words", async () => {
+    await openReport(
+      withGitHub(github({ limitations: [{ code: "multiple_active_sources" }, { code: "some_new_code", repository: "a/b" }] })),
+    );
+    const list = screen.getByTestId("report-github-limitations");
+    expect(list.textContent).toContain("More than one ownership identity has an active GitHub source");
+    expect(list.textContent).toContain("a/b: some new code");
   });
 
   it("shows counts only when the archive did not verify, and no evidence block for older reports", async () => {

@@ -316,16 +316,21 @@ async def _set_source(**values):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["revoked", "stopped", "not_collected", "not_logged_in", "partial", "zero"])
-async def test_report_states_each_degraded_state_honestly(case, clock, decision, completion, service, world, runner):
+@pytest.mark.parametrize("model_context", [True, False], ids=["model_on", "model_off"])
+@pytest.mark.parametrize("case", ["revoked", "stopped", "login_changed", "not_collected", "not_logged_in", "partial",
+                                  "zero"])
+async def test_report_states_each_degraded_state_honestly(case, model_context, clock, decision, completion, service,
+                                                          world, runner):
     if case not in {"not_collected", "zero"}:
         seed_activity(world)
-    await enable(service)
+    await enable(service, model_context=model_context)
     tz = github_activity.user_timezone()
     if case == "not_logged_in":
         runner.inject("/user", Outcome(exit_code=4, stdout=""))
     if case == "partial":
         world.override(f"/repos/{REPO}/commits", 403, {"message": "Forbidden"})
+    if case == "login_changed":
+        world.user = {"id": 999, "login": "otheraccount"}
     if case != "not_collected":
         await service.collect_day(owner_identity_id=OWNER, report_day=DAY, tz=tz, trigger="operator")
     if case == "revoked":
@@ -337,20 +342,33 @@ async def test_report_states_each_degraded_state_honestly(case, clock, decision,
     expected = {
         "revoked": ("revoked", "switched off by the operator"),
         "stopped": ("stopped", "gh is now logged in as another account"),
+        "login_changed": ("stopped", "gh is now logged in as another account, not @octo"),
         "not_collected": ("not_collected", "no collection ran for this day"),
         "not_logged_in": ("blocked", "gh is not logged in to github.com"),
         "partial": ("partial", "GitHub activity is incomplete: seraph-quest/seraph: access denied"),
         "zero": ("complete", "no activity found"),
     }[case]
+    # The report (and the cockpit) carry the honest sentence ...
     assert github["status"] == expected[0] and expected[1] in github["message"]
-    if case == "partial":
+    # ... but the model is told only what consent allows (#1300 review B1).
+    section = prompt[prompt.index("## GitHub activity"):prompt.index("## Goals")]
+    assert "otheraccount" not in section and "/gh" not in section
+    if not model_context or case not in {"partial", "zero"}:
+        # Only an operator-allowed collection with evidence names the account.
+        assert "octo" not in section
+    assert "Do not infer anything about GitHub work from its absence." in section or (
+        model_context and case in {"partial", "zero"})
+    if not model_context:
+        assert "exists in the report but was not shared for analysis" in section
+        assert "<<<GITHUB-" not in section and expected[1] not in section
+    elif case == "partial":
         assert "Collection status: partial; seraph-quest/seraph: access denied." in prompt
         assert "<<<GITHUB-" in prompt
+    elif case == "zero":
+        assert "No GitHub activity was found in the chosen repositories for this day." in section
     else:
-        assert expected[1] in prompt
-    if case in {"revoked", "stopped", "not_collected", "not_logged_in"}:
-        assert "Do not infer anything about GitHub work from its absence." in prompt
-        assert "<<<GITHUB-" not in prompt
+        assert github_activity.REPORT_FIXED_SENTENCES[expected[0]] in section
+        assert github["message"] not in section and "<<<GITHUB-" not in section
     if case in {"revoked", "stopped"}:
         # Switching off or stopping never deletes earlier items; they stay in the report.
         assert len(github["items"]) == 4
@@ -493,3 +511,136 @@ def test_email_carries_only_a_status_and_counts_line():
     html = report_module._report_email_html({**base, "github_activity": {"status": "failed", "message": "<b>x</b>"}})
     assert "GitHub evidence: &lt;b&gt;x&lt;/b&gt;" in html
     assert "GitHub evidence" not in report_module._report_email_html(base)
+
+
+@pytest.mark.parametrize("model_context", [True, False])
+@pytest.mark.parametrize("status", sorted(github_activity.REPORT_SILENT_STATES))
+def test_silent_states_never_send_the_login_or_gh_path(status, model_context):
+    """#1300 review B1: the stored sentence may name a login or a local gh path; the prompt never does."""
+    from zoneinfo import ZoneInfo
+    view = github_activity._report_view(
+        status, "GitHub source blocked: the gh command at /Users/alice/bin/gh changed; gh is now logged in as "
+        "@other, not @octo.", identity_login="octo", model_context_allowed=model_context, reason_code="gh_path_untrusted",
+        items=[{"ref": "G1", "repository": REPO, "kind": "commit", "number": None, "short_sha": "abcdef1",
+                "title": "private title", "url": None, "occurred_at": "2026-11-17T09:00:00+00:00"}])
+    block, sent = report_module._github_prompt_block(view, ZoneInfo("Europe/Warsaw"))
+    assert sent == []
+    for leaked in ("octo", "@other", "/Users/alice", "gh_path_untrusted", "private title", "G1"):
+        assert leaked not in block
+    assert block.rstrip().endswith("Do not infer anything about GitHub work from its absence.")
+
+
+def _view_with(items, **values):
+    return github_activity._report_view("complete", "x", identity_login="octo", model_context_allowed=True,
+                                        counts={"commit": len(items)}, repositories=[REPO], items=items,
+                                        items_total=len(items), run_id="run", **values)
+
+
+def _item(index, title="t"):
+    return {"ref": f"G{index}", "repository": REPO, "kind": "commit", "number": None, "short_sha": "abcdef1",
+            "title": title, "url": None, "occurred_at": "2026-11-17T09:00:00+00:00", "same_title_count": 1}
+
+
+def test_prompt_caps_lines_characters_and_titles():
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/Warsaw")
+    block, sent = report_module._github_prompt_block(_view_with([_item(i) for i in range(1, 76)]), tz)
+    assert len(sent) == 60 and sent[-1] == "G60" and "and 15 more items not shown" in block
+    long_title = "x" * 200
+    block, sent = report_module._github_prompt_block(_view_with([_item(i, long_title) for i in range(1, 60)]), tz)
+    fenced = block[block.index("<<<GITHUB-"):]
+    assert len(block) <= report_module._GITHUB_MAX_CHARS + 200 and len(fenced) <= report_module._GITHUB_MAX_CHARS
+    assert 0 < len(sent) < 59 and f"and {59 - len(sent)} more items not shown" in block
+    line = next(line for line in block.splitlines() if line.startswith("[G1]"))
+    assert "x" * 120 in line and "x" * 121 not in line
+
+
+def test_titles_lose_c1_line_separator_and_bidi_controls():
+    title = "a\u2028b\u2029c\u0085d\u009be\u202ef\u2066g\u200fh"
+    assert report_module._prompt_title(title) == "a b c d e f g h"
+    assert github_activity._title(title) == "a b c d e f g h"
+
+
+@pytest.mark.parametrize("text", ["api.github.com/repos/x", "gist.github.com/abc", "//evil.example/x",
+                                  "javascript:alert(1)", "https://example.com", "www.example.com",
+                                  "raw.githubusercontent.com/a/b"])
+def test_every_followable_link_form_is_removed(text):
+    body, removed = report_module._clean_report_body(f"Before {text} after", set())
+    assert removed == 1 and body == "Before [link removed] after"
+
+
+def test_ordinary_text_keeps_its_slashes_and_colons():
+    body, removed = report_module._clean_report_body("and/or 3/4 done; data: 5 commits; user@github.com", set())
+    assert removed == 0
+
+
+async def _run_manual(tmp_path, monkeypatch, requested_by):
+    monkeypatch.setattr(settings, "report_archive_dir", str(tmp_path / "archive"))
+    return await report_module.run_manual_end_of_day_goal_report(report_day=DAY, requested_by=requested_by)
+
+
+@pytest.mark.asyncio
+async def test_manual_report_collects_for_the_owner_and_audits_the_requesting_login(
+        clock, decision, completion, service, world, runner, monkeypatch, tmp_path):
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    monkeypatch.setattr("src.audit.runtime.log_integration_event", record)
+    seed_activity(world)
+    await enable(service)
+    lineage = github_activity.RequestLineage(principal_id="principal-x", session_id="session-x", identity_id=OWNER)
+    result = await _run_manual(tmp_path, monkeypatch, lineage)
+    assert result["report"]["github_activity_status"] == "complete"
+    assert runner.endpoints[0] == "/user"
+    (event,) = [item for item in recorded if item["name"] == "gh_cli"]
+    assert event["details"]["trigger"] == "manual_report"
+    assert (event["principal_id"], event["session_id"]) == ("principal-x", "session-x")
+
+
+@pytest.mark.parametrize("requester", ["other_identity", "no_identity", "no_login"])
+@pytest.mark.asyncio
+async def test_manual_report_never_collects_under_another_identitys_source(
+        requester, clock, decision, completion, service, world, runner, monkeypatch, tmp_path):
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    monkeypatch.setattr("src.audit.runtime.log_integration_event", record)
+    await collected(service, world)
+    runner.calls.clear()
+    lineage = {"other_identity": github_activity.RequestLineage("principal-y", "session-y", "identity-b"),
+               "no_identity": github_activity.RequestLineage("principal-y", "session-y", None),
+               "no_login": None}[requester]
+    result = await _run_manual(tmp_path, monkeypatch, lineage)
+    assert runner.calls == []
+    assert result["report"]["github_activity_status"] == "complete"
+    report = (await _stored_report_metadata())
+    assert report["github_activity_status"] == "complete"
+    (event,) = [item for item in recorded if item["name"] == "report_collect"]
+    assert event["outcome"] == "skipped"
+    assert event["details"]["reason_code"] == "manual_collection_skipped_not_source_owner"
+    assert event["principal_id"] == (lineage.principal_id if lineage else None)
+    archived = json.loads(next((tmp_path / "archive" / "end-of-day").rglob("*.json")).read_text())
+    assert {"code": "manual_collection_skipped_not_source_owner"} in archived["report"]["github_activity"]["limitations"]
+
+
+@pytest.mark.asyncio
+async def test_episode_metadata_keeps_codes_not_sentences(clock, decision, completion, service, world, tmp_path,
+                                                          monkeypatch):
+    seed_activity(world)
+    await enable(service)
+    world.user = {"id": 999, "login": "otheraccount"}
+    await service.collect_day(owner_identity_id=OWNER, report_day=DAY, tz=github_activity.user_timezone(),
+                              trigger="operator")
+    monkeypatch.setattr(settings, "report_archive_dir", str(tmp_path / "archive"))
+    report = await report_module.build_end_of_day_goal_report(DAY)
+    await report_module.store_end_of_day_goal_report(report)
+    metadata = await _stored_report_metadata()
+    assert metadata["github_activity_status"] == "stopped"
+    assert metadata["github_activity_reason_code"] == "gh_login_changed"
+    assert "github_activity_message" not in metadata and "octo" not in json.dumps(metadata)

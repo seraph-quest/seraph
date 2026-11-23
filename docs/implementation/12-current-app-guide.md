@@ -4630,8 +4630,13 @@ starts `gh`), `backend/src/integrations/github_activity.py` and
   `POST /other-identity-sources/{id}/stop`.
 - **In the end-of-day report.** The 21:00 job and the manual report route
   (Settings → end-of-day report) first run one collection for the report's
-  day (trigger `scheduled` or `manual_report`; a manual run records the
-  requesting login), then build the report from stored rows only. There is no
+  day (trigger `scheduled` or `manual_report`), then build the report from
+  stored rows only. A manual run collects only when the requesting login
+  belongs to the ownership identity that owns the chosen source, and its
+  audit event names that login. From any other login, or a login without an
+  identity, the report uses the stored rows, writes a `github_activity` /
+  `report_collect` `skipped` audit event, and carries the limitation
+  `manual_collection_skipped_not_source_owner`. There is no
   second cron and no wait: collection finishes or records why not, then the
   report reads the store. Neither stage can fail the report.
   - **Which source.** The report is one per workspace. It uses the active
@@ -4652,25 +4657,35 @@ starts `gh`), `backend/src/integrations/github_activity.py` and
     repository (rebased or squashed work) collapse into one item that carries
     `same_title_count`.
   - **Prompt.** With no source ever enabled the prompt is byte-for-byte what it
-    was before. Otherwise a `## GitHub activity` section sits before
+    was before. That promise needs the activity tables to be readable: when
+    the report cannot read them it cannot tell whether a source exists, so the
+    prompt gains a section saying only "GitHub evidence could not be read from
+    the local store." and "Do not infer anything about GitHub work from its
+    absence." Otherwise a `## GitHub activity` section sits before
     `## Goals`: the source, the collection status and its limitations, a count
     line, and at most 60 lines / 6,000 characters of
     `[G#] repository | kind | #n or short sha | title | local time`, inside a
     fence derived from the run and the items; titles are cut at 120
     characters, control characters removed and `<<<`/`>>>` runs split. No URL
-    is sent. When the day's state is failed, blocked, stopped, switched off,
-    not collected, running or unreadable, the section holds only that sentence
-    and "Do not infer anything about GitHub work from its absence." When the
-    model-analysis box was not ticked, the section says only that GitHub
-    evidence exists but was not shared. Goals get `[A#]` refs and their
+    is sent. Consent is checked first: when the model-analysis box was not
+    ticked, the section says only that GitHub evidence exists but was not
+    shared, in every state, with no login, `gh` path or status sentence. When
+    it was ticked and the day's state is failed, blocked, stopped, switched
+    off, not collected or running, the section holds one fixed sentence for
+    that status (never the login, the `gh` path, an exit code or another
+    account) and "Do not infer anything about GitHub work from its absence."
+    The full sentence stays in the report and the cockpit. Titles also lose C0
+    and C1 controls, line and paragraph separators and bidi controls. Goals get `[A#]` refs and their
     parent, and the model is asked to start with a `<goal_evidence>` block
     citing only `[G#]` and `SCREEN`.
   - **After the answer.** Code extracts the block, keeps only citations of
     refs it sent (unknown goals and ids are dropped and counted), rolls
     sub-goal evidence up to parent goals through `Goal.parent_id`, and
     computes the goals without evidence and the records tied to no goal. In
-    the text every `http(s)://`, `www.` or `github.com/...` run becomes
-    `[link removed]`, and a `[G#]` that was not sent becomes
+    the text every link a reader could follow (any `http(s):`, `ftp:`,
+    `javascript:`, `data:`, `vbscript:` or `file:` run, a protocol-relative
+    `//host`, `www.`, or any `github.com` or `githubusercontent.com` host such
+    as `api.github.com` or `gist.github.com`) becomes `[link removed]`, and a `[G#]` that was not sent becomes
     `[unverified reference]`. With no block the mapping is `unparsed` and the
     text is kept (links still removed). Links exist only in
     `github_activity.items[].url`.
@@ -4678,8 +4693,11 @@ starts `gh`), `backend/src/integrations/github_activity.py` and
     report still carries `github_activity`, and `goal_evidence` is `blocked`.
   - **Stored episode.** Metadata gains `github_activity_status`,
     `github_activity_item_count`, `github_activity_run_id`,
-    `github_activity_message` and `goal_evidence_status`; items stay in the
-    private report archive and the activity table, not in memory content.
+    `github_activity_reason_code` and `goal_evidence_status`: codes and
+    counts only, never the sentence (which can name a login or a `gh` path).
+    This metadata is read only by the reports API, not by memory recall or a
+    prompt. Items stay in the private report archive and the activity table,
+    not in memory content.
   - **E-mail.** Unchanged when no source exists. Otherwise one line, "GitHub
     evidence:" followed by the status sentence and the counts, is added to the plain text and one row to
     the HTML; no titles or links are e-mailed. Resend template variables are
@@ -4711,10 +4729,12 @@ It is read-only: it cannot generate a report and starts no model call.
   `goal_evidence` from the verified archive, each field re-validated: an
   item URL that is not a GitHub commit, pull request or issue URL is dropped.
   When the archive does not verify, `github_activity` has only the stored
-  status, sentence and item count (`items_available: false`) and
+  status, reason code, item count and the fixed sentence for that status
+  (`items_available: false`) and
   `goal_evidence` is `null`; reports from before #1264 have `null` for both.
   The cockpit shows a **GitHub evidence** card (the sentence, the fixed
-  credential line, counts and items as links), a **Goals and evidence** table,
+  credential line, the limitations in plain words, such as two ownership
+  identities with active sources, counts and items as links), a **Goals and evidence** table,
   and turns a `[G#]` in the body into a link only when a stored item with a
   valid URL carries that ref.
 - Only `observer` memory episodes from `end_of_day_goal_report` whose metadata

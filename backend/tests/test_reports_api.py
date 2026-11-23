@@ -399,7 +399,8 @@ async def test_tampered_archive_yields_github_status_and_counts_only(client, arc
     github = detail["github_activity"]
     assert github["source"] == "episode_metadata" and github["items_available"] is False
     assert github["status"] == "partial" and github["item_count"] == 2 and github["items"] == []
-    assert github["message"].startswith("GitHub activity is incomplete")
+    # Metadata keeps only codes; the fallback sentence is the fixed one for the status.
+    assert github["message"] == "GitHub activity for this day is incomplete."
     assert detail["goal_evidence"] is None
 
 

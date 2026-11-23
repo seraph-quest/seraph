@@ -81,7 +81,8 @@ ActivityKind = Literal["commit", "pr_opened", "pr_merged", "pr_closed", "issue_o
 ALL_KINDS: list[str] = ["commit", "pr_opened", "pr_merged", "pr_closed", "issue_opened", "issue_closed"]
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+# C0 and C1 controls, line/paragraph separators and bidi overrides/isolates.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
 
 # Codes that end a run as blocked rather than failed; every other gh error
 # also ends the run at once, since a second child would only repeat it.
@@ -417,9 +418,10 @@ SessionCheck = Callable[[GitHubActivitySource], Awaitable[None]]
 
 @dataclass(frozen=True)
 class RequestLineage:
-    """The authenticated login that asked for a run or a stop."""
+    """The authenticated login that asked for a run or a stop, and its ownership identity."""
     principal_id: str
     session_id: str | None = None
+    identity_id: str | None = None
 
 
 async def live_owner_identity(source: GitHubActivitySource) -> None:
@@ -1222,6 +1224,21 @@ def user_timezone() -> ZoneInfo:
 REPORT_MAX_ITEMS = 200
 # States in which no stored record is evidence the model may reason from.
 REPORT_SILENT_STATES = {"failed", "blocked", "stopped", "revoked", "not_collected", "running", "unavailable"}
+# What a model, or a surface that may carry the text into one, is told about a
+# silent state: a fixed sentence per status, never a login, gh path, exit code
+# or repository name (#1300 review B1).
+REPORT_FIXED_SENTENCES = {
+    "not_connected": "GitHub source not connected.",
+    "revoked": "The GitHub source was switched off by the operator.",
+    "stopped": "The GitHub source is stopped and did not collect.",
+    "blocked": "GitHub collection was blocked for this day.",
+    "failed": "GitHub collection failed for this day.",
+    "not_collected": "No GitHub collection ran for this day.",
+    "running": "A GitHub collection started and did not record completion.",
+    "unavailable": "GitHub evidence could not be read from the local store.",
+    "partial": "GitHub activity for this day is incomplete.",
+    "complete": "GitHub activity was collected for this day.",
+}
 
 
 def _report_view(status: str, message: str, **values: Any) -> dict[str, Any]:
@@ -1259,11 +1276,25 @@ async def collect_github_activity_for_report(report_day: date, tz: ZoneInfo, *,
 
     Nothing starts ``gh`` unless the chosen source is active; the collector
     keeps its own run row and audit event, and the report reads only the store.
+    A manual report collects only when the requesting login belongs to the
+    identity that owns the chosen source: one login never starts ``gh`` under
+    another identity's grant. Otherwise the report uses stored rows, the skip
+    is audited, and the returned ``skipped`` code becomes a report limitation.
     """
     try:
         source, _ = await report_source()
         if source is None or source.state != "active":
             return None
+        if trigger == "manual_report" and (requested_by is None or not requested_by.identity_id
+                                           or requested_by.identity_id != source.owner_identity_id):
+            code = "manual_collection_skipped_not_source_owner"
+            await _service()._audit_event("report_collect", "skipped", {
+                "source_id": source.id, "owner_identity_id": source.owner_identity_id,
+                "requester_identity_id": requested_by.identity_id if requested_by else None,
+                "trigger": trigger, "reason_code": code, "credential": CREDENTIAL_KIND},
+                principal_id=requested_by.principal_id if requested_by else None,
+                session_id=requested_by.session_id if requested_by else None)
+            return {"status": "skipped", "skipped": code}
         return await _service().collect_day(owner_identity_id=source.owner_identity_id, report_day=report_day,
                                             tz=tz, trigger=trigger, requested_by=requested_by)
     except Exception as exc:
@@ -1296,8 +1327,13 @@ def _report_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return items
 
 
-async def github_activity_for_report(report_day: date, tz: ZoneInfo) -> dict[str, Any]:
-    """The day's stored activity and its honest status, for the report. Reads only; never raises."""
+async def github_activity_for_report(report_day: date, tz: ZoneInfo, *,
+                                     collection: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The day's stored activity and its honest status, for the report. Reads only; never raises.
+
+    ``collection`` is what the report's own collection stage returned; a
+    skipped collection is named as a limitation.
+    """
     try:
         source, selection_limits = await report_source()
         if source is None:
@@ -1314,6 +1350,8 @@ async def github_activity_for_report(report_day: date, tz: ZoneInfo) -> dict[str
         counts[row["kind"]] = counts.get(row["kind"], 0) + 1
     items = _report_items(rows)
     limitations = [*(run.get("limitations") or []), *selection_limits]
+    if isinstance(collection, dict) and isinstance(collection.get("skipped"), str):
+        limitations.append({"code": collection["skipped"]})
     if len(items) > REPORT_MAX_ITEMS or view.get("items_truncated"):
         limitations.append({"code": "report_items_truncated"})
     return _report_view(
@@ -1367,7 +1405,8 @@ def request_lineage(request: Request) -> RequestLineage | None:
         owner = _owner(request)
     except HTTPException:
         return None
-    return RequestLineage(principal_id=owner.principal_id, session_id=owner.session_id)
+    return RequestLineage(principal_id=owner.principal_id, session_id=owner.session_id,
+                          identity_id=owner.identity_id)
 
 
 def _http(exc: GitHubActivityError) -> HTTPException:

@@ -40,16 +40,16 @@ _MIX_MAX_ENTRIES = 25
 _MIX_KEY_MAX = 120
 # #1264: GitHub evidence. A link is shown only for a URL of exactly these shapes.
 _GITHUB_URL = re.compile(
-    r"^https://github\.com/[\w.-]+/[\w.-]+/(commit/[0-9a-f]{40}|pull/\d+|issues/\d+)(#[\w-]+)?$")
+    r"^https://github\.com/[\w.-]+/[\w.-]+/(commit/[0-9a-f]{40}|pull/\d+|issues/\d+)(#[\w-]+)?$", re.ASCII)
 _GITHUB_STATUSES = {"not_connected", "complete", "partial", "failed", "blocked", "revoked", "stopped",
                     "not_collected", "running", "unavailable"}
 _GITHUB_KINDS = {"commit", "pr_opened", "pr_merged", "pr_closed", "issue_opened", "issue_closed"}
 _GOAL_EVIDENCE_STATUSES = {"mapped", "unparsed", "not_requested", "blocked"}
-_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_LOGIN = re.compile(r"^[A-Za-z0-9-]{1,39}$")
-_CODE = re.compile(r"^[a-z0-9_]{1,64}$")
-_G_REF = re.compile(r"^G\d{1,4}$")
-_A_REF = re.compile(r"^A\d{1,4}$")
+_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", re.ASCII)
+_LOGIN = re.compile(r"^[A-Za-z0-9-]{1,39}$", re.ASCII)
+_CODE = re.compile(r"^[a-z0-9_]{1,64}$", re.ASCII)
+_G_REF = re.compile(r"^G\d{1,4}$", re.ASCII)
+_A_REF = re.compile(r"^A\d{1,4}$", re.ASCII)
 _GITHUB_ITEMS_MAX = 200
 _GOALS_MAX = 24
 
@@ -278,10 +278,15 @@ def _public_github_activity(report: dict[str, Any] | None, metadata: dict[str, A
         status = _github_status(metadata.get("github_activity_status"))
         if status is None:
             return None
+        from src.integrations.github_activity import REPORT_FIXED_SENTENCES
+        reason = metadata.get("github_activity_reason_code")
+        # Metadata keeps only status and reason code; the sentence is a fixed one.
         return {"source": "episode_metadata", "status": status,
-                "message": _text(metadata.get("github_activity_message"), 1000),
+                "message": REPORT_FIXED_SENTENCES.get(status),
                 "item_count": _non_negative_int(metadata.get("github_activity_item_count")),
-                "items_available": False, "reason_code": None, "limitations": [], "identity_login": None,
+                "items_available": False,
+                "reason_code": reason if isinstance(reason, str) and _CODE.fullmatch(reason) else None,
+                "limitations": [], "identity_login": None,
                 "model_context": None, "counts": {}, "repositories": [], "items": []}
     status = _github_status(archived.get("status"))
     if status is None:

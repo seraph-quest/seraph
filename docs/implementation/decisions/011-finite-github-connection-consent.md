@@ -457,7 +457,18 @@ the login, acknowledges the full `gh` scope, chooses the scope and enables it
 in Settings. It is visible as an effective-grants row and revocable there or
 in the panel; a different `gh` account stops it until enabled again.
 It belongs to the operator identity rather than one login, so login expiry
-never stops it; identity revocation and a workspace restore do.
+never stops it, and neither does an explicit logout. This differs from the
+finite, root-bound mutation consent in the body of this ADR: the read source
+has no duration and is not bound to the login that enabled it; it is bound to
+the ownership identity and changes only on real changes. Identity revocation,
+a workspace restore or rollback, a different `gh` account, the operator's
+switch-off, and a stop from another login of the workspace stop it.
+A login of another ownership identity of the same workspace (for example a
+login that lost the continuity cookie and recovery code and enrolled a new
+identity) sees that the source exists and its state, never its GitHub login,
+`gh` path, scope or items, and can stop it (#1270). Stopping only removes
+authority; enabling, collecting and reading stay with the owning identity,
+which the operator gets back by recovering ownership.
 
 The boundary is Seraph's own argv, not GitHub: one fixed
 `gh api --method GET --hostname github.com` shape over a closed endpoint table

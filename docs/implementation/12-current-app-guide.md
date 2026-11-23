@@ -4548,15 +4548,42 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   network only fail that run; the source resumes when the same account is back.
   The source belongs to your ownership identity, not to one login. Any live
   login of that identity sees it, its items and its effective-grants row, and
-  can switch it off. A new login, a logout or a login's idle or absolute
-  expiry does not stop it and does not need re-enabling. It is stopped by
-  revoking the identity (**Revoke ownership**), by a workspace restore (state
-  `stopped`, reason `workspace_restored`), and, for a source enabled in local
-  no-login mode, by that root being reset or the mode switched off. A password
-  login needs enrolled ownership before it can enable the source. Nothing
-  expires by time. Switching off cannot recall a request already in flight: one
-  read-only GET may still reach GitHub just after you switch off, and its
-  result is discarded.
+  can switch it off. A new login, an explicit logout or a login's idle or
+  absolute expiry does not stop it and does not need re-enabling. Nothing
+  expires by time. What changes it:
+  - **Revoke ownership** sets the row to `stopped`, reason
+    `owner_identity_revoked`, in the same transaction as the revocation. An
+    identity revoked any other way leaves the row `active`, and each run then
+    ends `blocked` / `owner_identity_revoked` before starting `gh`.
+  - A workspace restore or rollback sets it to `stopped`, reason
+    `workspace_restored`; the restore and rollback receipts count it
+    (`github_activity_sources_stopped`).
+  - For a source enabled in local no-login mode, resetting that root or
+    switching the mode off leaves the row `active`, and each run ends
+    `blocked` / `local_root_retired` before starting `gh`.
+  - A stop from a login of another ownership identity sets it to `stopped`,
+    reason `stopped_by_another_identity` (see the next point).
+
+  Switching off cannot recall a request already in flight: one read-only GET
+  may still reach GitHub just after you switch off, and its result is
+  discarded.
+- **A lost ownership identity (#1270).** A password login without the
+  continuity cookie or a recovery code has no ownership identity, and the
+  panel says so: if you enabled the source before, recover that ownership
+  first (log in with your recovery code, or from the browser that holds the
+  continuity cookie). Enrolling a new identity instead leaves the earlier
+  source with the old identity, where it keeps collecting. So every
+  authenticated login of the workspace, with or without an identity, sees the
+  sources of other identities in the panel and as
+  `github_activity_other_identity` rows in effective grants, and can stop an
+  active one (**Stop that source**, or revoke that row;
+  `POST /other-identity-sources/{id}/stop` with its revision). That view
+  shows only the state and revision: never the GitHub login, the `gh` path,
+  the scope or the items. Stopping only removes authority. Enabling again,
+  collecting and reading items stay with the owning identity. Each stop writes
+  an audit event (`github_activity` / `source_stop`) naming the login that
+  stopped it. A password login needs an ownership identity before it can
+  enable a source of its own.
 - **Where it works.** Only where the backend runs directly on your computer as
   you (`./manage.sh -e dev local ...`) with `gh` installed. `gh` is looked for
   only at `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`,
@@ -4601,7 +4628,9 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   counts, call count and the binary) and `github_activity_items` (repository,
   kind, number or sha, title, a URL Seraph builds itself, UTC time, and the
   run that first and last saw it). Re-collecting a day updates rows in place.
-  Each run writes one audit event (`github_activity` / `gh_cli`).
+  Each run writes one audit event (`github_activity` / `gh_cli`) with its run
+  id and trigger; a run you start (**Collect now**) also records your login
+  (principal and session) as its lineage, while a scheduled run records none.
 - **Limits.** One `gh` process at a time, at most 120 per run and 10
   repositories, no retry and no sleep. A rate-limit answer, or a response with
   no remaining quota, ends the run and keeps what was read. The calls count
@@ -4617,7 +4646,8 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
 - **Routes** (operator session required), under
   `/api/capabilities/github/activity`: `GET` (status; starts nothing),
   `POST /gh/check`, `PUT /source`, `POST /revoke`, `POST /collect`,
-  `GET /items?report_date=YYYY-MM-DD`.
+  `GET /items?report_date=YYYY-MM-DD`,
+  `POST /other-identity-sources/{id}/stop`.
 - **Residual risk.** Anything already running as you can replace `gh` or run
   `gh auth token` itself; the binary checks do not defend against that. The
   argv builder is the only limit on what is sent, so a change to

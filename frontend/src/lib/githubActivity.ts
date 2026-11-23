@@ -35,6 +35,15 @@ export interface GitHubActivityRun {
   finished_at: string | null;
 }
 
+// Another ownership identity's source (#1270): neutral, with no login, gh path or scope.
+export interface GitHubActivityOtherSource {
+  id: string;
+  state: string;
+  revision: number;
+  stoppable: boolean;
+  message: string;
+}
+
 export interface GitHubActivityStatus {
   source: GitHubActivitySource;
   gh: { available: boolean; reason_code: string | null; entry_path: string | null };
@@ -44,6 +53,7 @@ export interface GitHubActivityStatus {
   last_run: GitHubActivityRun | null;
   // The source belongs to the operator identity; an unenrolled login has none.
   ownership_required: boolean;
+  other_identity_sources: GitHubActivityOtherSource[];
 }
 
 export interface GhLoginCheck {
@@ -78,6 +88,15 @@ function scope(value: unknown): GitHubActivityScope | null {
     owners: strings(row.owners), exclude_repositories: strings(row.exclude_repositories), kinds: strings(row.kinds) };
 }
 
+function otherSources(value: unknown): GitHubActivityOtherSource[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => record(item, "GitHub activity source of another identity"))
+    .filter(item => typeof item.id === "string" && typeof item.state === "string"
+      && typeof item.revision === "number" && Number.isSafeInteger(item.revision))
+    .map(item => ({ id: item.id as string, state: item.state as string, revision: item.revision as number,
+      stoppable: item.state === "active" && strings(item.controls).includes("stop"), message: text(item.message) ?? "" }));
+}
+
 function run(value: unknown): GitHubActivityRun | null {
   if (value === undefined || value === null) return null;
   const row = record(value, "GitHub activity run");
@@ -108,6 +127,7 @@ export function githubActivityStatus(value: unknown): GitHubActivityStatus {
     message: text(row.message) ?? "",
     last_run: run(row.last_run),
     ownership_required: row.ownership_required === true,
+    other_identity_sources: otherSources(row.other_identity_sources),
   };
 }
 

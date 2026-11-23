@@ -260,13 +260,38 @@ async def test_after_expiry_a_new_login_sees_controls_and_revokes_the_source(cli
 
 
 @pytest.mark.asyncio
-async def test_identity_revoke_after_a_newer_login_blocks_the_source(client, async_db, clock, gh_service, runner):
-    """The review's reproduction: a newer login, the enabling row left expired, then ownership revoke."""
+async def test_identity_revoke_after_a_newer_login_stops_the_source(client, async_db, clock, gh_service, runner):
+    """The review's reproduction: a newer login, the enabling row left expired, then ownership revoke.
+
+    #1270 item 6: revoking the identity stops the source row itself (state
+    ``stopped``, reason ``owner_identity_revoked``, new revision) in the same
+    transaction, so no view shows it ``active`` and no later run starts gh.
+    """
     owner = await owner_login(client)
     await check_and_enable(client)
     await _expire_session_row(owner["session_id"])
     await login(client)
     assert (await client.post("/api/auth/ownership/revoke", headers=HEADERS)).status_code == 204
+    row = await _source_row(owner["identity_id"])
+    assert (row.state, row.stopped_reason, row.revision) == ("stopped", "owner_identity_revoked", 2)
+    runner.calls.clear()
+    result = await collect_as(owner["identity_id"])
+    assert result["status"] == "stopped" and result["reason_code"] == "owner_identity_revoked"
+    assert "ownership identity that enabled it was revoked" in result["message"]
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_identity_row_still_blocks_each_run(client, async_db, clock, gh_service, runner):
+    """An identity revoked outside the ownership route leaves the row active; every run blocks before gh."""
+    from sqlalchemy import update
+    from src.db import engine as db_engine
+    from src.db.models import OperatorIdentity
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    async with db_engine.get_session() as db:
+        await db.execute(update(OperatorIdentity).where(OperatorIdentity.id == owner["identity_id"]).values(
+            revoked_at=datetime.now(timezone.utc)))
     runner.calls.clear()
     result = await collect_as(owner["identity_id"])
     assert result["status"] == "blocked" and result["reason_code"] == "owner_identity_revoked"
@@ -355,3 +380,135 @@ async def test_items_route_refuses_out_of_range_dates(client, async_db, clock, g
     collect = await client.post("/api/capabilities/github/activity/collect", headers=HEADERS,
                                 json={"report_date": "9999-12-31"})
     assert collect.status_code == 422 and collect.json()["detail"]["code"] == "report_date_invalid"
+
+
+async def _source_row(identity_id):
+    return await github_activity._service()._source_row(identity_id)
+
+
+async def lose_identity(client):
+    """A password login on a browser without the continuity cookie or a recovery code (#1270)."""
+    client.cookies.clear()
+    return await login(client)
+
+
+def _foreign_text_absent(value, *, login_name="octo", gh_path="/opt/homebrew/bin/gh"):
+    import json
+    text = json.dumps(value)
+    return login_name not in text and gh_path not in text
+
+
+@pytest.mark.asyncio
+async def test_effective_grants_filter_rows_by_owning_identity(client, async_db, clock, gh_service, runner):
+    """#1270 item 2: another identity never sees the owner's row, its GitHub login or gh path."""
+    owner = await owner_login(client)
+    await check_and_enable(client, allow_model_context=True)
+    own = {row["kind"] for row in (await client.get("/api/extensions/effective-grants")).json()["grants"]}
+    assert {"github_activity", "github_activity_model"} <= own
+    assert "github_activity_other_identity" not in own
+    await lose_identity(client)
+    other = await enroll(client)
+    assert other["operator_identity_id"] != owner["identity_id"]
+    grants = [row for row in (await client.get("/api/extensions/effective-grants")).json()["grants"]
+              if row["kind"].startswith("github_activity")]
+    assert [row["kind"] for row in grants] == ["github_activity_other_identity"]
+    (neutral,) = grants
+    assert neutral["state"] == "active" and neutral["controls"] == ["revoke"]
+    assert neutral["limits"]["owner"] == "another_ownership_identity"
+    assert _foreign_text_absent(grants)
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert status["source"]["state"] == "not_connected" and status["ownership_required"] is False
+    assert _foreign_text_absent(status["other_identity_sources"])
+    items = (await client.get(f"/api/capabilities/github/activity/items?report_date={NOW.date()}")).json()
+    assert items["items"] == [] and items["status"] == "not_connected"
+
+
+@pytest.mark.asyncio
+async def test_a_lost_identity_login_sees_and_stops_the_old_source(client, async_db, clock, gh_service, runner,
+                                                                  monkeypatch):
+    """#1270 item 3: the earlier identity's source is visible and stoppable from a login without it."""
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    monkeypatch.setattr("src.audit.runtime.log_integration_event", record)
+    session = await login(client)
+    proof = await enroll(client)
+    await check_and_enable(client)
+    lost = await lose_identity(client)
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert status["ownership_required"] is True
+    assert "recover that ownership first" in status["message"] and "recovery code" in status["message"]
+    (other,) = status["other_identity_sources"]
+    assert other["state"] == "active" and other["controls"] == ["stop"] and other["revision"] == 1
+    assert _foreign_text_absent(other)
+    stop = f"/api/capabilities/github/activity/other-identity-sources/{other['id']}/stop"
+    stale = await client.post(stop, headers=HEADERS, json={"expected_revision": 0})
+    assert stale.status_code == 409
+    assert (await _source_row(proof["operator_identity_id"])).state == "active"
+    stopped = await client.post(stop, headers=HEADERS, json={"expected_revision": 1})
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["other_identity_sources"][0]["state"] == "stopped"
+    row = await _source_row(proof["operator_identity_id"])
+    assert (row.state, row.stopped_reason, row.revision) == ("stopped", "stopped_by_another_identity", 2)
+    event = next(item for item in recorded if item["name"] == "source_stop")
+    assert event["principal_id"] == lost["principal_id"] and event["session_id"] == lost["session_id"]
+    assert event["details"]["owner_identity_id"] == proof["operator_identity_id"]
+    assert (await client.post(stop, headers=HEADERS, json={"expected_revision": 2})).status_code == 409
+    runner.calls.clear()
+    result = await collect_as(proof["operator_identity_id"])
+    assert result["status"] == "stopped" and runner.calls == []
+    # Recovering the ownership shows the owner what happened; the owner cannot use the foreign route.
+    client.cookies.clear()
+    recovered = await login(client, proof["recovery_code"])
+    assert recovered["session_id"] not in {session["session_id"], lost["session_id"]}
+    status = (await client.get("/api/capabilities/github/activity")).json()
+    assert status["ownership_required"] is False and status["other_identity_sources"] == []
+    assert status["source"]["state"] == "stopped"
+    assert "another ownership identity" in status["message"]
+    own = f"/api/capabilities/github/activity/other-identity-sources/{status['source']['id']}/stop"
+    assert (await client.post(own, headers=HEADERS, json={"expected_revision": 2})).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_another_identity_stops_the_source_through_effective_grants(client, async_db, clock, gh_service,
+                                                                          runner):
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    await lose_identity(client)
+    await enroll(client)
+    row = next(grant for grant in (await client.get("/api/extensions/effective-grants")).json()["grants"]
+               if grant["kind"] == "github_activity_other_identity")
+    revoked = await client.post("/api/extensions/effective-grants/revoke", headers=HEADERS, json={
+        "grant_id": row["grant_id"], "expected_revision": row["revision"], "idempotency_key": "lost-identity-stop"})
+    assert revoked.status_code == 200, revoked.text
+    stored = await _source_row(owner["identity_id"])
+    assert (stored.state, stored.stopped_reason) == ("stopped", "stopped_by_another_identity")
+
+
+@pytest.mark.asyncio
+async def test_an_operator_triggered_run_records_the_requesting_principal(client, async_db, clock, gh_service,
+                                                                          runner, monkeypatch):
+    """#1270 item 5: audit lineage names the login that asked; an unattended run names none."""
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    monkeypatch.setattr("src.audit.runtime.log_integration_event", record)
+    owner = await owner_login(client)
+    await check_and_enable(client)
+    collected = await client.post("/api/capabilities/github/activity/collect", headers=HEADERS, json={})
+    assert collected.status_code == 200 and collected.json()["status"] == "complete"
+    (event,) = [item for item in recorded if item["name"] == "gh_cli"]
+    assert event["principal_id"] == owner["principal_id"] and event["session_id"] == owner["session_id"]
+    assert event["actor"] == "operator" and event["details"]["trigger"] == "operator"
+    assert event["details"]["run_id"] == collected.json()["run"]["id"]
+    recorded.clear()
+    await collect_as(owner["identity_id"])
+    (event,) = [item for item in recorded if item["name"] == "gh_cli"]
+    assert event["principal_id"] is None and event["session_id"] is None and event["actor"] == "system"
+    assert event["details"]["trigger"] == "scheduled"

@@ -499,14 +499,23 @@ async def _original_accounting_members(db, context):
     return members
 
 
-async def _accounting(db, context):
+async def _finished_accounting_members(db, context):
     members = await _original_accounting_members(db, context)
     # A finished but not yet priced (``unknown``) record does not hold the
     # stop (ADR-037, #1284); a call still in flight does.
     if any(row.state not in {"settled", "released", "unknown"} for row in members):
         raise DurableJobLeaseError("original stop retains an unfinished request")
-    return _source()._source_digest([row.model_dump(mode="json")
-        for row in sorted(members, key=lambda row: row.operation_id)])
+    return sorted(members, key=lambda row: row.operation_id)
+
+
+async def _accounting(db, context):
+    """Digest of the original request records' contact identity (#1291): a
+    charge recorded later, during or after the stop, leaves it unchanged."""
+    return _source().request_records_digest(await _finished_accounting_members(db, context))
+
+
+async def _accounting_matches(db, context, recorded) -> bool:
+    return _source().request_records_digest_matches(await _finished_accounting_members(db, context), recorded)
 
 
 async def _limit_evidence(db, context, *, reason):
@@ -530,6 +539,15 @@ async def _limit_evidence(db, context, *, reason):
     cutoff, goal_cutoff = _as_utc(context["run"].deadline_at), source._repository_goal_cutoff(limits, group)
     now, bound = _utc_now(), limits["original_server_bound_microusd"]
     recorded_stop = source._repository_record(context["run"], STOP_ID)
+    recorded = recorded_stop.get("limit_evidence") if recorded_stop is not None else None
+    if isinstance(recorded, dict):
+        # Recorded spend is display only. A charge recorded after the stop
+        # intent only adds to it, and keeps the spend the intent recorded so
+        # the stop can still close (#1291).
+        recorded_root, recorded_group = recorded.get("root_liability_microusd"), recorded.get("group_liability_microusd")
+        if (type(recorded_root) is int and type(recorded_group) is int
+                and 0 <= recorded_root <= root_cost and 0 <= recorded_group <= group_cost):
+            root_cost, group_cost = recorded_root, recorded_group
     causes = {
         "deadline_exhausted": now >= cutoff,
         "goal_limit_exhausted": now >= goal_cutoff and cutoff == goal_cutoff,
@@ -741,7 +759,7 @@ async def validate_repository_stop_witness(db, witness, *, parent, task, attempt
     run = await witness.jobs._fetch(db, closure.repository_job_id)
     stop = source._repository_record(run, STOP_ID)
     if (stop is None or source._source_digest(stop) != closure.stop_intent_digest
-            or await _accounting(db, context) != closure.all_original_accounting_digest):
+            or not await _accounting_matches(db, context, closure.all_original_accounting_digest)):
         raise DurableJobLeaseError("original stop intent or accounting changed")
     if closure.stop_reason in AUTOMATIC_REASONS:
         evidence = await _limit_evidence(db, context, reason=closure.stop_reason)

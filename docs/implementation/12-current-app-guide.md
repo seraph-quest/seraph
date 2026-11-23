@@ -4536,11 +4536,12 @@ Availability follows the reviewed installed revision described above.
 
 ### GitHub activity evidence for the end-of-day report (#1264) {#github-activity-evidence-1264}
 
-**Partial (slice 1 of [#1264](https://github.com/seraph-quest/seraph/issues/1264)).**
-Seraph can collect the operator's own GitHub activity for a day and store it
-as evidence. The end-of-day report does not read it yet; that is the next
-slice. Code: `backend/src/integrations/github_cli.py` (the only code that
-starts `gh`) and `backend/src/integrations/github_activity.py`.
+**Partial ([#1264](https://github.com/seraph-quest/seraph/issues/1264)).**
+Seraph can collect the operator's own GitHub activity for a day, store it as
+evidence, and use it in the end-of-day report (see **In the end-of-day report**
+below). Code: `backend/src/integrations/github_cli.py` (the only code that
+starts `gh`), `backend/src/integrations/github_activity.py` and
+`backend/src/scheduler/jobs/end_of_day_goal_report.py`.
 
 - **Credential.** It uses the operator's local `gh` login. `gh` holds the
   account's full GitHub access and Seraph cannot narrow it. Seraph never reads
@@ -4567,7 +4568,10 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   network only fail that run; the source resumes when the same account is back.
   The source belongs to your ownership identity, not to one login. Any live
   login of that identity sees it, its items and its effective-grants row, and
-  can switch it off. A new login, an explicit logout or a login's idle or
+  can switch it off; each switch-off writes an audit event
+  (`github_activity` / `source_revoke`) naming the login that did it, and the
+  response says whether that event was recorded (`audit_recorded`). A new
+  login, an explicit logout or a login's idle or
   absolute expiry does not stop it and does not need re-enabling. Nothing
   expires by time. What changes it:
   - **Revoke ownership** sets the row to `stopped`, reason
@@ -4597,11 +4601,15 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   `github_activity_other_identity` rows in effective grants, and can stop an
   active one (**Stop that source**, or revoke that row;
   `POST /other-identity-sources/{id}/stop` with its revision). That view
-  shows only the state and revision: never the GitHub login, the `gh` path,
-  the scope or the items. Stopping only removes authority. Enabling again,
-  collecting and reading items stay with the owning identity. Each stop writes
-  an audit event (`github_activity` / `source_stop`) naming the login that
-  stopped it. A password login needs an ownership identity before it can
+  carries only the source id, its state and revision, a fixed message and
+  the stop control (the effective-grants row: the owner marker, the credential
+  kind and the fixed sentence): never the GitHub login, the `gh` path, the
+  scope, the stopped reason, timestamps or the items. Active sources are
+  listed first, so a bounded list cannot hide one. Stopping only removes
+  authority. Enabling again, collecting and reading items stay with the
+  owning identity. Each stop writes an audit event (`github_activity` /
+  `source_stop`) naming the login that stopped it; the response's
+  `audit_recorded` says whether it was written. A password login needs an ownership identity before it can
   enable a source of its own.
 - **Where it works.** Only where the backend runs directly on your computer as
   you (`./manage.sh -e dev local ...`) with `gh` installed. `gh` is looked for
@@ -4667,6 +4675,80 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   `POST /gh/check`, `PUT /source`, `POST /revoke`, `POST /collect`,
   `GET /items?report_date=YYYY-MM-DD`,
   `POST /other-identity-sources/{id}/stop`.
+- **In the end-of-day report.** The 21:00 job and the manual report route
+  (`POST /api/settings/end-of-day-report/manual`) first run one collection for the report's
+  day (trigger `scheduled` or `manual_report`), then build the report from
+  stored rows only. A manual run collects only when the requesting login
+  belongs to the ownership identity that owns the chosen source, and its
+  audit event names that login. From any other login, or a login without an
+  identity, the report uses the stored rows, writes a `github_activity` /
+  `report_collect` `skipped` audit event, and carries the limitation
+  `manual_collection_skipped_not_source_owner`. There is no
+  second cron and no wait: collection finishes or records why not, then the
+  report reads the store. Neither stage can fail the report.
+  - **Which source.** The report is one per workspace. It uses the active
+    source; if more than one ownership identity has an active source, it uses
+    the most recently enabled one and adds the limitation
+    `multiple_active_sources`. With no active source, the most recently
+    changed source says what happened (switched off, stopped).
+  - **Report keys.** `github_activity` (status, the one sentence, reason code,
+    limitations, run id, collected-until, login, `model_context`
+    `included`/`not_allowed`/`not_sent`, counts by kind, repositories and up
+    to 200 items, each with a `G#` ref and the URL Seraph built) and
+    `goal_evidence` (`mapped`, `unparsed`, `not_requested` or `blocked`; per
+    goal the cited `G#` refs, whether screen evidence was cited, and
+    `rolled_up_from`; `goals_without_evidence`, `github_without_goal` and
+    counts of rejected citations). `body` stays the model's text,
+    `goal_alignment` stays `[]` and the schema stays
+    `seraph.end_of_day_goal_report.v1`. Commits with one title in one
+    repository (rebased or squashed work) collapse into one item that carries
+    `same_title_count`.
+  - **Prompt.** With no source ever enabled the prompt is byte-for-byte what it
+    was before. That promise needs the activity tables to be readable: when
+    the report cannot read them it cannot tell whether a source exists, so the
+    prompt gains a section saying only "GitHub evidence could not be read from
+    the local store." and "Do not infer anything about GitHub work from its
+    absence." Otherwise a `## GitHub activity` section sits before
+    `## Goals`: the source, the collection status and its limitations, a count
+    line, and at most 60 lines / 6,000 characters of
+    `[G#] repository | kind | #n or short sha | title | local time`, inside a
+    fence derived from the run and the items; titles are cut at 120
+    characters, control characters removed and `<<<`/`>>>` runs split. No URL
+    is sent. Consent is checked first: when the model-analysis box was not
+    ticked, the section says only that GitHub evidence exists but was not
+    shared, in every state, with no login, `gh` path or status sentence. When
+    it was ticked and the day's state is failed, blocked, stopped, switched
+    off, not collected or running, the section holds one fixed sentence for
+    that status (never the login, the `gh` path, an exit code or another
+    account) and "Do not infer anything about GitHub work from its absence."
+    The full sentence stays in the report and the cockpit. Titles also lose C0
+    and C1 controls, line and paragraph separators and bidi controls. Goals get `[A#]` refs and their
+    parent, and the model is asked to start with a `<goal_evidence>` block
+    citing only `[G#]` and `SCREEN`.
+  - **After the answer.** Code extracts the block, keeps only citations of
+    refs it sent (unknown goals and ids are dropped and counted), rolls
+    sub-goal evidence up to parent goals through `Goal.parent_id`, and
+    computes the goals without evidence and the records tied to no goal. In
+    the text every link a reader could follow (any `http(s):`, `ftp:`,
+    `javascript:`, `data:`, `vbscript:` or `file:` run, a protocol-relative
+    `//host`, `www.`, or any `github.com` or `githubusercontent.com` host such
+    as `api.github.com` or `gist.github.com`) becomes `[link removed]`, and a `[G#]` that was not sent becomes
+    `[unverified reference]`. With no block the mapping is `unparsed` and the
+    text is kept (links still removed). Links exist only in
+    `github_activity.items[].url`.
+  - **Blocked analysis.** When the model call is skipped or blocked, the
+    report still carries `github_activity`, and `goal_evidence` is `blocked`.
+  - **Stored episode.** Metadata gains `github_activity_status`,
+    `github_activity_item_count`, `github_activity_run_id`,
+    `github_activity_reason_code` and `goal_evidence_status`: codes and
+    counts only, never the sentence (which can name a login or a `gh` path).
+    This metadata is read only by the reports API, not by memory recall or a
+    prompt. Items stay in the private report archive and the activity table,
+    not in memory content.
+  - **E-mail.** Unchanged when no source exists. Otherwise one line, "GitHub
+    evidence:" followed by the status sentence and the counts, is added to the plain text and one row to
+    the HTML; no titles or links are e-mailed. Resend template variables are
+    unchanged.
 - **Residual risk.** Anything already running as you can replace `gh` or run
   `gh auth token` itself; the binary checks do not defend against that. The
   argv builder is the only limit on what is sent, so a change to
@@ -4689,6 +4771,19 @@ It is read-only: it cannot generate a report and starts no model call.
 - `GET /api/reports/end-of-day/{episode_id}` adds the stored body, the
   activity/project/source mix, switch count and the archive SHA-256 values.
   Unknown ids and episodes that are not end-of-day reports return 404.
+- **GitHub evidence (#1264).** List items carry `github_activity_status` and
+  `github_activity_item_count`. Detail adds `github_activity` and
+  `goal_evidence` from the verified archive, each field re-validated: an
+  item URL that is not a GitHub commit, pull request or issue URL is dropped.
+  When the archive does not verify, `github_activity` has only the stored
+  status, reason code, item count and the fixed sentence for that status
+  (`items_available: false`) and
+  `goal_evidence` is `null`; reports from before #1264 have `null` for both.
+  The cockpit shows a **GitHub evidence** card (the sentence, the fixed
+  credential line, the limitations in plain words, such as two ownership
+  identities with active sources, counts and items as links), a **Goals and evidence** table,
+  and turns a `[G#]` in the body into a link only when a stored item with a
+  valid URL carries that ref.
 - Only `observer` memory episodes from `end_of_day_goal_report` whose metadata
   has kind `end_of_day_goal_report` and schema
   `seraph.end_of_day_goal_report.v1` are listed. The repository reads at most

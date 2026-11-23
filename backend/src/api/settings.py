@@ -1559,14 +1559,18 @@ def _persist_repo_sandbox_selector_update(body: RepoSandboxSettingsRequest):
 
 
 @router.post("/settings/end-of-day-report/manual")
-async def run_manual_end_of_day_report(body: ManualReportRequest):
+async def run_manual_end_of_day_report(body: ManualReportRequest, request: Request):
     """Build/store a manual end-of-day report preview or operator-acknowledged send."""
+    from src.integrations.github_activity import request_lineage
     from src.scheduler.jobs.end_of_day_goal_report import run_manual_end_of_day_goal_report
 
     return await run_manual_end_of_day_goal_report(
         send_email=body.send_email,
         preview_acknowledged=body.preview_acknowledged,
         report_day=body.report_date,
+        # The report re-collects its day's GitHub activity first (#1264); the
+        # collection's audit event names the login that asked for the report.
+        requested_by=request_lineage(request),
     )
 
 

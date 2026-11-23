@@ -446,7 +446,7 @@ adoption, and zero POST/new-root adoption on every route.
 
 ## Addendum: local gh login as an activity read source (#1264)
 
-**Status:** Accepted for #1264 slice 1.
+**Status:** Accepted for #1264 (slice 1, the source; slice 2, its use in the end-of-day report).
 
 The operator's local `gh` login is Seraph's first ambient-credential source.
 It is ambient authority: `gh` normally holds full read and write access to
@@ -465,8 +465,8 @@ a workspace restore or rollback, a different `gh` account, the operator's
 switch-off, and a stop from another login of the workspace stop it.
 A login of another ownership identity of the same workspace (for example a
 login that lost the continuity cookie and recovery code and enrolled a new
-identity) sees that the source exists and its state, never its GitHub login,
-`gh` path, scope or items, and can stop it (#1270). Stopping only removes
+identity) sees that the source exists, its state and revision, never its
+GitHub login, `gh` path, scope, stopped reason or items, and can stop it (#1270). Stopping only removes
 authority; enabling, collecting and reading stay with the owning identity,
 which the operator gets back by recovering ownership.
 
@@ -475,6 +475,8 @@ The boundary is Seraph's own argv, not GitHub: one fixed
 with validated values, never `gh auth`, field flags, `--input`, `--paginate`,
 GraphQL or a full URL, with an environment built from nothing so no token,
 host or config override from Seraph's environment reaches `gh`. Seraph never
-reads the token. This read source grants no write authority and does not
+reads the token. The end-of-day report reads only the stored items; titles
+reach a model only when the operator ticked the separate model-analysis box,
+and never with a URL. This read source grants no write authority and does not
 change the mutation consent above. Changes to `backend/src/integrations/github_cli.py`
 are reviewed as authority changes.

@@ -50,8 +50,8 @@ Inbox, follow progress on the Work board, and help Seraph learn what helps you.
 
 Available workflows depend on permissions, configuration, and host support.
 See [Development Status](docs/implementation/STATUS.md) for exact limits and
-[v2026.11.19 release notes](docs/implementation/26-release-2026-11-19.md) for the
-latest Settings Model card, removal of Seraph-side cost limits and upgrade notes.
+[v2026.11.23 release notes](docs/implementation/27-release-2026-11-23.md) for the
+latest six-tab Settings, GitHub activity in the end-of-day report and upgrade notes.
 
 ## Quick Start
 

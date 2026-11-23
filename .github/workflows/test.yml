@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   docs-contract:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,7 +36,7 @@ jobs:
         working-directory: docs
 
   test-determinism:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -187,7 +187,7 @@ jobs:
           retention-days: 30
 
   frontend-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend

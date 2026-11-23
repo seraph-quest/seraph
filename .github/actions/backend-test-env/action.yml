@@ -70,14 +70,16 @@ runs:
         echo "version=$version" >> "$GITHUB_OUTPUT"
         # Read by install_chromium.sh and by the lanes' "Classify failures" step.
         echo "SERAPH_CI_INFRA_FILE=$RUNNER_TEMP/seraph-ci-infrastructure.txt" >> "$GITHUB_ENV"
+        echo "SERAPH_CI_CONFIG_FILE=$RUNNER_TEMP/seraph-ci-config.txt" >> "$GITHUB_ENV"
 
-    # The browser build depends only on the Playwright version (#1290).
+    # The browser build depends only on the Playwright version (#1290). The
+    # -v2 entries carry the seraph-chromium.sha256 manifest checked on restore.
     - name: Restore cached Playwright browsers
       id: browser-cache
       uses: actions/cache/restore@v4
       with:
         path: ~/.cache/ms-playwright
-        key: ms-playwright-chromium-${{ steps.playwright.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+        key: ms-playwright-chromium-${{ steps.playwright.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-v2
 
     - name: Install Chromium and verify its runtime libraries
       shell: bash
@@ -86,7 +88,14 @@ runs:
         PLAYWRIGHT_CACHE_HIT: ${{ steps.browser-cache.outputs.cache-hit }}
       run: |
         timeout 120 sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
-        timeout 480 bash "$GITHUB_ACTION_PATH/install_chromium.sh"
+        status=0
+        timeout 480 bash "$GITHUB_ACTION_PATH/install_chromium.sh" || status=$?
+        if [ "$status" -eq 124 ]; then
+          reason="Chromium setup step timed out after 480 s (exit 124)"
+          echo "$reason" >> "$SERAPH_CI_INFRA_FILE"
+          echo "::error title=CI infrastructure (not a test failure)::$reason"
+        fi
+        exit "$status"
 
     # Saved straight after a miss, whatever the tests later do. Concurrent
     # shards race for the same key; the losers only log a warning.

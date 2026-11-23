@@ -2051,20 +2051,28 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
             stop = source._repository_record(run, stop_owner.STOP_ID)
             unknown = source._repository_unknown_root_projection(run) if source._repository_record(
                 run, "repository:stop-uncertainty-successor:v1") is not None else None
+
+            def completion_rows_digest(*, identity_only):
+                # Since #1291 the request records enter by contact identity,
+                # so a charge recorded before a retry keeps this digest; an
+                # envelope written before then names whole rows (v1).
+                return source._source_digest({
+                    "domain": "repository.source_completion_rows." + ("v2" if identity_only else "v1"),
+                    "context": [[model.__tablename__, str(key), expected]
+                        for model, key, expected in context["rows"]],
+                    "proposal": [RepoRepairProposal.__tablename__, execution["proposal_id"], _canonical(proposal_json)],
+                    "approval": [ApprovalRequest.__tablename__, execution["approval_id"], _canonical(approval_json)],
+                    "reservations": [[InferenceCostReservation.__tablename__, key,
+                        _canonical(source.request_record_identity(json.loads(raw))) if identity_only else raw]
+                        for key, raw in sorted(accounting_rows.items())]})
             cas = {"before_revision": before, "post_revision": before + 1, "iteration_id": identity,
                 "producer_registration_digest": source._source_digest(registration),
                 "producer_completion_digest": source._source_digest(body),
                 "stop_digest": source._source_digest(stop) if stop else None,
                 "unknown_projection_digest": source._source_digest({key: getattr(unknown, key)
                     for key in unknown.__dataclass_fields__}) if unknown else None,
-                "rows_digest": source._source_digest({
-                    "domain": "repository.source_completion_rows.v1",
-                    "context": [[model.__tablename__, str(key), expected]
-                        for model, key, expected in context["rows"]],
-                    "proposal": [RepoRepairProposal.__tablename__, execution["proposal_id"], _canonical(proposal_json)],
-                    "approval": [ApprovalRequest.__tablename__, execution["approval_id"], _canonical(approval_json)],
-                    "reservations": [[InferenceCostReservation.__tablename__, key, raw]
-                        for key, raw in sorted(accounting_rows.items())]})}
+                "rows_digest": completion_rows_digest(identity_only=True)}
+            legacy_rows_digest = completion_rows_digest(identity_only=False)
             projection = _original_repository_cleanup_projection(registration, result)
             if producer_owner is not None:
                 # Preserve the actual original live witness bytes required by
@@ -2088,7 +2096,8 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
                         or type(original_cas["rows_digest"]) is not str
                         or not source._SHA.fullmatch(original_cas["rows_digest"])
                         or _canonical(existing_envelope["physical_projection"]) != _canonical(projection)
-                        or not _v4_root(run) and unknown is None and original_cas["rows_digest"] != cas["rows_digest"]
+                        or not _v4_root(run) and unknown is None
+                            and original_cas["rows_digest"] not in {cas["rows_digest"], legacy_rows_digest}
                         or _v4_root(run) and _canonical(existing_envelope["recovery_commitment"]) != _canonical(commitment)):
                     raise RepositorySourceRecoveryError("original_producer_orphan_epoch_changed")
                 # Rows digest is the first staging audit receipt, never a current

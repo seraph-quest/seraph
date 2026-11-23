@@ -43,6 +43,15 @@ def _staged(row):
     return _canonical(row.model_dump(mode="json"))
 
 
+def test_identity_binds_whether_the_contact_started_and_finished():
+    finished = source.request_record_digest(_row())
+    for state in ("released", "reserved", "contact_started"):
+        assert not source.request_record_digest_matches(_row(state=state), finished), state
+    assert not source.request_record_digest_matches(_row(contact_started_at=None), finished)
+    assert source.request_record_identity(_row())["contacted"] is True
+    assert source.request_record_identity(_row(state="released"))["finished"] is False
+
+
 def test_identity_digest_ignores_a_recorded_charge_and_binds_the_contact():
     before = _row()
     after = _charged(before)
@@ -92,8 +101,30 @@ def test_staged_row_may_only_gain_a_charge():
             lambda row: _row(**{**_charged(row).model_dump(), "provider_operation_id": "near-2"})),
         "contact changed": (before, lambda row: _row(**{**_charged(row).model_dump(), "payload_digest": "f" * 64})),
     }
+    settled = _row(state="settled", actual_cost_microusd=5, recovery_reason=None, revision=5)
+    refused.update({
+        "settled request id appears": (settled,
+            lambda row: _row(**{**row.model_dump(), "provider_operation_id": "near-new", "revision": 6})),
+        "unknown reason changed": (before,
+            lambda row: _row(**{**row.model_dump(), "recovery_reason": "provider_call_failed", "revision": 3})),
+        "unknown evidence appended": (before, lambda row: _row(**{**row.model_dump(), "revision": 3,
+            "evidence_json": json.dumps(json.loads(row.evidence_json) + [{"kind": "unknown"}])})),
+        "revision backwards": (settled, lambda row: _row(**{**row.model_dump(), "revision": 1})),
+        "charge with revision backwards": (before, lambda row: _row(**{**_charged(row).model_dump(), "revision": 1})),
+        "negative amount": (before, lambda row: _row(**{**_charged(row).model_dump(), "actual_cost_microusd": -7})),
+        "no evidence appended": (before, lambda row: _row(**{**_charged(row).model_dump(), "evidence_json": row.evidence_json})),
+        "timestamp backwards": (before, lambda row: _row(**{**_charged(row).model_dump(),
+            "updated_at": row.updated_at - timedelta(days=1)})),
+        "staged unknown already priced": (_row(actual_cost_microusd=3),
+            lambda row: _row(**{**_charged(row).model_dump(), "actual_cost_microusd": 9})),
+        "never contacted": (_row(contact_started_at=None), lambda row: _charged(row)),
+        "bound field changed": (before, lambda row: _row(**{**_charged(row).model_dump(), "priority": 51})),
+    })
     for name, (staged_row, change) in refused.items():
         assert not source.request_record_unchanged(change(staged_row), _staged(staged_row)), name
+    # A request id first reported with the recorded charge is accepted.
+    assert source.request_record_unchanged(_row(**{**_charged(before).model_dump(), "provider_operation_id": "near-1"}),
+        staged)
     assert not source.request_records_unchanged([], {before.operation_id: staged})
     assert not source.request_records_unchanged([before, _row(operation_id="remote:x")], {before.operation_id: staged})
 
@@ -117,3 +148,107 @@ def test_recovery_accepts_only_a_charge_recorded_since_the_response(recorded, cu
     record = {"state": recorded[0], "actual_cost_microusd": recorded[1]}
     row = _row(state=current[0], actual_cost_microusd=current[1])
     assert _charge_recorded_since(record, row) is accepted
+
+
+class _Rows:
+    """A session returning fixed current rows by primary key."""
+    def __init__(self, *rows):
+        self.rows = {row.operation_id if isinstance(row, InferenceCostReservation) else row.run_identity: row
+            for row in rows}
+
+    async def get(self, model, key, populate_existing=False):
+        return self.rows.get(key)
+
+
+def _finalizer_state(staged, monkeypatch):
+    from types import SimpleNamespace
+    from src.workflows import repo_repair_source_recovery as recovery
+    monkeypatch.setattr(recovery, "assert_repository_scoped_completion", lambda *args, **kwargs: None)
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    context = {"binding": SimpleNamespace(native_deadline_at=future), "run": SimpleNamespace(deadline_at=future)}
+    state = {"rows": {(InferenceCostReservation, staged.operation_id): _staged(staged)}, "phase": 0, "pending": None,
+        "bound": {"fence": SimpleNamespace(service=None), "job_id": "repository-root", "owner": None, "context": context}}
+    monkeypatch.setattr(source, "_recovered_finalizer_slot", lambda witness: {"state": state})
+    return state
+
+
+@pytest.mark.asyncio
+async def test_recovered_finalizer_row_recheck_accepts_only_a_recorded_charge(monkeypatch):
+    from src.workflows.job_runtime import DurableJobLeaseError
+    before = _row()
+    state = _finalizer_state(before, monkeypatch)
+    # Reaches the Root lookup only after every staged row passed.
+    class Reached(Exception):
+        pass
+    class Jobs:
+        async def _fetch(self, db, job_id):
+            raise Reached()
+    with pytest.raises(Reached):
+        await source._recheck_recovered_finalizer_rows(_Rows(_charged(before)), Jobs(), state, object())
+    with pytest.raises(DurableJobLeaseError, match="complete current rows changed"):
+        await source._recheck_recovered_finalizer_rows(
+            _Rows(_row(**{**_charged(before).model_dump(), "payload_digest": "f" * 64})), Jobs(), state, object())
+
+
+@pytest.mark.asyncio
+async def test_recovered_finalizer_capture_and_readback_carry_a_recorded_charge(monkeypatch):
+    from contextlib import asynccontextmanager
+    from src.workflows.job_runtime import DurableJobLeaseError
+    before = _row()
+    charged = _charged(before)
+    state = _finalizer_state(before, monkeypatch)
+    pending = {"entered": True, "kind": "checkpoint", "after": None, "job_id": "repository-root",
+        "since": datetime.now(timezone.utc) - timedelta(hours=1)}
+    state["pending"] = pending
+    with pytest.raises(DurableJobLeaseError, match="exact original write delta changed"):
+        await source.capture_recovered_repository_final_writer(None,
+            _Rows(_row(**{**charged.model_dump(), "job_fencing_token": 10})), None,
+            completion_witness=object(), kind="checkpoint")
+    await source.capture_recovered_repository_final_writer(None, _Rows(charged), None,
+        completion_witness=object(), kind="checkpoint")
+    assert pending["after"] == {(InferenceCostReservation, before.operation_id): _staged(charged)}
+
+    class Jobs:
+        def __init__(self, row):
+            self.row = row
+
+        @asynccontextmanager
+        async def _session(self):
+            yield _Rows(self.row)
+    # The committed readback refuses a changed contact and keeps the charged row.
+    with pytest.raises(DurableJobLeaseError, match="committed readback changed"):
+        await source.observe_recovered_repository_final_writer(
+            Jobs(_row(**{**charged.model_dump(), "payload_digest": "f" * 64})), completion_witness=object(), kind="checkpoint")
+    await source.observe_recovered_repository_final_writer(Jobs(charged), completion_witness=object(), kind="checkpoint")
+    assert state["rows"] == {(InferenceCostReservation, before.operation_id): _staged(charged)}
+    assert state["phase"] == 1 and state["pending"] is None
+
+
+@pytest.mark.asyncio
+async def test_completion_post_context_accepts_only_a_recorded_charge(monkeypatch):
+    """Stop completion after producer cleanup (#1291, B2): the committed rows
+    staged with the completion witness may only gain a recorded charge."""
+    from src.workflows import repo_repair_source_recovery as recovery
+    from src.workflows.job_runtime import DurableJobLeaseError
+    before = _row()
+    stop = {"schema": "repository.stop_intent.v2"}
+    run = WorkflowRunState(run_identity="repository-root", workflow_name="repository", revision=8)
+    staged_run = WorkflowRunState(run_identity="repository-root", workflow_name="repository", revision=7)
+    staged_static = {"rows": "static"}
+    monkeypatch.setattr(recovery, "assert_repository_completion_witness", lambda *args, **kwargs: None)
+    monkeypatch.setattr(recovery, "repository_completion_context",
+        lambda witness: {"run": staged_run, "owner": "owner", "static_rows": staged_static})
+    monkeypatch.setattr(recovery, "repository_completion_post_cas", lambda witness: {
+        "before_revision": 7, "post_revision": 8, "stop_digest": source._source_digest(stop)})
+    monkeypatch.setattr(recovery, "repository_completion_committed_rows",
+        lambda witness: ((InferenceCostReservation, before.operation_id, _staged(before)),))
+    monkeypatch.setattr(source, "read_repository_inventory", lambda run: {"schema": "repository.checkpoint_inventory.v4"})
+    monkeypatch.setattr(source, "_repository_record", lambda run, identity: stop)
+    monkeypatch.setattr(source, "_stop_static_rows_match", lambda *args: True)
+    context = {"run": run, "owner": "owner", "static_rows": staged_static}
+    assert await source._validate_repository_completion_post_context_sql(_Rows(_charged(before)),
+        None, None, witness=object(), context=context) is True
+    with pytest.raises(DurableJobLeaseError, match="completion row changed"):
+        await source._validate_repository_completion_post_context_sql(
+            _Rows(_row(**{**_charged(before).model_dump(), "job_id": "other-root"})),
+            None, None, witness=object(), context=context)

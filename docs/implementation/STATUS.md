@@ -40,7 +40,11 @@ original-cost or iteration dollar limit since #1284,
 [ADR-037](./decisions/037-no-local-cost-limits.md)). Repository evidence binds
 each request record's contact identity, not its charge, so recording the charge
 of an unpriced iteration during or after the repair leaves the repair, its stop
-and its recovery intact (#1291). Each run
+and its recovery intact (#1291). Evidence written before that change bound whole
+rows: a repair already in flight at upgrade can still stop if its charge is then
+recorded, and on a pre-v4 root a producer-recovery retry whose cleanup envelope was
+written before the upgrade refuses (`original_producer_orphan_epoch_changed`) after
+a charge is recorded. Each run
 records a local patch artifact and the actual requested command output. A requested
 check that exits non-zero continues into the next bounded iteration without renewing
 those limits. Base drift or a dirty live tree blocks before execution; the live tree

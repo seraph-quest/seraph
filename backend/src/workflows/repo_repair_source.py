@@ -322,7 +322,8 @@ async def _validate_repository_completion_post_context_sql(db, service, jobs, *,
         raise DurableJobLeaseError("authenticated repository completion rows missing")
     for model, key, expected in committed:
         current = await db.get(model, key, populate_existing=True)
-        if current is None or _canonical(current.model_dump(mode="json")) != expected:
+        # A request record may only have gained a recorded charge (#1291).
+        if current is None or not committed_row_unchanged(current, expected):
             raise DurableJobLeaseError("authenticated repository completion row changed")
     # Cleanup changes only Root bookkeeping. The original snapshot continues
     # to bind every non-Root byte and the Root's actual static values.
@@ -582,7 +583,11 @@ def request_record_identity(row) -> dict:
     """The fields of a request record that identify its provider contact."""
     data = _request_record_json(row)
     return {"schema": _REQUEST_RECORD_IDENTITY_SCHEMA,
-        **{name: data[name] for name in _REQUEST_RECORD_IDENTITY_FIELDS}}
+        **{name: data[name] for name in _REQUEST_RECORD_IDENTITY_FIELDS},
+        # Whether the provider was contacted and whether that call finished;
+        # recording a charge changes neither.
+        "contacted": data["contact_started_at"] is not None,
+        "finished": data["state"] in _FINISHED_REQUEST_STATES}
 
 
 def request_record_digest(row) -> str:
@@ -608,13 +613,21 @@ def request_records_digest_matches(rows, recorded) -> bool:
         _source_digest([_request_record_json(row) for row in rows])}
 
 
-def request_record_unchanged(row, expected) -> bool:
-    """A request record staged earlier is unchanged, or a charge was recorded.
+# The only columns a recorded charge changes (``settle_inference_cost``).
+_REQUEST_RECORD_CHARGE_FIELDS = frozenset({"state", "actual_cost_microusd", "provider_operation_id",
+    "recovery_reason", "evidence_json", "revision", "updated_at"})
 
-    ``expected`` is the canonical row JSON that was staged. Only a finished row
-    may differ, only in its charge: an ``unknown`` row may become ``settled``
-    with an amount, a known provider request id never changes, and evidence is
-    only appended. The contact identity and finished state must hold.
+
+def request_record_unchanged(row, expected) -> bool:
+    """A request record staged earlier is unchanged, or exactly one recorded
+    charge was added to it (#1291).
+
+    ``expected`` is the canonical row JSON that was staged. Byte-equal rows
+    match. Otherwise the staged row must be ``unknown`` with no amount and the
+    current row ``settled`` with a non-negative integer amount; every column
+    other than the charge columns is identical; a known provider request id
+    is unchanged; evidence gains at least one entry and keeps its prefix; the
+    revision and timestamp move forward.
     """
     from src.workflows.job_runtime import _canonical
     current = _request_record_json(row)
@@ -623,17 +636,21 @@ def request_record_unchanged(row, expected) -> bool:
     try:
         before = json.loads(expected) if isinstance(expected, str) else dict(expected)
         before_evidence, current_evidence = json.loads(before["evidence_json"]), json.loads(current["evidence_json"])
-        same_contact = request_record_identity(current) == request_record_identity(before)
+        moved_forward = (datetime.fromisoformat(current["updated_at"]) >= datetime.fromisoformat(before["updated_at"])
+            and type(current["revision"]) is int and type(before["revision"]) is int
+            and current["revision"] > before["revision"])
     except (KeyError, TypeError, ValueError):
         return False
-    charge_recorded = ((before["state"], before["actual_cost_microusd"]) == (current["state"], current["actual_cost_microusd"])
-        or (before["state"] == "unknown" and before["actual_cost_microusd"] is None
-            and current["state"] == "settled" and type(current["actual_cost_microusd"]) is int))
-    return bool(same_contact and charge_recorded
-        and before["state"] in _FINISHED_REQUEST_STATES and current["state"] in _FINISHED_REQUEST_STATES
+    return bool(set(current) == set(before)
+        and all(current[name] == before[name] for name in before if name not in _REQUEST_RECORD_CHARGE_FIELDS)
+        and before["state"] == "unknown" and before["actual_cost_microusd"] is None
+        and current["state"] == "settled" and type(current["actual_cost_microusd"]) is int
+        and current["actual_cost_microusd"] >= 0 and before["contact_started_at"] is not None
         and (before["provider_operation_id"] is None or current["provider_operation_id"] == before["provider_operation_id"])
         and type(before_evidence) is list and type(current_evidence) is list
-        and current_evidence[:len(before_evidence)] == before_evidence)
+        and len(current_evidence) > len(before_evidence)
+        and current_evidence[:len(before_evidence)] == before_evidence
+        and moved_forward)
 
 
 def _recorded_final_accounting_digest(rows, evidence) -> str:
@@ -3245,7 +3262,7 @@ async def _recheck_recovered_finalizer_rows(db, jobs, state, witness):
         jobs=jobs, job_id=bound["job_id"], owner=bound["owner"])
     for (model, key), expected in state["rows"].items():
         row = await db.get(model, key, populate_existing=True)
-        if row is None or _canonical(row.model_dump(mode="json")) != expected:
+        if row is None or not committed_row_unchanged(row, expected):
             raise DurableJobLeaseError("recovered finalizer complete current rows changed")
         if isinstance(row, OperatorSession) and (row.revoked_at is not None or row.replaced_by_id or row.is_bearer_tombstone
                 or _as_utc(row.idle_expires_at) <= _utc_now() or _as_utc(row.absolute_expires_at) <= _utc_now()):
@@ -3417,6 +3434,14 @@ async def capture_recovered_repository_final_writer(jobs, db, run, *, completion
             raise DurableJobLeaseError("recovered finalizer row disappeared")
         current, old = actual.model_dump(mode="json"), json.loads(raw)
         expected = old
+        from src.db.models import InferenceCostReservation
+        if isinstance(actual, InferenceCostReservation):
+            # No finalizer write touches a request record; it may only gain a
+            # recorded charge (#1291), carried forward as the current row.
+            if not request_record_unchanged(actual, raw):
+                raise DurableJobLeaseError("recovered finalizer exact original write delta changed")
+            after[identity] = _canonical(current)
+            continue
         if kind == "publish":
             binding = state["bound"]["context"]["binding"]
             expected = _recovered_publish_delta(old, current, pending, timestamp,
@@ -3503,7 +3528,7 @@ async def observe_recovered_repository_final_writer(jobs, *, completion_witness,
     async with jobs._session() as db:
         for (model, key), expected in pending["after"].items():
             row = await db.get(model, key, populate_existing=True)
-            if row is None or _canonical(row.model_dump(mode="json")) != expected:
+            if row is None or not committed_row_unchanged(row, expected):
                 raise DurableJobLeaseError("recovered finalizer committed readback changed")
         if kind == "terminal":
             from src.db.models import WorkBoardEvent

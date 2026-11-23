@@ -217,7 +217,7 @@ async def reserve_recovery(jobs, owner, task_id, request):
                 raise BoardError("research_group_changed", "Research child lineage changed", status_code=409)
             cost = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.job_id == child.run_identity))
             if cost and (cost.state in {"contact_started", "unknown"} or cost.recovery_reason == "provider_contact_denied"):
-                raise BoardError("research_contact_unresolved", "The original contact outcome is uncertain; it is never sent again", status_code=409)
+                raise BoardError("research_contact_unresolved", "The original provider request was already sent; recovery never sends it again", status_code=409)
             if child.status == "running":
                 # Output is written only after the actual broker callback and
                 # settlement returned. An expired lease alone is insufficient.

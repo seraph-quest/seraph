@@ -1035,8 +1035,13 @@ whose first element names chat's state in plain words with one button, and
 **Allow and turn on chat** saves the operator's own tick (never pre-ticked) on
 the unchanged stored slot without re-entering the key, runs the free catalog
 check, then only the missing chat checks whose cost was shown before the
-click. The previous tab content sits in one closed "Advanced and diagnostics"
-fold. Blocked chat messages are provider-neutral and the WebSocket error frame
+click. The previous tab content sat in one closed "Advanced and diagnostics"
+fold until #1280 PR 3 moved it: the screenshot folder and reports to
+Automation, and the raw runtime, route, NEAR slot, OpenRouter, cost ledger and
+canary output to closed Diagnostics folds; the Model tab now shows the card
+plus one-line Screenshot analysis and Memory search rows (memory search says
+plainly that no embedding model is usable; it has no turn-on control). See the
+[Current App Guide](./12-current-app-guide.md#settings-tabs-1280). Blocked chat messages are provider-neutral and the WebSocket error frame
 carries `code`, `recovery_action` and `settings_section`, rendered as an **Open
 Settings** button; the status line names the effective route ("Chat is using
 DeepSeek V4.1 Flash via NEAR.") and is omitted whenever the full readiness
@@ -1239,7 +1244,7 @@ usefulness remain externally unverified. See the [setup guide](./12-current-app-
 
 Daily-use readiness ([#1068](https://github.com/seraph-quest/seraph/issues/1068))
 is **Partial** on this branch: Settings (then "Models & OpenRouter", now the
-Model tab's Advanced and diagnostics fold, #1280) proposes chat-ready
+Diagnostics tab's Retired OpenRouter and Capability checks folds, #1280) proposes chat-ready
 text capabilities (`streaming`, `tool_use`), an explicit context window
 decoupled from the output cap, dollar-denominated ceiling/request bound, a
 selectable proof lifetime up to 24h, and one Prove route action whose canaries

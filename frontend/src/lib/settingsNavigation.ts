@@ -39,7 +39,17 @@ export type SettingsSectionId =
   | "discover"
   | "mcp"
   /** Background inference jobs, which moved from the Model fold to Automation. */
-  | "background-jobs";
+  | "background-jobs"
+  /** #1280 PR 3: pieces of the old first tab's "Advanced and diagnostics" fold. */
+  | "screenshot-folder"
+  | "reports"
+  | "runtime-host"
+  | "model-routes"
+  | "near-slots"
+  | "openrouter"
+  | "near-text"
+  | "cost-ledger"
+  | "capability-checks";
 
 /** Where a section id lands: its tab, and the in-tab anchor to scroll to. */
 export interface SettingsSectionTarget {
@@ -65,12 +75,22 @@ export const SETTINGS_SECTION_TARGETS: Readonly<Record<SettingsSectionId, Settin
   guardian: { tab: "automation", anchor: "guardian" },
   "repo-sandbox": { tab: "automation", anchor: "repo-sandbox" },
   "background-jobs": { tab: "automation", anchor: "background-jobs" },
+  "screenshot-folder": { tab: "automation", anchor: "screenshot-folder" },
+  reports: { tab: "automation", anchor: "reports" },
   extensions: { tab: "extensions" },
   skills: { tab: "extensions", anchor: "skills" },
   discover: { tab: "extensions", anchor: "discover" },
   mcp: { tab: "extensions", anchor: "mcp" },
   diagnostics: { tab: "diagnostics" },
   audit: { tab: "diagnostics", anchor: "audit" },
+  // Diagnostics folds; a deep link opens the fold it names.
+  "runtime-host": { tab: "diagnostics", anchor: "runtime-host" },
+  "model-routes": { tab: "diagnostics", anchor: "model-routes" },
+  "near-slots": { tab: "diagnostics", anchor: "near-slots" },
+  openrouter: { tab: "diagnostics", anchor: "openrouter" },
+  "near-text": { tab: "diagnostics", anchor: "near-text" },
+  "cost-ledger": { tab: "diagnostics", anchor: "cost-ledger" },
+  "capability-checks": { tab: "diagnostics", anchor: "capability-checks" },
 };
 
 /** Resolve any current or legacy section id to its tab and anchor. */

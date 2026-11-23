@@ -84,8 +84,8 @@ diagnostics** on the same tab.
 requires the Cordis runtime (Docker images and `./manage.sh -e dev local up`
 already build it). On the first start after upgrading, Seraph moves chat to the
 Cordis loop once; if the runtime is missing, chat shows as blocked with the exact
-fix instead of falling back. Settings → Model → Advanced and diagnostics → Cordis
-runtime host can roll chat back to
+fix instead of falling back. Settings → Diagnostics → Runtime host can roll
+chat back to
 the legacy loop (and cut it over again); a rollback is never undone by a restart.
 
 Goal discovery (programme research) runs through the reviewed Cordis host. It

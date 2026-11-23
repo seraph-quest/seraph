@@ -1,6 +1,6 @@
 {
- "version": "2026.11.19",
- "build_id": "SERAPH_PRIME_v2026.11.19",
+ "version": "2026.11.23",
+ "build_id": "SERAPH_PRIME_v2026.11.23",
  "provider": "openrouter",
  "model": "x-ai/grok-4.1-fast",
  "model_label": "grok-4.1-fast",

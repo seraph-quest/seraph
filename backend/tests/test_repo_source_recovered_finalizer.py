@@ -45,7 +45,7 @@ async def _session_rows(db):
 
 
 async def _signed_ownerless_fixture(accounting_db, monkeypatch, language, *, failed=False,
-                                    unknown=False, stop_requested=False):
+                                    unknown=False, stop_requested=False, unknown_model_cost=False):
     from src.execution import repo_original_producer as producer
     from src.workflows import general_task_guard as guard
     from src.workflows import repo_repair_stop as stop
@@ -83,7 +83,8 @@ async def _signed_ownerless_fixture(accounting_db, monkeypatch, language, *, fai
     with monkeypatch.context() as patch:
         patch.setattr(recovery, "publish_original_repository_completion", capture)
         with pytest.raises(OriginalSignedBeforePublication):
-            await _actual_source_callback_journey(accounting_db, patch, failed, language)
+            await _actual_source_callback_journey(accounting_db, patch, failed, language,
+                unknown_model_cost=unknown_model_cost)
     jobs, original, kwargs = captured["jobs"], captured["original"], captured["kwargs"]
     registered = captured["registration"]
     before = await _rows(jobs)

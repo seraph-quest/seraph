@@ -976,7 +976,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
         return next;
       });
       setReceipts((current) => ({ ...current, [item.id]: result.quiescent
-        ? result.status === "cancelled" ? "Cancellation confirmed · native work is quiescent." : "Native work is quiescent; Unknown outcome and cost liability remain retained."
+        ? result.status === "cancelled" ? "Cancellation confirmed · native work is quiescent." : "Native work is quiescent; the Unknown outcome is kept for review."
         : "Cancellation requested · waiting for native quiescence. Refresh to read back; no replay or authority renewal." }));
       detailCacheRef.current.delete(item.id); detailConfirmedRef.current.delete(item.id);
     } catch (error) {
@@ -984,7 +984,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
       const stale = error instanceof GuardianInboxApiError && error.status === 409;
       setActionError((current) => ({ ...current, [item.id]: stale
         ? "Opportunity changed. Refresh and review before cancelling again; no automatic resubmission."
-        : "Cancellation outcome Unknown. Refresh to inspect native quiescence and retained cost liability." }));
+        : "Cancellation outcome Unknown. Refresh to inspect native quiescence." }));
       if (stale) cancellationRequests.current.delete(id);
       setItems((current) => {
         const next = current.map((row) => row.id === item.id ? { ...row, cancel_allowed: false } : row);
@@ -1081,7 +1081,7 @@ export const GuardianInboxPanel = forwardRef<GuardianInboxPanelHandle, GuardianI
               {item.source_kind === "guardian_opportunity" ? <div className="cockpit-outcome-note">
                 <div>Model judgment · relevance {item.assessment?.relevance ?? "unknown"}/4 · confidence {item.assessment?.confidence ?? "unknown"}. Scores are not calibrated probabilities.</div>
                 <div>Assessment {item.opportunity_status ?? "unknown"} · reason {item.reason_code ?? "none"} · delivery {item.delivery_status ?? "unknown"} · no learning</div>
-                {item.opportunity_status === "unknown" ? <div>Outcome Unknown; retained inference liability. No automatic replay.</div> : null}
+                {item.opportunity_status === "unknown" ? <div>Outcome Unknown. No automatic replay.</div> : null}
                 {item.opportunity_status === "silent" ? <div>Silent assessment history; no proposed action.</div> : null}
                 {item.reason_code === "goal_review_required" ? <div>Goal review required. Review current Goal and watches before future assessment.</div> : null}
                 {item.assessment?.abstain_reason ? <div>Abstention: {item.assessment.abstain_reason}</div> : null}

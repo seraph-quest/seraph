@@ -782,7 +782,7 @@ describe('RepoRepairInspector original Source recovery readback', () => {
     const holdLabel = physical_hold === null ? 'unknown' : physical_hold ? 'held' : 'released';
     expect(await screen.findByText(`Original physical hold: ${holdLabel}`)).toBeInTheDocument();
     expect(screen.getByText('Original result: unavailable')).toBeInTheDocument();
-    expect(screen.getByText(/Task and result remain Unknown\. Original reservation and contacted cost debt remain held\./)).toBeInTheDocument();
+    expect(screen.getByText(/Task and result remain Unknown\. The original repository reservation remains held; a contacted request is never sent again\./)).toBeInTheDocument();
     if (physical_hold === false) {
       expect(screen.getAllByText(/Original physical cleanup is verified; physical hold released\./)).toHaveLength(pendingStop ? 2 : 1);
       expect(screen.queryByText(/Physical cleanup is pending verification\./)).not.toBeInTheDocument();
@@ -1001,7 +1001,7 @@ describe('RepoRepairInspector literal authenticated Source captures R199', () =>
       if (source.status === 'unknown_external_effect') {
         expect(stop.pending).toBe(true);
         expect(screen.getByText(/unknown external effect/)).toBeInTheDocument();
-        expect(screen.getByText('Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification.')).toBeInTheDocument();
+        expect(screen.getByText('Unknown outcome. Reconcile the original repository execution and reservation. Physical cleanup is pending verification.')).toBeInTheDocument();
       }
       expectNoRepositoryEffects();
       expect(screen.getByText(stop.pending ? 'Original reservation remains held. Physical cleanup is pending verification.' : 'Original repository stop recorded.')).toBeInTheDocument();

@@ -154,7 +154,7 @@ describe("GoalLoopPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review assessment history" }));
     await screen.findByText("unknown · Assessment contact uncertain");
     expect(fetchMock.mock.calls[1][0]).toContain("/api/guardian/opportunities?goal_id=g1&limit=20");
-    expect(screen.getByText(/Outcome Unknown; retained inference liability/)).toBeInTheDocument();
+    expect(screen.getByText(/Outcome Unknown\. No automatic replay\./)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "More assessment history" })).toBeEnabled();
     fetchMock.mockRejectedValueOnce(new Error("History temporarily unavailable"));
     fireEvent.click(screen.getByRole("button", { name: "More assessment history" }));

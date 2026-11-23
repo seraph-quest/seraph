@@ -853,7 +853,7 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
                 raise RepositorySourceRecoveryError("original_repository_stop_completion_epoch_changed")
             for model, key, expected in data["committed_rows"]:
                 actual = await db.get(model, key, populate_existing=True)
-                if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                if actual is None or not source.committed_row_unchanged(actual, expected):
                     raise RepositorySourceRecoveryError("original_repository_stop_completion_epoch_changed")
         borrowed = data["physical"]
         if original_producer_completion_result(borrowed) is not data["result"]:
@@ -987,7 +987,7 @@ def repository_completion_knownpost_context(witness, *, service, jobs, owner, jo
 
 async def validate_repository_knownpost_projection_sql(db, service, jobs, *, witness, owner, job_id):
     from src.workflows.repo_repair_stop import _validate_repository_stop_context_rows_sql
-    from src.workflows.job_runtime import _canonical
+    source = _source()
     stage, staged = repository_completion_knownpost_context(witness, service=service,
         jobs=jobs, owner=owner, job_id=job_id)
     context = staged.data
@@ -995,13 +995,13 @@ async def validate_repository_knownpost_projection_sql(db, service, jobs, *, wit
         _knownpost_stage=stage)
     for model, key, expected in _COMPLETIONS[witness]["committed_rows"]:
         actual = await db.get(model, key, populate_existing=True)
-        if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+        if actual is None or not source.committed_row_unchanged(actual, expected):
             raise RepositorySourceRecoveryError("original_repository_knownpost_epoch_changed")
     accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
     from src.db.models import InferenceCostReservation
     expected = {key: raw for model, key, raw in _COMPLETIONS[witness]["committed_rows"]
         if model is InferenceCostReservation}
-    if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in accounting} != expected:
+    if not source.request_records_unchanged(accounting, expected):
         raise RepositorySourceRecoveryError("original_producer_accounting_changed")
     return stage, context
 
@@ -1720,6 +1720,14 @@ def _read_original_cleanup_envelope_if_present(service, relative_path):
             os.close(parent_fd)
 
 
+def _charge_recorded_since(accounting_record, row) -> bool:
+    """The row is as recorded at response time, or its charge was recorded
+    since: ``unknown`` (not priced yet) became ``settled`` (#1291)."""
+    return ((accounting_record["state"], accounting_record["actual_cost_microusd"]) == (row.state, row.actual_cost_microusd)
+        or (accounting_record["state"] == "unknown" and accounting_record["actual_cost_microusd"] is None
+            and row.state == "settled" and type(row.actual_cost_microusd) is int))
+
+
 async def _repository_original_accounting_rows(db, context, *, job_id):
     from sqlalchemy import select
     from src.db.models import InferenceCostReservation
@@ -1772,11 +1780,10 @@ async def _repository_original_accounting_rows(db, context, *, job_id):
         _, _, response, accounting_record = expected
         if response is not None:
             if (accounting_record is None or row.state not in source._FINISHED_REQUEST_STATES or row.contact_started_at is None
-                    or source._source_digest(row.model_dump(mode="json")) != response["accounting_digest"]
+                    or not source.request_record_digest_matches(row, response["accounting_digest"])
                     or accounting_record["accounting_digest"] != response["accounting_digest"]
                     or accounting_record["operation_id"] != row.operation_id
-                    or accounting_record["state"] != row.state
-                    or accounting_record["actual_cost_microusd"] != row.actual_cost_microusd
+                    or not _charge_recorded_since(accounting_record, row)
                     or accounting_record["bound_microusd"] != row.bound_microusd):
                 raise RepositorySourceRecoveryError("original_producer_accounting_changed")
     return rows
@@ -1904,7 +1911,7 @@ async def stage_repository_knownpost_completion(service, jobs, *, job_id, owner,
                         raise RepositorySourceRecoveryError("original_repository_knownpost_epoch_changed")
                     for model, key, expected in rows:
                         actual = await db.get(model, key, populate_existing=True)
-                        if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                        if actual is None or not source.committed_row_unchanged(actual, expected):
                             raise RepositorySourceRecoveryError("original_repository_knownpost_epoch_changed")
                         if isinstance(actual, OperatorSession) and (actual.revoked_at is not None
                                 or _as_utc(actual.idle_expires_at) <= _utc_now()
@@ -1913,12 +1920,12 @@ async def stage_repository_knownpost_completion(service, jobs, *, job_id, owner,
                         if isinstance(actual, WorkBoardInputArtifact) and _as_utc(actual.expires_at) <= _utc_now():
                             raise RepositorySourceRecoveryError("repository_source_recovery_source_expired")
                     current_accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
-                    if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in current_accounting} != accounting_rows:
+                    if not source.request_records_unchanged(current_accounting, accounting_rows):
                         raise RepositorySourceRecoveryError("original_producer_accounting_changed")
                     await db.commit()
                     for model, key, expected in rows:
                         actual = await db.get(model, key, populate_existing=True)
-                        if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
+                        if actual is None or not source.committed_row_unchanged(actual, expected):
                             raise RepositorySourceRecoveryError("original_repository_knownpost_readback_changed")
                 witness = _OriginalRepositoryProducerCompletionWitness()
                 _COMPLETIONS[witness] = {"service": service, "jobs": jobs, "context": context,
@@ -2044,20 +2051,28 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
             stop = source._repository_record(run, stop_owner.STOP_ID)
             unknown = source._repository_unknown_root_projection(run) if source._repository_record(
                 run, "repository:stop-uncertainty-successor:v1") is not None else None
+
+            def completion_rows_digest(*, identity_only):
+                # Since #1291 the request records enter by contact identity,
+                # so a charge recorded before a retry keeps this digest; an
+                # envelope written before then names whole rows (v1).
+                return source._source_digest({
+                    "domain": "repository.source_completion_rows." + ("v2" if identity_only else "v1"),
+                    "context": [[model.__tablename__, str(key), expected]
+                        for model, key, expected in context["rows"]],
+                    "proposal": [RepoRepairProposal.__tablename__, execution["proposal_id"], _canonical(proposal_json)],
+                    "approval": [ApprovalRequest.__tablename__, execution["approval_id"], _canonical(approval_json)],
+                    "reservations": [[InferenceCostReservation.__tablename__, key,
+                        _canonical(source.request_record_identity(json.loads(raw))) if identity_only else raw]
+                        for key, raw in sorted(accounting_rows.items())]})
             cas = {"before_revision": before, "post_revision": before + 1, "iteration_id": identity,
                 "producer_registration_digest": source._source_digest(registration),
                 "producer_completion_digest": source._source_digest(body),
                 "stop_digest": source._source_digest(stop) if stop else None,
                 "unknown_projection_digest": source._source_digest({key: getattr(unknown, key)
                     for key in unknown.__dataclass_fields__}) if unknown else None,
-                "rows_digest": source._source_digest({
-                    "domain": "repository.source_completion_rows.v1",
-                    "context": [[model.__tablename__, str(key), expected]
-                        for model, key, expected in context["rows"]],
-                    "proposal": [RepoRepairProposal.__tablename__, execution["proposal_id"], _canonical(proposal_json)],
-                    "approval": [ApprovalRequest.__tablename__, execution["approval_id"], _canonical(approval_json)],
-                    "reservations": [[InferenceCostReservation.__tablename__, key, raw]
-                        for key, raw in sorted(accounting_rows.items())]})}
+                "rows_digest": completion_rows_digest(identity_only=True)}
+            legacy_rows_digest = completion_rows_digest(identity_only=False)
             projection = _original_repository_cleanup_projection(registration, result)
             if producer_owner is not None:
                 # Preserve the actual original live witness bytes required by
@@ -2081,7 +2096,8 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
                         or type(original_cas["rows_digest"]) is not str
                         or not source._SHA.fullmatch(original_cas["rows_digest"])
                         or _canonical(existing_envelope["physical_projection"]) != _canonical(projection)
-                        or not _v4_root(run) and unknown is None and original_cas["rows_digest"] != cas["rows_digest"]
+                        or not _v4_root(run) and unknown is None
+                            and original_cas["rows_digest"] not in {cas["rows_digest"], legacy_rows_digest}
                         or _v4_root(run) and _canonical(existing_envelope["recovery_commitment"]) != _canonical(commitment)):
                     raise RepositorySourceRecoveryError("original_producer_orphan_epoch_changed")
                 # Rows digest is the first staging audit receipt, never a current
@@ -2143,7 +2159,7 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
                                 iteration_index=iteration_index) != registration or current_unknown != unknown):
                             raise RepositorySourceRecoveryError("original_producer_completion_epoch_changed")
                         current_accounting = await _repository_original_accounting_rows(db, context, job_id=job_id)
-                        if {row.operation_id: _canonical(row.model_dump(mode="json")) for row in current_accounting} != accounting_rows:
+                        if not source.request_records_unchanged(current_accounting, accounting_rows):
                             raise RepositorySourceRecoveryError("original_producer_accounting_changed")
                         live_proposal = await db.get(RepoRepairProposal, execution["proposal_id"], populate_existing=True)
                         live_approval = await db.get(ApprovalRequest, execution["approval_id"], populate_existing=True)

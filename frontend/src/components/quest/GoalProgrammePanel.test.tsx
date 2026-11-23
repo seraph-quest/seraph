@@ -124,7 +124,7 @@ describe("Goal programme cockpit journey", () => {
     renderEditor();
     fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
     await screen.findByText(/External effect: unknown/);
-    expect(screen.getByText("Original accounting liability is unresolved.")).toBeInTheDocument();
+    expect(screen.getByText("A provider request from this run is in progress or not priced yet.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
   });

@@ -29,7 +29,7 @@ export function TelegramTaskNotice({ task, ownerSessionId }: {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ expected_revision: task.task_revision, idempotency_key: request.key }),
         });
-        if (!queued.ok) throw new Error("Pair Telegram and grant transit consent in Settings → Telegram, then refresh the current task.");
+        if (!queued.ok) throw new Error("Pair Telegram and grant transit consent in Settings → Accounts → Telegram, then refresh the current task.");
         const value = await queued.json();
         if (captured !== current.current) return;
         if (typeof value.id !== "string" || value.id.length > 128) throw new Error(recovery);

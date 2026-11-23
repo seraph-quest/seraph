@@ -580,3 +580,25 @@ async def test_the_owners_own_switch_off_is_audited(client, async_db, clock, gh_
                               json={"expected_revision": 1})
     assert stale.status_code == 409
     assert len([item for item in recorded if item["name"] == "source_revoke"]) == 1
+
+
+# #1280 PR 2: Settings has six tabs; GitHub lives under Accounts, and
+# ownership enrollment is the bar above the cockpit, not a Settings tab.
+_ENABLE_AGAIN_CASES = [
+    ("stopped", "gh_login_changed"), ("stopped", "workspace_restored"), ("stopped", "owner_identity_revoked"),
+    ("stopped", "stopped_by_another_identity"), ("stopped", None), ("blocked", "owner_identity_revoked"),
+    ("blocked", "local_root_retired"), ("blocked", "gh_login_changed"),
+]
+
+
+@pytest.mark.parametrize(("status", "reason_code"), _ENABLE_AGAIN_CASES)
+def test_enable_again_messages_name_the_accounts_tab(status, reason_code):
+    message = github_activity.activity_status_message(status, reason_code, login="octo", current_login="other")
+    assert "Settings → Accounts → GitHub" in message
+    assert "Settings → GitHub" not in message
+
+
+def test_ownership_required_message_points_at_the_ownership_bar():
+    message = github_activity.OWNERSHIP_REQUIRED_MESSAGE
+    assert "Operator ownership and recovery, the bar above the cockpit" in message
+    assert "Settings" not in message

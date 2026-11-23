@@ -15,7 +15,7 @@ const state = { task_id: task.task_id, task_revision: 4, attempt_id: "original-a
   children: [{ job_id: "research:original-parent:child:0", status: "paused", reason: "research_prompt_ready", attempt_count: 1, lease_present: false }],
   costs: [{ operation_id: "remote:research:original-parent:child:0", job_id: "research:original-parent:child:0", state: "reserved", bound_microusd: 100, actual_cost_microusd: null, contact_started: false, reason: null }],
   recoverable: true, cancel_available: true, report_available: false, no_learning: true, semantic_truth_verified: false,
-  recovery_limit: "Unknown contacts remain held; original operation only." };
+  recovery_limit: "An uncertain contact is never sent again; original operation only." };
 beforeEach(() => { vi.restoreAllMocks(); vi.mocked(apiFetch).mockReset(); window.sessionStorage.clear(); });
 
 it("retains the exact recovery before POST and retries it unchanged after remount", async () => {
@@ -37,6 +37,21 @@ it("retains the exact recovery before POST and retries it unchanged after remoun
   fireEvent.click(await screen.findByRole("button", { name: "Retry exact retained recover" }));
   await waitFor(() => expect(readResearchPending(key)).toBeNull());
   expect(bodies).toHaveLength(2); expect(bodies[1]).toBe(bodies[0]);
+});
+
+it("labels each research request with the Spend history wording (#1291)", async () => {
+  const child = (index: number) => `research:original-parent:child:${index}`;
+  const row = (index: number, extra: Record<string, unknown>) => ({ operation_id: `remote:${child(index)}`, job_id: child(index),
+    bound_microusd: 0, actual_cost_microusd: null, contact_started: true, reason: null, ...extra });
+  vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ ...state, costs: [
+    row(0, { state: "unknown", reason: "provider_cost_readback_required" }),
+    row(1, { state: "settled", actual_cost_microusd: 3_200_000 }),
+  ] })));
+  render(<ResearchDossierPanel {...props} />);
+  expect(await screen.findByText("answered, not priced yet")).toBeInTheDocument();
+  expect(screen.getByText("priced · $3.20")).toBeInTheDocument();
+  expect(screen.queryByText(/held|reserve|allowance|provider_cost_readback_required/i)).toBeNull();
+  expect(screen.queryByText(/^finished/)).toBeNull();
 });
 
 it("sends no mutation when request retention is unavailable", async () => {

@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import src.db.engine as database
 from src.db.models import (
-    Goal, GuardianRoutine, Memory, MemoryStatus, OperatorIdentity,
+    Goal, GitHubActivitySource, GuardianRoutine, Memory, MemoryStatus, OperatorIdentity,
     OperatorSession, OperatorContinuityCredential, OperatorRecoveryJournal,
     WorkBoardTask, WorkBoardInputArtifact, WorkBoardAttempt, WorkBoardStatus, WorkflowRunState,
 )
@@ -231,6 +231,14 @@ async def revoke_identity(operator):
             OperatorSession.operator_identity_id == identity.id,
             OperatorSession.revoked_at.is_(None),
         ).values(revoked_at=now))
+        # The identity's GitHub activity source stops with it (#1270), in the
+        # same transaction, so its row says what is true instead of staying
+        # "active" with every later run blocked.
+        await db.execute(update(GitHubActivitySource).where(
+            GitHubActivitySource.owner_identity_id == identity.id,
+            GitHubActivitySource.state == "active",
+        ).values(state="stopped", stopped_reason="owner_identity_revoked",
+                 revision=GitHubActivitySource.revision + 1, updated_at=now))
 
 
 def _record_statement(kind, identity_id):

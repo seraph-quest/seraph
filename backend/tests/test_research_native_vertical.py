@@ -104,10 +104,12 @@ class ProviderBoundary(httpx.AsyncBaseTransport):
                         "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
                     "uncertainty": ["Mechanical citation validation does not establish semantic truth."],
                     "contradictions": [], "no_learning": True})
+            usage = {"cost": "0.000150" if len(self.calls) == 4 and self.controls.get("overrun") else "0.000002",
+                "prompt_tokens": 10, "completion_tokens": 10}
+            if self.controls.get("unpriced") and len(body["messages"]) != 1:
+                del usage["cost"]  # answered, but the provider has not priced it (#1295)
             payload = {"id": "intercepted-"+str(len(self.calls)),
-                "choices": [{"message": {"role": "assistant", "content": content}}],
-                "usage": {"cost": "0.000150" if len(self.calls) == 4 and self.controls.get("overrun") else "0.000002",
-                    "prompt_tokens": 10, "completion_tokens": 10}}
+                "choices": [{"message": {"role": "assistant", "content": content}}], "usage": usage}
             return httpx.Response(200, request=request, headers={"content-type": "application/json"},
                 stream=ResponseBytes(json.dumps(payload).encode()))
         # Intercept the HTTP response after production DNS/IP policy and
@@ -153,7 +155,8 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     jobs = DurableJobRepository()
     await jobs.ensure_inference_ledger()
     calls = []
-    controls = {"overrun": scenario == "large_first_charge"}
+    controls = {"overrun": scenario == "large_first_charge", "unpriced": scenario in {"restart_written_outputs_unpriced", "cancel_after_unpriced_child"}}
+    written_outputs = {"restart_written_outputs", "restart_written_outputs_unpriced"}
     original_client = httpx.AsyncClient
     def clients(**kwargs):
         if "transport" not in kwargs:
@@ -286,7 +289,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 await asyncio.gather(running, return_exceptions=True)
             return
         snapshot_scenarios = {"snapshot_missing_group", "snapshot_stale_goal", "snapshot_expired"}
-        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued", *snapshot_scenarios}
+        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", *written_outputs, "cancel_funded_queued", "cancel_after_unpriced_child", *snapshot_scenarios}
         if scenario in recovery_scenarios:
             from src.workflows import research_coordinator as coordinator
             from src.workflows.research_accounting import fund_fixed_group
@@ -299,7 +302,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 if scenario != "restart_before_sources" and scenario not in snapshot_scenarios:
                     for child_id in creation["child_ids"]:
                         await coordinator._prepare_child(jobs, child_id, owner, {}, phase_binding)
-                if scenario in {"restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}:
+                if scenario in {"restart_funded_queued", *written_outputs, "cancel_funded_queued", "cancel_after_unpriced_child"}:
                     phase = await resume_parent(jobs, parent_id=parent_id, owner=owner,
                         phase="research_funding", expected_binding=phase_binding)
                     phase_binding.update(phase)
@@ -310,7 +313,16 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     for child_id in creation["child_ids"]:
                         child = await jobs.get_job(child_id)
                         await jobs.resume_job(child_id, expected_revision=child["revision"], reason="research_group_funded")
-                    if scenario == "restart_written_outputs":
+                    if scenario == "cancel_after_unpriced_child":
+                        # The first child is answered and succeeds; NEAR has
+                        # not priced it yet. The second stays funded, queued.
+                        first_child = creation["child_ids"][0]
+                        claimed = await jobs.claim_job(first_child, owner=owner, lease_seconds=120,
+                            continue_existing_attempt=True, claim_authority_check=coordinator._claim_guard(jobs, phase_binding))
+                        await provider.execute_funded_child(jobs, child_id=first_child, owner=owner,
+                            fence=claimed["lease"]["fencing_token"])
+                        assert (await jobs.get_job(first_child))["status"] == "succeeded"
+                    if scenario in written_outputs:
                         original_adopt = provider._adopt_child
                         async def interrupted_adoption(*args, **kwargs):
                             raise RuntimeError("declared crash boundary after actual reserved child output")
@@ -381,9 +393,14 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             state = await client.get("/api/work-board/tasks/"+task_id+"/research")
             assert state.status_code == 200, state.text
             original_state = state.json()
-            if scenario == "restart_written_outputs":
+            if scenario in written_outputs:
                 assert original_state["recoverable"] is True  # exact reserved physical output is visible to the Inspector
-            action = "cancel" if scenario == "cancel_funded_queued" else "recover"
+            if scenario == "restart_written_outputs_unpriced":
+                # #1295: both answered requests finished unpriced. They are not
+                # outstanding, so they do not block recovery (ADR-037).
+                unpriced = [cost for cost in original_state["costs"] if cost["contact_started"]]
+                assert len(unpriced) == 2 and all(cost["state"] == "unknown" for cost in unpriced)
+            action = "cancel" if scenario in {"cancel_funded_queued", "cancel_after_unpriced_child"} else "recover"
             if scenario == "restart_funded_queued":
                 from src.work_board.research_control import reserve_recovery
                 from src.work_board.research_contracts import ResearchControlRequest
@@ -409,6 +426,19 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             assert current_state["deadline_at"] == original_state["deadline_at"]
             (root/"research-restart-private-readback.json").write_text(json.dumps({"scenario": scenario,
                 "original": original_state, "control": recovered.json(), "provider_post_count": len(calls)}, indent=2))
+            if scenario == "cancel_after_unpriced_child":
+                # #1295: the answered child's unpriced request is finished, so
+                # it does not turn cancellation into an unresolved contact.
+                cancellation = recovered.json()["cancellation"]
+                assert cancellation["cancelled"] is True and cancellation["unknown_liability_preserved"] is False
+                by_job = {child["job_id"]: child["status"] for child in current_state["children"]}
+                assert sorted(by_job.values()) == ["cancelled", "succeeded"]
+                answered = next(cost for cost in current_state["costs"] if cost["contact_started"])
+                assert by_job[answered["job_id"]] == "succeeded" and answered["state"] == "unknown"
+                untouched = next(cost for cost in current_state["costs"] if not cost["contact_started"])
+                assert untouched["state"] == "released" and by_job[untouched["job_id"]] == "cancelled"
+                assert current_state["status"] == "cancelled" and len(calls) == 4
+                return
             if action == "cancel":
                 assert recovered.json()["cancellation"]["cancelled"] is True
                 assert current_state["status"] == "cancelled" and all(child["status"] == "cancelled" for child in current_state["children"])
@@ -426,6 +456,13 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
             assert replay.status_code == 200 and replay.json()["recovery"]["completed"] is True
             assert len(calls) == 5  # uncertain-response replay never adds another POST
+            if scenario == "restart_written_outputs_unpriced":
+                # At most once: recovery adopted the written outputs and sent
+                # neither contacted request again; both records stay unpriced.
+                final = await client.get("/api/work-board/tasks/"+task_id+"/research")
+                assert final.status_code == 200, final.text
+                assert sorted((cost["operation_id"], cost["state"]) for cost in final.json()["costs"] if cost["contact_started"]) == sorted(
+                    (cost["operation_id"], "unknown") for cost in unpriced)
             receipt = {"completed": 1}
         detail = await client.get("/api/work-board/tasks/"+task_id)
         (root/"research-vertical-private-readback.json").write_text(json.dumps({"label": "real public source; provider HTTP interception only",
@@ -513,7 +550,7 @@ async def test_large_first_charge_never_holds_prefunded_sibling_or_adoption(acco
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ["restart_before_sources", "restart_prompt_ready", "restart_funded_queued",
-    "restart_written_outputs", "cancel_funded_queued"])
+    "restart_written_outputs", "restart_written_outputs_unpriced", "cancel_funded_queued", "cancel_after_unpriced_child"])
 async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call_rows(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
 

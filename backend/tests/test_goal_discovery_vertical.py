@@ -107,7 +107,7 @@ def public_http_fixture():
     "empty_search", "captcha", "normalized_oversize", "raw_oversize", "unsupported_pdf", "unsupported_brief", "generation_ceiling",
     "active_strategy", "strategy_blocked", "strategy_changed", "revoke_untouched", "renew_untouched", "claimed_cleanup_denied",
     "cleanup_extra_effect", "cleanup_cost_row", "cleanup_wrong_issuer", "cleanup_cas_race", "expire_untouched",
-    "same_goal_unknown_generation", "strategy_malformed", "strategy_secret", "strategy_redaction_unavailable",
+    "same_goal_unknown_generation", "completed_unpriced", "strategy_malformed", "strategy_secret", "strategy_redaction_unavailable",
     "strategy_oversize", "strategy_authority", "strategy_private_extra", "strategy_task_method", "strategy_normalized",
     "strategy_late_oversize", "strategy_changed_after_query", "markup_drift", "narrow_queries", "narrow_sources",
     "narrow_search", "narrow_inference", "narrow_output", "narrow_global_output", "narrow_success", "manifest_receipt_missing",
@@ -212,6 +212,10 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
     socket_path, physical_contacts, physical_controls = public_http_fixture
     gateway = ModelBoundary()
     gateway.cost_nano = 2_000  # NEAR bills 2 micro-USD per request
+    # #1295: every request is answered but NEAR has not priced it yet, so its
+    # record finishes ``unknown``. That holds neither the lane nor the next
+    # occurrence (ADR-037).
+    gateway.billing_missing = scenario == "completed_unpriced"
     await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",))
     original_client = httpx.AsyncClient
     physical_controls["scenario"] = scenario
@@ -430,6 +434,13 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 original = await jobs.get_job(job["job_id"])
                 debt = await jobs.inference_accounting_snapshot(job_id=job["job_id"])
                 assert debt["operations"][0]["state"] == "unknown" and debt["unpriced_requests"] >= 1
+                # #1295: the lost outcome holds the occurrence through the run
+                # status and effect ledger, not the unpriced request record.
+                assert original["status"] not in {"succeeded", "degraded", "cancelled"}
+                history = await client.get(base + "/discovery")
+                assert history.status_code == 200, history.text
+                held_run = next(item for item in history.json()["runs"] if item["job_id"] == job["job_id"])
+                assert held_run["outstanding_held"] is True and held_run["accounting_liability"] is False
                 renewed_request = {**request, "expected_grant_revision": 1,
                     "public_brief": "A separately reviewed replacement for this same Goal"}
                 renewed_preview = await client.post(base + "/preview", json=renewed_request)
@@ -694,7 +705,15 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             same = await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
             assert same["job_id"] == job["job_id"] and len(calls) == 3
             snapshot = await jobs.inference_accounting_snapshot(job_id=job["job_id"])
-            assert len(snapshot["operations"]) == 3 and all(row["state"] == "settled" for row in snapshot["operations"])
+            expected_state = "unknown" if scenario == "completed_unpriced" else "settled"
+            assert len(snapshot["operations"]) == 3 and all(row["state"] == expected_state for row in snapshot["operations"])
+            if scenario == "completed_unpriced":
+                assert snapshot["unpriced_requests"] == 3
+                # At most once: the finished occurrence is never run again,
+                # so none of its contacted requests is sent a second time.
+                rerun = await service.run(job["job_id"])
+                assert rerun["status"] == "succeeded" and len(calls) == 3 and len(contacts) == 2
+                assert (await jobs.inference_accounting_snapshot(job_id=job["job_id"]))["operations"] == snapshot["operations"]
             original_clock = goal_programme_service._clock
             future = original_clock() + timedelta(days=1)
             monkeypatch.setattr(goal_programme_service, "_clock", lambda: future)
@@ -741,6 +760,9 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             assert recovery.status_code == 200, recovery.text
             history = await client.get(base + "/discovery")
             assert history.status_code == 200 and len(history.json()["runs"]) == 2, history.text
+            first = next(item for item in history.json()["runs"] if item["job_id"] == job["job_id"])
+            assert first["outstanding_held"] is False and first["accounting_liability"] is False
+            assert first["recovery"] is None
             selected_brief = await client.get(base + f"/{programme['id']}/discovery/{job['job_id']}/brief")
             assert selected_brief.status_code == 200 and selected_brief.json()["physical_readback"] is True, selected_brief.text
             assert len(selected_brief.json()["prepared_artifacts"]) == 1

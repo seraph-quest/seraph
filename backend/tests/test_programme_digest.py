@@ -59,6 +59,11 @@ async def test_source_eligibility_uses_real_scheduler_daily_occurrence_and_nativ
             assert scheduled.next_source_eligible_at == datetime(2026, 10, 10, tzinfo=timezone.utc)
         held = {**completed, "programme_id": "prior-generation", "status": "queued", "outstanding_held": True}
         assert digest.source_schedule(programme, [held], now).next_source_reason == "source_run_in_progress"
+        # #1295: ``accounting_liability`` is a request still in flight. A
+        # finished occurrence whose requests NEAR has not priced yet is
+        # projected as neither held nor liable, so the next slot is scheduled.
+        unpriced = {**completed, "external_effect_state": "settled"}
+        assert digest.source_schedule(programme, [unpriced], now).next_source_state == "scheduled"
         for change in ({"external_effect_state": "unknown"}, {"accounting_liability": True}, {"status": "failed"}):
             blocked = digest.source_schedule(programme, [{**held, **change}], now)
             assert blocked.next_source_state == "held" and blocked.next_source_eligible_at is None

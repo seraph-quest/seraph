@@ -349,7 +349,11 @@ running reviewed host or provider, discovery is blocked and visible rather than
 falling back to Python.
 
 Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
-held effects and cost liability. Selecting a completed brief performs an explicit
+held effects and any provider request still in flight. Only a request still in
+flight holds the occurrence ("A provider request from this run is still in
+flight."); a finished request NEAR has not priced yet holds nothing, so the next
+daily occurrence is admitted. A lost outcome stays held by the run status and
+effect ledger, and the original request is never sent again (#1295). Selecting a completed brief performs an explicit
 local readback under current owner and original generation checks. Private Goal
 text is excluded from the public model/search path. Source quotations remain
 untrusted data; mechanical citation/span verification does not establish semantic
@@ -3758,10 +3762,12 @@ Goal, and recovery cannot renew deadlines, attempts or call counts.
 
 Explicit recovery reserves a current phase on the same original Board attempt.
 It can continue the persisted source-ready, prompt-ready or funded queue, or
-adopt an exact reserved physical child output with settled accounting without
-another provider POST. A current Running worker without that completed-output
-proof remains blocked from recovery. Contacted work without verified output
-retains Unknown cost and effects; it is never blindly retried. Generic retry
+adopt an exact reserved physical child output whose request finished, priced or
+not priced yet, without another provider POST. A current Running worker without that completed-output
+proof remains blocked from recovery. A request still in flight blocks recovery;
+a finished request NEAR has not priced yet does not (#1295). Contacted work
+without verified output retains Unknown cost and effects; it is never blindly
+retried. Generic retry
 and unblock cannot create a replacement attempt for an admitted research task.
 
 Cancellation first fences the original operation. It closes only verified
@@ -3769,7 +3775,8 @@ lease-free waits or actual owned workers whose awaited completion is recorded.
 An expired lease or an empty process registry does not prove quiescence.
 Completed child outputs and actual charges remain visible. Uncertain
 source or provider work remains Unknown, and missing proof keeps cancellation
-pending. The inspector offers exact retained-request retry and explicit cost
+pending. A succeeded child whose request is not priced yet is finished and does
+not make the cancellation uncertain (#1295). The inspector offers exact retained-request retry and explicit cost
 recovery guidance. Corrupt or unavailable owner/session-scoped session storage
 blocks mutations; the full retained request is bounded to 16 KiB.
 

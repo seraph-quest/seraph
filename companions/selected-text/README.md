@@ -14,7 +14,7 @@ not proof of authorship, human intent or a trusted publisher.
    fixed profile with `python3 build.py --core-origin <exact-origin> --output
    <new-directory>`. HTTPS is required except same-host HTTP loopback. This
    command only copies the reviewed local adapter; it installs nothing.
-2. Under Seraph Settings → Native, inspect the existing installed optional
+2. Under Seraph Settings → Accounts → Native, inspect the existing installed optional
    device adapter and explicitly pair or rotate it. Enter its one-time locator
    and credential in the trusted companion configuration; no page script gets
    them. Legacy unowned credentials require deliberate rotation or re-pairing.

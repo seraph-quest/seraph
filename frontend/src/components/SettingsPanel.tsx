@@ -480,10 +480,14 @@ export function SettingsPanel() {
   // survives the open transition, which otherwise resets to the Model tab.
   // Old tab ids resolve to the tab that now holds them (#1280 PR 2).
   const requestedSectionRef = useRef<SettingsTabId | null>(null);
-  // A "model-card" focus hint (#1280) scrolls the Model card into view once
-  // the tab renders; an anchor scrolls the moved panel into view. The request
-  // counter re-runs the scroll on every deep link.
-  const [focusRequest, setFocusRequest] = useState<{ count: number; elementId: string | null }>({ count: 0, elementId: null });
+  // A deep link keeps its target in view (#1280 PR 2): a "model-card" focus
+  // hint targets the Model card, an anchor the moved panel. The counter makes
+  // every request a new anchor.
+  const [anchor, setAnchor] = useState<{ count: number; elementId: string } | null>(null);
+  const anchorCountRef = useRef(0);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const tabBarRef = useRef<HTMLDivElement>(null);
+  const tabContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const openSection = (event: SettingsOpenSectionEvent | undefined) => {
       const section = settingsSectionFrom(event?.section);
@@ -495,7 +499,8 @@ export function SettingsPanel() {
       const elementId = event?.focus === "model-card"
         ? SETTINGS_MODEL_CARD_ID
         : target.anchor ? settingsAnchorId(target.anchor) : null;
-      if (elementId) setFocusRequest((current) => ({ count: current.count + 1, elementId }));
+      anchorCountRef.current += 1;
+      setAnchor(elementId ? { count: anchorCountRef.current, elementId } : null);
     };
     appEventBus.on(SETTINGS_OPEN_SECTION_EVENT, openSection);
     return () => appEventBus.off(SETTINGS_OPEN_SECTION_EVENT, openSection);
@@ -506,18 +511,35 @@ export function SettingsPanel() {
       setActiveSection(requestedSectionRef.current ?? "model");
     } else if (!settingsPanelOpen && wasOpenRef.current) {
       setActiveSection("model");
+      setAnchor(null);
     }
     requestedSectionRef.current = null;
     wasOpenRef.current = settingsPanelOpen;
   }, [settingsPanelOpen]);
-  const handledFocusRef = useRef(0);
+  // Panels above the target load their data after the tab mounts and push it
+  // down. Re-place the target whenever the tab content (or the sticky tab bar)
+  // changes size, until the operator scrolls, types, touches or clicks inside
+  // Settings, switches tab, or closes it. No timer decides when it settles.
   useEffect(() => {
-    if (!settingsPanelOpen || !focusRequest.elementId || focusRequest.count === handledFocusRef.current) return;
-    const element = document.getElementById(focusRequest.elementId);
-    if (!element) return;
-    handledFocusRef.current = focusRequest.count;
-    element.scrollIntoView?.({ block: "start" });
-  }, [focusRequest, settingsPanelOpen, activeSection]);
+    const body = bodyRef.current;
+    if (!settingsPanelOpen || !anchor || !body) return;
+    const place = () => {
+      const bar = tabBarRef.current;
+      if (bar) body.style.setProperty("--settings-tabbar-offset", `${bar.offsetHeight + 8}px`);
+      document.getElementById(anchor.elementId)?.scrollIntoView?.({ block: "start" });
+    };
+    place();
+    const release = () => setAnchor((current) => current?.count === anchor.count ? null : current);
+    const interactions = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    for (const name of interactions) body.addEventListener(name, release, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    if (tabContentRef.current) observer?.observe(tabContentRef.current);
+    if (tabBarRef.current) observer?.observe(tabBarRef.current);
+    return () => {
+      for (const name of interactions) body.removeEventListener(name, release);
+      observer?.disconnect();
+    };
+  }, [anchor, settingsPanelOpen, activeSection]);
 
   const fetchSkills = useCallback(async () => {
     try {
@@ -675,8 +697,8 @@ export function SettingsPanel() {
             x
           </button>
         </div>
-        <div className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
-          <div className="flex flex-wrap gap-1 px-1">
+        <div ref={bodyRef} className="cockpit-modal-body cockpit-tone-scope cockpit-settings-scope flex flex-col gap-4">
+          <div ref={tabBarRef} className="cockpit-settings-tabbar flex flex-wrap gap-1 px-1">
             {SETTINGS_TABS.map((section) => (
               <button
                 key={section.id}
@@ -687,13 +709,14 @@ export function SettingsPanel() {
                     : "border-retro-text/15 text-retro-text/45 hover:text-retro-text"
                 }`}
                 aria-pressed={activeSection === section.id}
-                onClick={() => setActiveSection(section.id)}
+                onClick={() => { setAnchor(null); setActiveSection(section.id); }}
               >
                 {section.label}
               </button>
             ))}
           </div>
 
+          <div ref={tabContentRef} className="flex flex-col gap-4">
           {activeSection === "general" && (
           <>
           <SettingsGroup anchor="general">
@@ -845,7 +868,7 @@ export function SettingsPanel() {
 
           {activeSection === "automation" && (
           <>
-          <SettingsGroup anchor="workflows" title="Workflows">
+          <SettingsGroup anchor="workflows">
             <WorkflowPanel />
           </SettingsGroup>
           <SettingsGroup anchor="guardian" title="Guardian">
@@ -958,6 +981,8 @@ export function SettingsPanel() {
             <AuditLogPanel />
           </SettingsGroup>
           )}
+
+          </div>
 
           <div className="flex-1" />
           <div className="text-[9px] text-retro-text/20 px-1 pb-1">

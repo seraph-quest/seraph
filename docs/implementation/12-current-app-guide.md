@@ -1799,7 +1799,8 @@ is shown as `route_revoke: degraded` under Settings and never stops startup.
 
 Settings has six tabs and always opens on **Model**. The panels moved from the
 earlier 17 tabs unchanged; a merged tab only adds a heading naming the old tab
-above each panel it absorbed.
+above each panel it absorbed, except where the panel already shows that name
+(General, Workflows, Repo Sandbox, background inference, Skills, Discover, MCP).
 
 | Tab | Holds (old tab) |
 | --- | --- |

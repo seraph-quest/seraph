@@ -37,7 +37,9 @@ export type SettingsSectionId =
   | "forgejo"
   | "skills"
   | "discover"
-  | "mcp";
+  | "mcp"
+  /** Background inference jobs, which moved from the Model fold to Automation. */
+  | "background-jobs";
 
 /** Where a section id lands: its tab, and the in-tab anchor to scroll to. */
 export interface SettingsSectionTarget {
@@ -62,6 +64,7 @@ export const SETTINGS_SECTION_TARGETS: Readonly<Record<SettingsSectionId, Settin
   workflows: { tab: "automation", anchor: "workflows" },
   guardian: { tab: "automation", anchor: "guardian" },
   "repo-sandbox": { tab: "automation", anchor: "repo-sandbox" },
+  "background-jobs": { tab: "automation", anchor: "background-jobs" },
   extensions: { tab: "extensions" },
   skills: { tab: "extensions", anchor: "skills" },
   discover: { tab: "extensions", anchor: "discover" },

@@ -12,7 +12,7 @@ interface Props {
 
 /**
  * Plain label for a ledger row (#1284): what the request cost, not what it was
- * allowed. An unpriced row is "not priced yet" only when NEAR answered; a call
+ * allowed. An unpriced row is "not priced yet" only when the provider answered; a call
  * that failed or lost its outcome after contact says it has no answer.
  */
 export function spendStateLabel(state: string, recoveryReason?: string | null): string {

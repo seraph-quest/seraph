@@ -156,7 +156,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
     await jobs.ensure_inference_ledger()
     calls = []
     controls = {"overrun": scenario == "large_first_charge", "unpriced": scenario in {"restart_written_outputs_unpriced", "cancel_after_unpriced_child"}}
-    written_outputs = {"restart_written_outputs", "restart_written_outputs_unpriced"}
+    written_outputs = {"restart_written_outputs", "restart_written_outputs_unpriced", "written_outputs_lapsed_leases"}
     original_client = httpx.AsyncClient
     def clients(**kwargs):
         if "transport" not in kwargs:
@@ -363,7 +363,37 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             fresh_broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
             use_inference_broker(monkeypatch, fresh_broker)
             monkeypatch.setattr(work_board, "dispatcher", WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions))
-            if scenario in written_outputs:
+            if scenario == "written_outputs_lapsed_leases":
+                # #1302: no stale sweep runs first, so each child is still
+                # running with a lapsed lease and its exact reserved output.
+                # The original recovery control resumes it (reserve_recovery's
+                # running-child branch) and adopts the reserved output without
+                # sending the request again.
+                lapsed_children = [row["job_id"] for row in (await jobs.inference_accounting_snapshot())["operations"]
+                    if row["operation_id"].startswith("remote:research:")]
+                assert len(lapsed_children) == 2 and len(calls) == 5
+                reserved_paths = set()
+                for child_id in lapsed_children:
+                    lapsed_child = await jobs.get_job(child_id)
+                    assert lapsed_child["status"] == "running"
+                    reserved_paths.update(item["payload"]["file_path"] for item in lapsed_child["checkpoints"]
+                        if item["checkpoint_id"].startswith("research:artifact:child:"))
+                assert len(reserved_paths) == 2
+                from src.work_board import research_control
+                from src.workflows import research_provider
+                proven, adopted = [], []
+                original_verified = research_control.verified_reserved_output
+                def spy_verified(child, *args, **kwargs):
+                    result = original_verified(child, *args, **kwargs)
+                    proven.append((child.run_identity, result))
+                    return result
+                monkeypatch.setattr(research_control, "verified_reserved_output", spy_verified)
+                original_read = research_provider.read
+                def spy_read(path, *args, **kwargs):
+                    adopted.append(path)
+                    return original_read(path, *args, **kwargs)
+                monkeypatch.setattr(research_provider, "read", spy_read)
+            if scenario in written_outputs and scenario != "written_outputs_lapsed_leases":
                 # What a real restart runs first (app startup -> recover_stale_jobs).
                 # An answered request, priced or not priced yet, is finished:
                 # each child closes from its broker receipt, never as a lost
@@ -410,7 +440,10 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             assert state.status_code == 200, state.text
             original_state = state.json()
             if scenario in written_outputs:
-                assert original_state["recoverable"] is True  # exact reserved physical output is visible to the Inspector
+                # Each child's exact reserved output awaits adoption by the
+                # parent, whether the sweep closed the child from its receipt
+                # or the child is still running with a lapsed lease.
+                assert original_state["recoverable"] is True
             if scenario == "restart_written_outputs_unpriced":
                 # #1295: both answered requests finished unpriced. They are not
                 # outstanding, so they do not block recovery (ADR-037).
@@ -472,6 +505,14 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
             assert replay.status_code == 200 and replay.json()["recovery"]["completed"] is True
             assert len(calls) == 5  # uncertain-response replay never adds another POST
+            if scenario == "written_outputs_lapsed_leases":
+                # Both branches ran: each running child proved its reserved
+                # output, and the provider adopted it without a request.
+                assert set(proven) == {(child_id, True) for child_id in lapsed_children}
+                assert reserved_paths <= set(adopted)
+                for child_id in lapsed_children:
+                    child = await jobs.get_job(child_id)
+                    assert child["status"] == "succeeded" and child["failure_reason"] != "remote_terminal_settlement_recovered"
             if scenario == "restart_written_outputs_unpriced":
                 # At most once: recovery adopted the written outputs and sent
                 # neither contacted request again; both records stay unpriced.
@@ -566,7 +607,8 @@ async def test_large_first_charge_never_holds_prefunded_sibling_or_adoption(acco
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ["restart_before_sources", "restart_prompt_ready", "restart_funded_queued",
-    "restart_written_outputs", "restart_written_outputs_unpriced", "cancel_funded_queued", "cancel_after_unpriced_child"])
+    "restart_written_outputs", "restart_written_outputs_unpriced", "written_outputs_lapsed_leases", "cancel_funded_queued",
+    "cancel_after_unpriced_child"])
 async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call_rows(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
 

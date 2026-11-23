@@ -192,6 +192,96 @@ async def test_restart_recovery_leaves_an_answered_unpriced_request_finished(acc
 
 
 @pytest.mark.asyncio
+async def test_restart_recovery_does_not_treat_a_pre_1284_classified_row_as_answered(accounting_db):
+    # #1302 item 2: before #1284, restart recovery labelled a lost outcome
+    # ``provider_cost_readback_required`` and recorded a ``restart_recovery``
+    # evidence entry. That row is not "answered, not priced", so the #1295
+    # skip does not apply to it: it is reclassified as a lost outcome and
+    # nothing is sent again.
+    import json
+    from sqlalchemy import select
+    from src.db.models import InferenceCostReservation, WorkflowRunState
+    root, engine, factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    calls = []
+    async def no_cost():
+        calls.append("answered")
+        return {"id": "gen-legacy", "usage": {"prompt_tokens": 5}, "choices": [{"message": {"content": "ok"}}]}
+    await broker.execute(request("legacy-classified"), no_cost)
+    lapsed = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+    async with factory.accounting_sessions() as db:
+        row = await db.scalar(select(InferenceCostReservation).where(InferenceCostReservation.operation_id == "legacy-classified"))
+        assert (row.state, row.recovery_reason) == ("unknown", "provider_cost_readback_required")
+        # The pre-#1284 shape, written as an older build left it.
+        row.evidence_json = json.dumps([*json.loads(row.evidence_json), {"kind": "restart_recovery", "state": "unknown",
+            "reason": "provider_cost_readback_required", "recorded_at": lapsed.isoformat(), "memory_status": "no_learning"}])
+        db.add(row)
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == row.job_id))
+        run.status, run.lease_owner, run.lease_expires_at = "running", "crashed-worker", lapsed
+        db.add(run)
+    recovered = await DurableJobRepository().recover_inference_accounting()
+    assert [item["operation_id"] for item in recovered] == ["legacy-classified"]
+    after = next(item for item in (await repository.inference_accounting_snapshot())["operations"]
+        if item["operation_id"] == "legacy-classified")
+    assert (after["state"], after["recovery_reason"]) == ("unknown", "provider_outcome_unknown")
+    assert (await repository.get_job(after["job_id"]))["status"] == "unknown_external_effect"
+    assert calls == ["answered"]
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_reseals_every_reclassified_row(accounting_db):
+    # #1301: startup recovery that reclassifies two or more rows reseals every
+    # changed row's digest. Each iteration's read autoflushes the row the
+    # previous one changed, so a changed set read from ``db.dirty`` alone
+    # missed it. The shadow full-ledger check (on for every test) then saw
+    # ``ledger row digest drifted``; in production the next verification
+    # resealed it with a false history gap.
+    import json
+    from sqlalchemy import select
+    from src.db.models import InferenceAccountingOwner, WorkflowRunState
+    from src.workflows import inference_ledger
+    assert inference_ledger.SHADOW_FULL_LEDGER is True
+    root, engine, factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.ensure_inference_ledger()
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    calls = []
+    async def failing_after_contact():
+        calls.append("failed")
+        raise RuntimeError("provider connection dropped after the request was sent")
+    operations = ("lost-one", "lost-two", "lost-three")
+    for operation_id in operations:
+        with pytest.raises(RuntimeError, match="dropped"):
+            await broker.execute(request(operation_id), failing_after_contact, uncertain_on_error=False)
+    before = {row["operation_id"]: row for row in (await repository.inference_accounting_snapshot())["operations"]}
+    lapsed = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+    async with factory.accounting_sessions() as db:
+        for operation_id in operations:
+            run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == before[operation_id]["job_id"]))
+            run.status, run.lease_owner, run.lease_expires_at = "running", "crashed-worker", lapsed
+            db.add(run)
+    async with factory.accounting_sessions() as db:
+        gaps_before = [entry for entry in json.loads((await db.get(InferenceAccountingOwner, "deployment")).settings_history_json or "[]")
+            if entry.get("kind") == "history_gap"]
+    recovered = await DurableJobRepository().recover_inference_accounting()
+    assert sorted(item["operation_id"] for item in recovered) == sorted(operations)
+    after = await repository.inference_accounting_snapshot()
+    assert after["history_verified"] is True and not after.get("history_gap_since")
+    for operation_id in operations:
+        row = next(item for item in after["operations"] if item["operation_id"] == operation_id)
+        assert (row["state"], row["recovery_reason"]) == ("unknown", "provider_outcome_unknown")
+    async with factory.accounting_sessions() as db:
+        gaps_after = [entry for entry in json.loads((await db.get(InferenceAccountingOwner, "deployment")).settings_history_json or "[]")
+            if entry.get("kind") == "history_gap"]
+    assert gaps_after == gaps_before
+    assert calls == ["failed"] * 3  # nothing was sent again
+
+
+@pytest.mark.asyncio
 async def test_failed_call_after_contact_is_recorded_as_no_answer_not_succeeded(accounting_db):
     # #1284: an unpriced record from a call that raised after contact says
     # "no answer"; its ephemeral job is never reported as succeeded. The

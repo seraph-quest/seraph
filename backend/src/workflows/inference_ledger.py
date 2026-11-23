@@ -179,6 +179,12 @@ def _content_changed(row: InferenceCostReservation) -> bool:
         for attribute in state.mapper.column_attrs if attribute.key not in _DERIVED_COLUMNS)
 
 
+def _differs_from_pre_image(state: "LedgerState", row: InferenceCostReservation) -> bool:
+    """True when a loaded row's content moved off its verified pre-image."""
+    pre = state.pre_images.get(row.operation_id)
+    return pre is not None and row_values(row) != pre
+
+
 async def scan_row_digests(db) -> tuple[DigestIndex | None, bool]:
     """Stored row digests in ``operation_id`` order; False if any is unusable."""
     # Index-only scan of (operation_id, ledger_row_digest). Plain driver
@@ -296,13 +302,21 @@ async def persist(db, workspace, account) -> list[InferenceCostReservation]:
     dirty = [item for item in (*db.new, *db.dirty) if isinstance(item, InferenceCostReservation)]
     if any(isinstance(item, InferenceAccountingOwner) and item is not account for item in (*db.new, *db.dirty)):
         raise LedgerVerificationError("ledger_owner_ambiguous")
+    # #1301: an autoflush inside a read-then-write loop takes a changed row
+    # out of ``db.dirty`` and clears its attribute history. A loaded row whose
+    # content differs from its verified pre-image is changed all the same.
+    tracked = {id(item) for item in dirty}
+    for item in list(db.identity_map.values()):
+        if (isinstance(item, InferenceCostReservation) and id(item) not in tracked
+                and not inspect(item).pending and _differs_from_pre_image(state, item)):
+            dirty.append(item)
     totals = state.totals
     changed = []
     for row in dirty:
         if inspect(row).pending and row.group_lookup_key is None:
             row.group_lookup_key = classify_group_lookup(row)
         assert_group_lookup(row)
-        if not _content_changed(row):
+        if not _content_changed(row) and not _differs_from_pre_image(state, row):
             continue
         post = row_values(row)
         if inspect(row).pending:

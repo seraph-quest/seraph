@@ -761,7 +761,7 @@ recovery without query/HTML exposure or provider replay. Untouched invalid queue
 close only through the existing canonical deny-only cancellation writer; claimed
 or uncertain effects and any cost-bearing work remain held. Only a request still
 in flight (reserved or contacted) holds the next occurrence: a finished
-occurrence whose requests NEAR has not priced yet holds nothing, and a lost
+occurrence whose requests the provider has not priced yet holds nothing, and a lost
 outcome stays held by its run status and effect ledger, never replayed (#1295).
 Explicit operator inspection/readback is available in the Goal panel. See the
 [operator contract](./12-current-app-guide.md#finite-public-goal-programmes).
@@ -1280,7 +1280,7 @@ period review, overrun latch or budget state, and spending limits are set in
 the NEAR account. The canonical durable job repository owns one request record
 per provider call (at-most-once execution, the consent revision rechecked at
 contact, durable contact denial, the recorded charge), its UTC-month stamp for
-display, and charges NEAR has not priced yet, which hold nothing. Ledger totals
+display, and charges the provider has not priced yet, which hold nothing. Ledger totals
 are sealed at schema version 2 on first start; an older build refuses them, so
 rollback needs a database from before the upgrade. The existing remote broker remains the sole serial executor. Paid
 execution on revisions containing the reviewed

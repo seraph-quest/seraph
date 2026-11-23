@@ -108,6 +108,14 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
     if (current === generation.current) setStatus(value);
   });
 
+  // A source of another ownership identity (#1270): stop only; it never becomes this login's.
+  const stopOther = (id: string, revision: number) => run(async () => {
+    const current = generation.current;
+    await post(`/other-identity-sources/${encodeURIComponent(id)}/stop`, { expected_revision: revision });
+    const value = githubActivityStatus(await request(""));
+    if (current === generation.current) setStatus(value);
+  });
+
   const collectNow = () => run(async () => {
     const current = generation.current;
     const result = await post("/collect", {});
@@ -138,7 +146,12 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
       : status.message || source?.state.replace(/_/g, " ")}</p>
     {showSentence && <p>{GITHUB_ACTIVITY_GRANT_SENTENCE}</p>}
     <p>The source belongs to your ownership identity: any of your logins can see and switch it off, and a new login or an expired one does not stop it.</p>
-    {status?.ownership_required && <p role="note">Enroll ownership for this login (Settings → Account) before enabling it.</p>}
+    {status?.ownership_required && <p role="note">This login has no ownership identity. If you enabled this source before, recover that ownership first: log in with your recovery code, or from the browser that holds your continuity cookie. Enrolling a new identity (Settings → Account) leaves an earlier source with the old one.</p>}
+    {!!status?.other_identity_sources.length && <ul aria-label="GitHub sources of other ownership identities">
+      {status.other_identity_sources.map(other => <li key={other.id}>{other.message || `A source of another ownership identity is ${other.state}.`}
+        {other.stoppable && <button disabled={pending} onClick={() => void stopOther(other.id, other.revision)}>Stop that source</button>}
+      </li>)}
+    </ul>}
     {status && !status.gh.available && <p>No usable gh command was found ({(status.gh.reason_code ?? "unavailable").replace(/_/g, " ")}). The local gh login only works when Seraph's backend runs directly on your computer.</p>}
     {status?.last_run && <p>Last collection ({status.last_run.report_date}): {status.last_run.message}</p>}
 

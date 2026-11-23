@@ -112,7 +112,9 @@ GitHub → **GitHub activity for reports** lets the operator check their local
 `gh` login, acknowledge that it holds full GitHub access, choose repositories
 and enable a read-only source. **Collect now** stores the day's own commits,
 pull requests opened/merged/closed and issues opened/closed as provenance rows
-with Seraph-built URLs; effective grants show and revoke it. Only fixed GET
+with Seraph-built URLs; effective grants show and revoke it. A source left
+with an earlier ownership identity (a lost identity, #1270) is visible to
+every login of the workspace in neutral form and can be stopped there. Only fixed GET
 requests are sent, through `gh api` with a scratch environment and a pinned,
 ownership-checked binary. Missing boundaries: the end-of-day report does not
 read the activity yet (slice 2), reviews and comments are not collected, and

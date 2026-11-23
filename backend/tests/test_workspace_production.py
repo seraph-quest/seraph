@@ -515,6 +515,78 @@ def test_rollback_reconciliation_preserves_existing_safety_row(tmp_path, monkeyp
     assert receipt["rows_preserved"]["tombstones"] == 1
 
 
+_GITHUB_ACTIVITY_SOURCES = """
+CREATE TABLE github_activity_sources (
+    id TEXT PRIMARY KEY, owner_identity_id TEXT, state TEXT, stopped_reason TEXT, revision INTEGER
+);
+INSERT INTO github_activity_sources VALUES ('on', 'identity-a', 'active', NULL, 3);
+INSERT INTO github_activity_sources VALUES ('off', 'identity-b', 'revoked', NULL, 5);
+INSERT INTO github_activity_sources VALUES ('changed', 'identity-c', 'stopped', 'gh_login_changed', 2);
+"""
+
+
+def _github_activity_rows(database_path: Path) -> dict[str, tuple]:
+    with sqlite3.connect(database_path) as database:
+        return {
+            row[0]: tuple(row[1:])
+            for row in database.execute("SELECT id, state, stopped_reason, revision FROM github_activity_sources")
+        }
+
+
+_GITHUB_ACTIVITY_AFTER = {
+    "on": ("stopped", "workspace_restored", 4),
+    "off": ("revoked", None, 5),
+    "changed": ("stopped", "gh_login_changed", 2),
+}
+
+
+def test_managed_restore_stops_the_github_activity_source(tmp_path):
+    """#1270 item 1: reconcile_production_restore itself stops an active local-gh source."""
+    root = _workspace(tmp_path)
+    with sqlite3.connect(root / "seraph.db") as database:
+        database.executescript(_GITHUB_ACTIVITY_SOURCES)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+
+    def managed(*args: str) -> dict:
+        result = subprocess.run(
+            [sys.executable, str(CLI), "--base-dir", str(tmp_path), *args],
+            env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    archive = managed("backup", "--archive", "github-activity.zip")["archive_path"]
+    receipt = managed("restore", "--archive", archive, "--confirm")
+    authority = receipt["stage_receipt"]["restore_reconciliation"]["authority_invalidation"]
+    assert authority["github_activity_sources_stopped"] == 1
+    assert _github_activity_rows(root / "seraph.db") == _GITHUB_ACTIVITY_AFTER
+
+
+def test_rollback_reconciliation_stops_the_github_activity_source(tmp_path, monkeypatch):
+    """#1270 item 1: the retained generation predates the restore; rollback stops its source too."""
+    from src.workspace.production import prepare_lifecycle_directory
+
+    root = _workspace(tmp_path)
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
+    target = tmp_path / "rollback-target"
+    target.mkdir()
+    with sqlite3.connect(target / "seraph.db") as database:
+        database.executescript(_GITHUB_ACTIVITY_SOURCES)
+    workspace = resolve_production_workspace(
+        {**_env(root), "SERAPH_WORKSPACE_LIFECYCLE_PATH": str(tmp_path / "deployment-lifecycle")},
+        base_dir=tmp_path,
+    )
+    with maintenance_fence(workspace):
+        receipt = reconcile_production_rollback(
+            active=root, target=target, registry=canonical_workspace_registry(root),
+        )
+    assert receipt["github_activity_sources_stopped"] == 1
+    assert _github_activity_rows(target / "seraph.db") == _GITHUB_ACTIVITY_AFTER
+
+
 def test_managed_status_blocks_replaced_root_identity(tmp_path):
     root = _workspace(tmp_path)
     environment = os.environ.copy()

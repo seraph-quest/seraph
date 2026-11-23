@@ -70,6 +70,7 @@ jobs:
           fetch-depth: 0
 
       - name: Prepare the backend test environment
+        id: env
         uses: ./.github/actions/backend-test-env
 
       - name: List backend shard
@@ -98,8 +99,12 @@ jobs:
         if: failure()
         env:
           OPENROUTER_API_KEY: test-key
+          SETUP_OUTCOME: ${{ steps.env.outcome }}
         timeout-minutes: 30
-        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 3 --run-timeout-seconds 450 --deadline-minutes 25
+        run: |
+          # Setup failed, so no test ran (#1290): infrastructure, not a test failure.
+          if [ "$SETUP_OUTCOME" != success ]; then bash ../.github/actions/backend-test-env/report_setup_failure.sh; fi
+          uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 3 --run-timeout-seconds 450 --deadline-minutes 25
 
   # Changed-test stress (#1220): the backend test files this pull request adds
   # or modifies run 20 times under 2x-core CPU contention, each run in a new
@@ -120,6 +125,7 @@ jobs:
           fetch-depth: 0
 
       - name: Prepare the backend test environment
+        id: env
         uses: ./.github/actions/backend-test-env
 
       - name: Stress changed test files
@@ -155,6 +161,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Prepare the backend test environment
+        id: env
         uses: ./.github/actions/backend-test-env
 
       - name: Run quarantined tests (non-blocking)

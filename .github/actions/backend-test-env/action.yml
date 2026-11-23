@@ -61,18 +61,53 @@ runs:
       working-directory: backend
       run: 'timeout 180 "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_node_runtime.py'
 
-    - name: Install Chromium and system dependencies
+    - name: Resolve the locked Playwright version
+      id: playwright
       shell: bash
       working-directory: backend
       run: |
+        version="$(timeout 60 uv run python -c 'import importlib.metadata as m; print(m.version("playwright"))')"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        # Read by install_chromium.sh and by the lanes' "Classify failures" step.
+        echo "SERAPH_CI_INFRA_FILE=$RUNNER_TEMP/seraph-ci-infrastructure.txt" >> "$GITHUB_ENV"
+
+    # The browser build depends only on the Playwright version (#1290).
+    - name: Restore cached Playwright browsers
+      id: browser-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ms-playwright-chromium-${{ steps.playwright.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install Chromium and verify its runtime libraries
+      shell: bash
+      working-directory: backend
+      env:
+        PLAYWRIGHT_CACHE_HIT: ${{ steps.browser-cache.outputs.cache-hit }}
+      run: |
         timeout 120 sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
-        timeout 480 uv run playwright install --with-deps chromium
+        timeout 480 bash "$GITHUB_ACTION_PATH/install_chromium.sh"
+
+    # Saved straight after a miss, whatever the tests later do. Concurrent
+    # shards race for the same key; the losers only log a warning.
+    - name: Save Playwright browsers to the cache
+      if: steps.browser-cache.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.browser-cache.outputs.cache-primary-key }}
 
     - name: Enable bubblewrap for repository isolation tests (#1065)
       shell: bash
       working-directory: backend
       run: |
-        timeout 90 sudo apt-get install -y --no-install-recommends bubblewrap || { timeout 60 sudo apt-get update -q && timeout 90 sudo apt-get install -y --no-install-recommends bubblewrap; }
+        timeout 90 sudo apt-get install -y --no-install-recommends bubblewrap || { timeout 60 sudo apt-get update -q && timeout 90 sudo apt-get install -y --no-install-recommends bubblewrap; } || {
+          reason="bubblewrap apt install failed or timed out (exit $?)"
+          echo "$reason" >> "$SERAPH_CI_INFRA_FILE"
+          echo "::error title=CI infrastructure (not a test failure)::$reason"
+          exit 1
+        }
         probe() { bwrap --unshare-all --unshare-user --die-with-parent --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/bin /bin --proc /proc --dev /dev /usr/bin/true; }
         if ! probe; then
           # Ubuntu runners may restrict unprivileged user namespaces via

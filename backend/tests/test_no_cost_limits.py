@@ -422,8 +422,15 @@ def test_cockpit_bound_zero_stop_fixture_is_the_backend_evidence_shape():
 
 
 @pytest.mark.parametrize("evidence, shown", [
-    ([{"kind": "reservation"}, {"kind": "restart_recovery", "state": "unknown"}], "provider_outcome_unknown"),
+    # The ledger evidence restart recovery wrote before #1284 (0ab60c3b..#1284)
+    # always carried the row's new reason (#1302 review).
+    ([{"kind": "reservation"}, {"kind": "restart_recovery", "state": "unknown",
+        "reason": "provider_cost_readback_required"}], "provider_outcome_unknown"),
     ([{"kind": "reservation"}], "provider_cost_readback_required"),
+    # Append-only evidence: an earlier typed precontact resume, then an
+    # answered unpriced call, is still "answered, not priced".
+    ([{"kind": "reservation"}, {"kind": "restart_recovery", "state": "reserved",
+        "reason": "typed_owner_precontact_resume"}], "provider_cost_readback_required"),
 ])
 def test_rows_recovered_before_the_reason_split_show_an_unknown_outcome(evidence, shown):
     """A row restart recovery classified before #1284 split the reasons keeps

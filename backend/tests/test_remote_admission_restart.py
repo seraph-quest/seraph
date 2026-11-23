@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 import time
 from types import SimpleNamespace
@@ -159,13 +160,13 @@ def _proofs(profile: ProviderProfile, *, now: float):
     )
 
 
-def _spec(job_id: str, *, dedupe_key: str) -> DurableJobSpec:
+def _spec(job_id: str, *, dedupe_key: str, job_kind: str = "remote_inference_fixture") -> DurableJobSpec:
     return DurableJobSpec(
         identity=DurableJobIdentity(
             job_id=job_id,
             owner_kind="service",
             owner_principal_id=OWNER_ID,
-            job_kind="remote_inference_fixture",
+            job_kind=job_kind,
             capability_version="remote-text-v1",
             idempotency_scope="remote-inference-fixture",
             idempotency_key=dedupe_key,
@@ -184,8 +185,9 @@ def _spec(job_id: str, *, dedupe_key: str) -> DurableJobSpec:
     )
 
 
-async def _admit_and_claim(job_id: str, *, dedupe_key: str, lease_seconds: int = 300):
-    admitted = await durable_job_repository.admit_job(_spec(job_id, dedupe_key=dedupe_key))
+async def _admit_and_claim(job_id: str, *, dedupe_key: str, lease_seconds: int = 300,
+                           job_kind: str = "remote_inference_fixture"):
+    admitted = await durable_job_repository.admit_job(_spec(job_id, dedupe_key=dedupe_key, job_kind=job_kind))
     await durable_job_repository.queue_job(job_id)
     claimed = await durable_job_repository.claim_job(
         job_id,
@@ -581,10 +583,12 @@ async def test_restart_after_terminal_remote_success_recovers_without_dispatch(a
         profile=profile,
     )
     proofs = _proofs(profile, now=now)
+    # A single-call job kind: its one call is the whole job (#1302).
     _admitted, claimed = await _admit_and_claim(
         "job-744-terminal-recovery",
         dedupe_key="terminal-recovery",
         lease_seconds=1,
+        job_kind="strategist_tick",
     )
     calls = 0
 
@@ -655,6 +659,93 @@ async def test_restart_after_terminal_remote_success_recovers_without_dispatch(a
     assert calls == 1
 
 
+@pytest.mark.parametrize(
+    ("job_kind", "settled_calls"),
+    [
+        # A kind outside the single-call set (a multi-call job such as Goal
+        # discovery or repository repair iterations on one root): the crash
+        # lands after its first answered call. Its ledger is identical to a
+        # finished single-call job's, so only the kind tells them apart.
+        ("remote_inference_fixture", 1),
+        # A single-call kind whose ledger holds two settled admissions is not
+        # the shape that proves completion either.
+        ("strategist_tick", 2),
+    ],
+)
+@pytest.mark.asyncio
+async def test_restart_between_calls_of_multi_call_job_is_not_closed_as_succeeded(
+    async_db, monkeypatch, job_kind, settled_calls,
+):
+    """#1302: a settled first receipt does not prove the whole job finished."""
+    broker = RemoteInferenceAdmissionBroker()
+    use_inference_broker(monkeypatch, broker)
+    now = time.time()
+    profile = _profile(now=now)
+    proofs = _proofs(profile, now=now)
+    job_id = f"job-1302-{job_kind.replace('.', '-')}-{settled_calls}"
+    _admitted, claimed = await _admit_and_claim(
+        job_id, dedupe_key=job_id, lease_seconds=1, job_kind=job_kind,
+    )
+    calls = 0
+
+    def transport(_candidate, _stream):
+        nonlocal calls
+        calls += 1
+        return {"choices": [{"message": {"content": f"answer-{calls}"}}]}
+
+    context = _context(job_id=job_id, request_id=f"request-{job_id}", profile=profile)
+    with bind_remote_inference_receipt(
+        repository=durable_job_repository,
+        job_id=job_id,
+        owner=LEASE_OWNER,
+        fencing_token=claimed["lease"]["fencing_token"],
+    ):
+        execute_sync_adapter(
+            context=context,
+            candidates=(candidate_from_profile(profile),),
+            proofs=proofs,
+            adapter=transport,
+            now=now,
+        )
+    if settled_calls == 2:
+        # The shared completion path keys one operation per durable job, so a
+        # second settled admission is written into the ledger directly.
+        async with durable_job_repository._session() as db:
+            row = await durable_job_repository._fetch(db, job_id)
+            ledger = json.loads(row.effect_receipts_json)
+            first = next(item for item in ledger if item["effect_type"] == "remote_inference_admission")
+            ledger.append({**first, "effect_id": first["effect_id"] + ":second"})
+            row.effect_receipts_json = json.dumps(ledger)
+            db.add(row)
+            await db.commit()
+    # The process dies here, before the next call or its own terminal write.
+    running = await durable_job_repository.get_job(job_id)
+    assert running["status"] == "running" and calls == 1
+    settled = [
+        item for item in running["effects"]
+        if item["effect_type"] == "remote_inference_admission" and item.get("receipt_kind") == "effect"
+    ]
+    assert len(settled) == settled_calls and all(item["status"] == "succeeded" for item in settled)
+    before_costs = (await durable_job_repository.inference_accounting_snapshot(job_id=job_id))["operations"]
+
+    replacement_repository = DurableJobRepository()
+    recovered = await replacement_repository.recover_stale_jobs(
+        now=datetime.now(timezone.utc) + timedelta(seconds=5),
+    )
+    assert [item["job_id"] for item in recovered] == [job_id]
+    assert recovered[0]["status"] == "blocked"
+    assert recovered[0]["receipt"]["reason"] == "stale_lease_requires_reconciliation"
+    assert recovered[0]["receipt"]["operator_action"] == "reconcile_effects_then_retry_or_cancel"
+    held = await replacement_repository.get_job(job_id)
+    assert held["status"] == "blocked" and held["finished_at"] is None
+    assert not any(item.get("kind") == "remote_inference_terminal_recovery" for item in held["effects"])
+    # At most once: nothing was re-sent and the answered request records
+    # are unchanged.
+    assert calls == 1
+    after_costs = (await replacement_repository.inference_accounting_snapshot(job_id=job_id))["operations"]
+    assert after_costs == before_costs
+
+
 @pytest.mark.asyncio
 async def test_sync_route_persistence_degradation_settles_durable_remote_first(async_db, monkeypatch):
     """A degraded route projection cannot strand a successful remote intent."""
@@ -674,6 +765,7 @@ async def test_sync_route_persistence_degradation_settles_durable_remote_first(a
         context.job_id,
         dedupe_key="route-persistence",
         lease_seconds=1,
+        job_kind="strategist_tick",  # single-call kind (#1302)
     )
 
     class DegradedRouteRepository:

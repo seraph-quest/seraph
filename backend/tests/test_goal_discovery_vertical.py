@@ -111,7 +111,8 @@ def public_http_fixture():
     "strategy_oversize", "strategy_authority", "strategy_private_extra", "strategy_task_method", "strategy_normalized",
     "strategy_late_oversize", "strategy_changed_after_query", "markup_drift", "narrow_queries", "narrow_sources",
     "narrow_search", "narrow_inference", "narrow_output", "narrow_global_output", "narrow_success", "manifest_receipt_missing",
-    "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"])
+    "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper", "crash_between_calls",
+    "crash_between_calls_unpriced"])
 @needs_cordis
 @pytest.mark.asyncio
 async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, research_cordis, monkeypatch, scenario):
@@ -215,7 +216,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
     # #1295: every request is answered but NEAR has not priced it yet, so its
     # record finishes ``unknown``. That holds neither the lane nor the next
     # occurrence (ADR-037).
-    gateway.billing_missing = scenario == "completed_unpriced"
+    gateway.billing_missing = scenario in {"completed_unpriced", "crash_between_calls_unpriced"}
     await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",))
     original_client = httpx.AsyncClient
     physical_controls["scenario"] = scenario
@@ -535,6 +536,57 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                         assert fresh["job_id"] != job["job_id"] and fresh["status"] == "queued"
                 assert calls == [] and contacts == [] and physical_contacts == []
                 assert (await jobs.inference_accounting_snapshot(job_id=job["job_id"]))["operations"] == []
+                return
+            if scenario in {"crash_between_calls", "crash_between_calls_unpriced"}:
+                # #1302: the process dies after the first of three answered
+                # inference calls, before the public search. The job stays
+                # running with only that first settled receipt, and its lease
+                # lapses. Recovery must not close it as succeeded.
+                class DeclaredCrash(BaseException):
+                    pass
+                async def crash_before_search(*args, **kwargs):
+                    raise DeclaredCrash("declared process crash between inference calls")
+                monkeypatch.setattr(service, "_contact", crash_before_search)
+                original_transition = jobs.transition_job
+                async def dead_process_transition(*args, **kwargs):
+                    raise RuntimeError("the crashed process writes nothing more")
+                monkeypatch.setattr(jobs, "transition_job", dead_process_transition)
+                with pytest.raises(DeclaredCrash):
+                    await service.run(job["job_id"])
+                monkeypatch.setattr(jobs, "transition_job", original_transition)
+                crashed = await jobs.get_job(job["job_id"])
+                assert crashed["status"] == "running" and len(calls) == 1 and contacts == []
+                admissions = [item for item in crashed["effects"] if item["effect_type"] == "remote_inference_admission"]
+                assert len(admissions) == 1 and admissions[0]["status"] == "succeeded"
+                before_costs = (await jobs.inference_accounting_snapshot(job_id=job["job_id"]))["operations"]
+                # The crashed holder never releases its lease; it lapses. Lapse
+                # it in the past instead of waiting (#1230). The original
+                # deadline has not passed.
+                from sqlalchemy import select
+                from src.db.models import WorkflowRunState
+                async with factory.accounting_sessions() as db:
+                    row = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job["job_id"]))
+                    row.lease_expires_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+                    db.add(row)
+                recovered = await DurableJobRepository().recover_stale_jobs()
+                # Generic stale-job recovery has no programme writer scope, so
+                # it leaves the discovery job to its own owner: still running,
+                # never closed from its first receipt.
+                assert not [item for item in recovered if item["job_id"] == job["job_id"]], recovered
+                held = await jobs.get_job(job["job_id"])
+                assert held["status"] == "running" and held["finished_at"] is None
+                assert held["effects"] == crashed["effects"]
+                assert not any(item["checkpoint_id"] == "discovery:outcome" for item in held["checkpoints"])
+                # At most once: the answered request record is unchanged and
+                # nothing was sent again.
+                assert (await jobs.inference_accounting_snapshot(job_id=job["job_id"]))["operations"] == before_costs
+                assert len(calls) == 1 and contacts == [] and physical_contacts == []
+                # The programme's own owner holds the occurrence for recovery.
+                clock = goal_programme_service._clock()
+                monkeypatch.setattr(goal_programme_service, "_clock", lambda: clock + timedelta(days=1))
+                with pytest.raises(ValueError, match="programme_outstanding_occurrence_requires_recovery"):
+                    await service.admit(goal_id=goal_id, programme_id=programme["id"], grant_revision=1)
+                assert len(calls) == 1
                 return
             if scenario == "strategy_changed":
                 strategy_state["changed"] = True

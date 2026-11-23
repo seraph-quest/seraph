@@ -165,11 +165,31 @@ def _provider_contact_denied(row: InferenceCostReservation) -> bool:
             for item in json.loads(row.evidence_json)))
 
 
+def _pre_1284_lost_outcome(row: InferenceCostReservation) -> bool:
+    """A row restart recovery classified before #1284 split the reasons.
+
+    Its ``provider_cost_readback_required`` label means the outcome was lost,
+    not "answered, not priced". The marker is a ``restart_recovery`` evidence
+    entry with that same reason: pre-#1284 recovery wrote exactly that, and
+    later recovery never does (#1302). Evidence is append-only, so any other
+    ``restart_recovery`` entry (for example a typed precontact resume before
+    the call was later answered) is not the marker.
+    """
+    return (row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required" and any(
+        isinstance(item, dict) and item.get("kind") == "restart_recovery"
+        and item.get("reason") == "provider_cost_readback_required"
+        for item in json.loads(row.evidence_json or "[]")))
+
+
+def _answered_unpriced(row: InferenceCostReservation) -> bool:
+    """The call was answered and the provider has not priced it yet (#1295)."""
+    return (row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required"
+        and not _pre_1284_lost_outcome(row))
+
+
 def _operator_operation(row: InferenceCostReservation) -> dict[str, object]:
     payload = _operation_payload(row)
-    if row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required" and any(
-            isinstance(item, dict) and item.get("kind") == "restart_recovery"
-            for item in json.loads(row.evidence_json or "[]")):
+    if _pre_1284_lost_outcome(row):
         # Display only: a row restart recovery classified before #1284 split
         # the reasons lost its outcome; it is not "answered, not priced".
         payload["recovery_reason"] = "provider_outcome_unknown"
@@ -336,12 +356,15 @@ class InferenceAccountingRepositoryMixin:
                         continue
                     if row.state not in {"reserved", "contact_started", "unknown"}:
                         continue
-                    if row.state == "unknown" and row.recovery_reason == "provider_cost_readback_required":
+                    if _answered_unpriced(row):
                         # Answered, not priced yet (#1295): the call finished,
                         # so the record holds nothing, as a settled row does.
                         # Stale-job recovery decides the run from its effect
                         # ledger alone; no answer was lost, so the record is
-                        # not reclassified as a lost outcome.
+                        # not reclassified as a lost outcome. A row restart
+                        # recovery already classified before #1284 carries
+                        # that label for a lost outcome, so it is not skipped
+                        # (#1302).
                         continue
                     run = await self._fetch(db, row.job_id)
                     if run.status != "running" or (run.lease_expires_at is not None and _utc(run.lease_expires_at) > observed):
@@ -722,7 +745,7 @@ class InferenceAccountingRepositoryMixin:
 
         Not a content query: an edit to an untouched row could empty that.
         ``prior`` (this operation's own row, already digest-verified) is not
-        "another" request. A request NEAR has not priced yet is finished and
+        "another" request. A request the provider has not priced yet is finished and
         never counts (#1284).
         """
         own_open = bool(prior is not None and prior.owner_id == owner_id

@@ -47,7 +47,7 @@ RECOVERY_BY_REASON = {
 
 
 # ADR-037 (#1295): only a provider request still in flight is outstanding.
-# A finished request NEAR has not priced (``unknown``) holds neither the lane
+# A finished request the provider has not priced (``unknown``) holds neither the lane
 # nor the occurrence, whether it was answered or its outcome was lost. A lost
 # outcome is held by the effect ledger and run status instead, and the
 # original request is never sent again either way (its operation id is

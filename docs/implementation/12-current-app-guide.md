@@ -352,8 +352,8 @@ Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
 held effects and any provider request that has not finished. Only a request
 that is reserved, in flight or held after a refused contact holds the occurrence
 ("A provider request from this run has not finished..."); on a running
-occurrence Home shows that as `source_run_in_progress`. A finished request NEAR
-has not priced yet holds nothing, so the next daily occurrence is admitted. A
+occurrence Home shows that as `source_run_in_progress`. A finished request the
+provider has not priced yet holds nothing, so the next daily occurrence is admitted. A
 lost outcome stays held by the run status and effect ledger, and the original
 request is never sent again (#1295). Selecting a completed brief performs an explicit
 local readback under current owner and original generation checks. Private Goal
@@ -1895,7 +1895,7 @@ reason code, and reads "&lt;Model&gt;, hosted by NEAR. $3.20 used this month."
 (with "2 requests are not priced by NEAR yet (all months)." when some are
 unpriced, or "Nothing spent this month."). The unpriced count covers every
 month, not only this one. Spend history labels an unpriced request "answered,
-not priced yet" only when NEAR answered; a call that failed after contact reads
+not priced yet" only when the provider answered; a call that failed after contact reads
 "no answer, not priced", one whose outcome restart recovery lost (reason
 `provider_outcome_unknown`, also shown for such rows recovered before #1284)
 reads "outcome unknown, not priced", and one still running "in progress". "NEAR not answering" is only this session's last
@@ -3835,10 +3835,18 @@ It can continue the persisted source-ready, prompt-ready or funded queue, or
 adopt an exact reserved physical child output whose request finished, priced or
 not priced yet, without another provider POST. A current Running worker without that completed-output
 proof remains blocked from recovery. A request still in flight blocks recovery;
-a finished request NEAR has not priced yet does not (#1295). After a restart,
+a finished request the provider has not priced yet does not (#1295). After a restart,
 startup recovery closes a child whose answered request has a broker receipt as
 succeeded, priced or not, and leaves an answered unpriced request record as it
-is; only a request with no recorded answer becomes a lost outcome. Contacted work
+is. Only a job kind whose one inference call is the whole job (a research child,
+for example) closes this way, and only when its ledger holds exactly that one
+settled call. A job that makes several calls can crash between calls, so its
+first receipt proves nothing about the rest (#1302): Goal discovery is left
+running by the sweep and held by its programme owner, native repository repair
+roots are protected and skipped, and any other job, such as a historical
+ordinary repository root, is left blocked (`stale_lease_requires_reconciliation`)
+for the operator to reconcile, then retry or cancel; nothing resumes it
+automatically; only a request with no recorded answer becomes a lost outcome. Contacted work
 without verified output retains Unknown cost and effects; it is never blindly
 retried. Generic retry
 and unblock cannot create a replacement attempt for an admitted research task.

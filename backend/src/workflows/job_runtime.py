@@ -234,6 +234,27 @@ REMOTE_INFERENCE_EFFECT_STATUSES = {
     "expired": "failed",
     "rejected": "failed",
 }
+# Job kinds whose one governed remote inference call is the job's whole
+# external effect (#1302). Only these may be closed as ``succeeded`` by stale
+# recovery from a settled broker receipt. A job that makes several calls can
+# crash between calls, and its first settled receipt proves nothing about the
+# rest. Goal discovery is left running by this sweep (it cannot pass the
+# programme writer fence) and held by its programme owner; native repository
+# repair roots (v3/v4) are protected lineage and skipped. Any other kind, such
+# as a historical ordinary (v1/v2) repository root, is left ``blocked``
+# (``stale_lease_requires_reconciliation``) for the operator to reconcile,
+# then retry or cancel; nothing resumes it automatically. Recovery never
+# re-sends a contacted request either way.
+SINGLE_REMOTE_CALL_JOB_KINDS = frozenset({
+    "calendar_meeting_prep",
+    "guardian_opportunity_assess",
+    "inference.near-text.v1",
+    "mail_reply_draft",
+    "readonly_research_child",
+    "runtime_service_governed_v1",
+    "strategist_tick",
+    "work_board_proposal",
+})
 RECONCILIATION_RECEIPT_STATUSES = frozenset({"read_back", "settled", "reconciled"})
 RECONCILIATION_RECEIPT_FIELDS = (
     "schema_version",
@@ -783,6 +804,36 @@ def _terminal_remote_settlement_effect(
             continue
         return item
     return None
+
+
+def _single_call_terminal_settlement(
+    run: WorkflowRunState,
+    effects: list[dict[str, Any]] | None,
+) -> Mapping[str, Any] | None:
+    """Return the settled receipt only when it is the job's whole effect set.
+
+    Stale recovery may close a crashed run as ``succeeded`` only when it can
+    prove every expected external effect completed (#1302). That proof exists
+    for a single-call job kind whose ledger holds exactly one remote
+    admission, and that admission is settled. Anything else returns ``None``.
+    """
+    if effects is None or _text(getattr(run, "job_kind", None)) not in SINGLE_REMOTE_CALL_JOB_KINDS:
+        return None
+    if _job_has_unsafe_effects(effects):
+        return None
+    admissions = [
+        item for item in effects
+        if isinstance(item, Mapping)
+        and _text(item.get("effect_type")) == "remote_inference_admission"
+        and _text(item.get("receipt_kind") or "effect") == "effect"
+    ]
+    if len(admissions) != 1:
+        return None
+    return _terminal_remote_settlement_effect(
+        admissions,
+        expected_job_id=run.run_identity,
+        expected_owner_id=_text(run.owner_principal_id),
+    )
 
 
 def _remote_terminal_recovery_readback(
@@ -7508,7 +7559,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as accounting_db:
             accounting_row = await accounting_db.get(InferenceCostReservation, str(safe_receipt["operation_id"]))
             # Only a call still in flight is an unresolved effect. A finished
-            # call NEAR has not priced yet ("unknown") never withholds the
+            # call the provider has not priced yet ("unknown") never withholds the
             # result (ADR-037, #1284); an uncertain broker receipt still maps
             # to an unknown effect through its own status.
             unknown_cost = accounting_row is not None and accounting_row.state == "contact_started"
@@ -8201,15 +8252,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                             effects = _effect_ledger_or_raise(run.effect_receipts_json)
                         except DurableJobTransitionError:
                             effects = None
-                        terminal_settlement = (
-                            _terminal_remote_settlement_effect(
-                                effects,
-                                expected_job_id=run.run_identity,
-                                expected_owner_id=_text(run.owner_principal_id),
-                            )
-                            if effects is not None and not _job_has_unsafe_effects(effects)
-                            else None
-                        )
+                        # #1302: only a single-call job's one settled receipt
+                        # proves the whole job's external effect completed.
+                        terminal_settlement = _single_call_terminal_settlement(run, effects)
                         if terminal_settlement is not None:
                             recovered_status = "succeeded"
                             recovery_reason = "remote_terminal_settlement_recovered"

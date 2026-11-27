@@ -169,8 +169,13 @@ OWNERS: tuple[Owner, ...] = (
     *_owned("seraph.state.v1", _T, {
         f"{_PW}attach]": "lifespan_step", f"{_PW}worker.acquire_workspace]": "lifespan_step",
         f"{_PW}worker.activate]": "lifespan_step", f"{_PW}worker.close_gate]": "lifespan_step",
+        f"{_PW}worker.wait_maintenance]": "lifespan_step", f"{_PW}worker.begin_shutdown]": "lifespan_step",
+        # The worker-owned backup task (#1024 in-process maintenance handoff).
+        "src.runtime_plugins.worker:ProviderWorker.start_backup": "background_task",
         f"{_PW}worker.close_state]": "lifespan_step", f"{_PW}worker.release_workspace]": "lifespan_step",
         f"{_PW}worker.detach]": "lifespan_step",
+        # #1024 in-process maintenance handoff: the backup step runs on one executor thread.
+        "src.runtime_plugins.worker:ProviderWorker.maintenance_backup": "thread",
     }, required=True),
     *_owned("seraph.authority.v1", _T, {
         f"{_LS}_reconcile_operator_auth_mode]": "lifespan_step",

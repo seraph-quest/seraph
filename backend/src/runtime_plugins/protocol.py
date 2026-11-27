@@ -16,8 +16,13 @@ ORDINARY_TIMEOUT = 30.0
 # Host-to-child provider reports (#1024): Python hosts the providers and only
 # reports their readiness; the child never sends a provider request.
 PROVIDER_METHODS = frozenset({"provider.readiness", "provider.quiesce"})
+# Host-to-child facade activation of a Cordis-owned domain (#1024): the
+# facade's answer at epoch E is the decision, the Python provider the
+# mechanism. Only the non-pinned facade domains are activatable.
+FACADE_METHODS = frozenset({"provider.activate", "provider.deactivate"})
+FACADE_DOMAINS = frozenset(f"seraph.{name}.v1" for name in ("goals", "memory", "artifacts"))
 CONTROL_METHODS = frozenset({"bootstrap.hello", "runtime.ready", "runtime.status", "runtime.quiesce", "runtime.shutdown",
-                             "invocation.cancel", *PROVIDER_METHODS})
+                             "invocation.cancel", *PROVIDER_METHODS, *FACADE_METHODS})
 METHODS = CONTROL_METHODS
 PROVIDER_DOMAINS = frozenset(f"seraph.{name}.v1" for name in (
     "state", "authority", "audit", "tasks", "goals", "memory", "artifacts"))
@@ -43,6 +48,43 @@ def validate_provider_report(value: Any, method: str) -> dict[str, Any]:
         raise ProtocolError("invalid provider report")
     integer(report["epoch"], 1)
     return report
+
+
+def validate_facade_request(value: Any, method: str) -> dict[str, Any]:
+    """Closed facade activation request: no handle, key or credential; never a pinned domain."""
+    if method == "provider.activate":
+        request = closed(value, {"domain", "owner_kind", "epoch", "composition_digest"})
+        if (type(request["domain"]) is not str or request["domain"] not in FACADE_DOMAINS
+                or request["owner_kind"] != "cordis" or type(request["composition_digest"]) is not str
+                or not HEX64.fullmatch(request["composition_digest"])):
+            raise ProtocolError("invalid facade activation")
+    else:
+        request = closed(value, {"domain", "epoch", "reason_code"})
+        if (type(request["domain"]) is not str or request["domain"] not in FACADE_DOMAINS
+                or type(request["reason_code"]) is not str or not TOKEN.fullmatch(request["reason_code"])):
+            raise ProtocolError("invalid facade deactivation")
+    integer(request["epoch"], 1)
+    return request
+
+
+def validate_facade_response(value: Any, method: str) -> dict[str, Any]:
+    if method == "provider.deactivate":
+        result = closed(value, {"domain", "state", "epoch"})
+        if type(result["domain"]) is not str or result["domain"] not in FACADE_DOMAINS or result["state"] != "deactivated":
+            raise ProtocolError("invalid facade acknowledgement")
+        integer(result["epoch"], 1)
+        return result
+    result = closed(value, {"domain", "state", "epoch", "plugin_digest", "reason_code"})
+    activated = result["state"] == "activated"
+    digest, reason = result["plugin_digest"], result["reason_code"]
+    if (type(result["domain"]) is not str or result["domain"] not in FACADE_DOMAINS
+            or (not activated and result["state"] != "unavailable")
+            or (digest is not None and (type(digest) is not str or not HEX64.fullmatch(digest)))
+            or (activated and (reason is not None or digest is None))
+            or (not activated and (type(reason) is not str or not TOKEN.fullmatch(reason)))):
+        raise ProtocolError("invalid facade acknowledgement")
+    integer(result["epoch"], 1)
+    return result
 
 
 def rpc_deadline(method: str, *, now: int, original_deadline: int | None = None) -> int:
@@ -162,6 +204,8 @@ def validate_frame(value: Any) -> dict[str, Any]:
             raise ProtocolError("ready is a response only")
         if method in PROVIDER_METHODS:
             validate_provider_report(payload, method)
+        elif method in FACADE_METHODS:
+            validate_facade_request(payload, method)
         else:
             closed(payload, set())
     elif method in PROVIDER_METHODS:
@@ -169,6 +213,8 @@ def validate_frame(value: Any) -> dict[str, Any]:
         expected = "quiescing" if method == "provider.quiesce" else "recorded"
         if type(payload["domain"]) is not str or payload["domain"] not in PROVIDER_DOMAINS or payload["state"] != expected:
             raise ProtocolError("invalid provider acknowledgement")
+    elif method in FACADE_METHODS:
+        validate_facade_response(payload, method)
     elif method == "runtime.ready":
         closed(payload, {"state", "plugins"})
         if payload["state"] != "ready":

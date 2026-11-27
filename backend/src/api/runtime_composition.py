@@ -112,3 +112,63 @@ async def transition_domain_owner(request: Request, domain: str, body: OwnerTran
     except CompositionBindingError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.reason_code, "recovery_action": "reload_domains"}) from exc
     return {"transition": receipt, "domains": await _domains()}
+
+
+class MaintenanceBackup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirm: Literal["backup"]
+
+
+def _maintenance_worker(request: Request):
+    from src.runtime_plugins.worker import ProviderWorker
+    worker = getattr(request.app.state, "provider_worker", None)
+    if type(worker) is not ProviderWorker:
+        raise HTTPException(status_code=409, detail={"code": "state_maintenance_unavailable",
+                                                     "recovery_action": "use_host_cli"})
+    return worker
+
+
+def _stable_operator(request: Request) -> AuthenticatedOperator:
+    operator = _operator(request)
+    if operator.ownership_continuity != "stable":
+        raise HTTPException(status_code=403, detail={"code": "operator_ownership_recovery_required",
+                                                     "recovery_action": "complete_ownership_recovery"})
+    return operator
+
+
+@router.post("/runtime/maintenance/backup", status_code=202)
+async def maintenance_backup(request: Request, body: MaintenanceBackup):
+    """Start an in-process workspace backup through the state provider (#1024).
+
+    The gate closes (or the request is refused typed) before this returns 202;
+    the step itself runs as a worker-owned task, so a server shutdown never
+    waits on this request. ``GET /api/runtime/maintenance`` reports it and
+    ``POST /api/runtime/maintenance/abort`` ends a step that is still draining.
+    Restore and rollback stay with the host CLI against a stopped backend.
+    """
+    from src.runtime_plugins.worker import StateMaintenanceRefused
+    _stable_operator(request)
+    worker = _maintenance_worker(request)
+    try:
+        status = await worker.start_backup()
+    except StateMaintenanceRefused as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.reason_code, "recovery_action": "use_host_cli"}) from exc
+    return {"maintenance": status}
+
+
+@router.get("/runtime/maintenance")
+async def maintenance_status(request: Request):
+    """The running or last maintenance step; authenticates even while a step drains."""
+    _operator(request)
+    return {"maintenance": _maintenance_worker(request).maintenance_status()}
+
+
+@router.post("/runtime/maintenance/abort")
+async def maintenance_abort(request: Request):
+    """End a maintenance step that is still draining; a copying step is never cut."""
+    _stable_operator(request)
+    worker = _maintenance_worker(request)
+    if not worker.abort_maintenance():
+        raise HTTPException(status_code=409, detail={"code": "state_maintenance_not_abortable",
+                                                     "recovery_action": "reload_maintenance"})
+    return {"maintenance": worker.maintenance_status()}

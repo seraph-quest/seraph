@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import re
 
 from fastapi import Request
@@ -10,7 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from urllib.parse import urlsplit
 
 from config.settings import settings
-from src.db.engine import is_database_locked
+from src.db.engine import StateProviderUnavailable, is_database_locked, maintenance_control_scope
 from src.auth.service import (
     AuthFailure,
     AuthenticatedOperator,
@@ -306,6 +308,19 @@ async def authenticate_websocket(websocket) -> AuthenticatedOperator:
     )
 
 
+# The maintenance status and abort routes (#1024) authenticate even while a
+# maintenance step drains, so the operator can always see and end the window.
+_MAINTENANCE_CONTROL_ROUTES = frozenset({("GET", "/api/runtime/maintenance"),
+                                         ("POST", "/api/runtime/maintenance/abort")})
+MAINTENANCE_CONTROL_PATHS = frozenset(path for _method, path in _MAINTENANCE_CONTROL_ROUTES)
+
+
+def state_provider_unavailable_response(reason_code: str) -> JSONResponse:
+    """The one typed 503 for a closed state gate, shared with the app handler."""
+    return JSONResponse(status_code=503, content={"detail": {
+        "code": reason_code, "automatic_retry": False, "recovery_action": "retry_after_maintenance"}})
+
+
 class OperatorAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         local = False
@@ -383,15 +398,16 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
         try:
-            if local:
-                operator = await authenticate_local_operator()
-            elif request.method == "GET" and request.url.path == "/api/operator/continuation":
-                from src.auth.service import authenticate_home_token_readonly
-                operator = await authenticate_home_token_readonly(request.cookies.get(settings.operator_auth_cookie_name))
-            else:
-                operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))
+            control = (request.url.path in MAINTENANCE_CONTROL_PATHS
+                       and (request.method, request.url.path) in _MAINTENANCE_CONTROL_ROUTES)
+            with maintenance_control_scope() if control else nullcontext():
+                operator = await self._authenticate(request, local)
         except AuthFailure as exc:
             return _auth_failure_response(request.url.path, exc.code, status_code=401)
+        except StateProviderUnavailable as exc:
+            # A closed state gate (maintenance or shutdown, #1024) is not an
+            # authentication verdict: a typed 503 that keeps the cookie valid.
+            return state_provider_unavailable_response(exc.reason_code)
         except (OperationalError, SQLAlchemyTimeoutError) as exc:
             # Storage contention is not an authentication verdict: answer an
             # explicit retryable 503 (the session cookie stays valid), never a
@@ -401,3 +417,12 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             return _auth_failure_response(request.url.path, "auth_storage_busy", status_code=503)
         request.state.operator = operator
         return await call_next(request)
+
+    @staticmethod
+    async def _authenticate(request: Request, local: bool):
+        if local:
+            return await authenticate_local_operator()
+        if request.method == "GET" and request.url.path == "/api/operator/continuation":
+            from src.auth.service import authenticate_home_token_readonly
+            return await authenticate_home_token_readonly(request.cookies.get(settings.operator_auth_cookie_name))
+        return await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))

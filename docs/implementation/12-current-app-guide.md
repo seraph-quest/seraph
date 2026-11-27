@@ -1350,7 +1350,7 @@ them against the catalogues:
 - `required` is true exactly for `seraph-trust`;
 - a gap's bundle must match its planned seam;
 - a gap's seam must not already be a domain;
-- a gap's owner must be listed in `GAP_OWNERS`.
+- a gap's owner must be a tracked issue listed in `GAP_OWNERS`.
 
 The gaps, by planned owner:
 - `seraph.settings.v1`, `seraph.http.v1` and `seraph.websocket.v1`
@@ -1366,9 +1366,11 @@ The gaps, by planned owner:
 - the Python-spawns-Node `CordisHost` and its lifespan steps (#1211, after the
   #1210 Node entry);
 - the `seraph-capabilities` seams: browser (#1327), repository (#1328),
-  sandbox, process and tool packages (#1329), documents (#1330) and MCP adapters
-  (#1331). The mail, calendar and GitHub executor seams have no tracking issue
-  yet (`UNTRACKED_SEAM_SLICE`).
+  sandbox, process and tool packages (#1329), documents (#1330), MCP adapters
+  (#1331), mail (#1333), calendar (#1334) and GitHub (#1335).
+
+Every gap cites a tracked issue listed in `GAP_OWNERS`; the guard fails on a gap
+whose owner is not one, and on a `GAP_OWNERS` entry no gap uses.
 
 Scheduler-gated system jobs map to the domain `lifecycle.job_domain` gives
 them, and the test checks that.

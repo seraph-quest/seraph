@@ -62,6 +62,7 @@ shapes rows here. A new domain needs its row in ``ownership.DOMAINS`` and
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -86,10 +87,9 @@ PLANNED_SEAMS: Mapping[str | None, str | None] = MappingProxyType({
     "seraph.github.v1": "seraph-capabilities",
     None: None,
 })
-# The tracked work expected to own a gap: an A3.3 slice (#1026 slicing plan) or
-# a capability seam slice (ADR-036 §5). ``UNTRACKED_SEAM_SLICE`` marks a seam
-# no issue tracks yet; it stays visible in every listing until one does.
-UNTRACKED_SEAM_SLICE = "untracked: ADR-036 §5 capability seam slice"
+# The tracked issue expected to own a gap: an A3.3 slice (#1026 slicing plan)
+# or a capability seam slice (ADR-036 §5). Every gap cites one of these; a new
+# gap needs its issue filed and listed here first.
 GAP_OWNERS = MappingProxyType({
     "#1208": "A3.3-5 interface domains and plugins (settings, http, websocket)",
     "#1209": "A3.3-6 observer and channel interface plugins",
@@ -99,7 +99,9 @@ GAP_OWNERS = MappingProxyType({
     "#1329": "sandbox, process and tool-package capability seam",
     "#1330": "documents capability seam",
     "#1331": "MCP external-adapter seam",
-    UNTRACKED_SEAM_SLICE: "capability seam with no tracking issue yet",
+    "#1333": "mail capability seam",
+    "#1334": "calendar capability seam",
+    "#1335": "GitHub capability seam",
 })
 
 
@@ -465,17 +467,17 @@ GAPS: tuple[Gap, ...] = (
            "src.tools.mcp_manager:MCPManager._run_async": "thread"}),
     # ADR-036 §4 puts mail, calendar and GitHub in seraph-capabilities; these
     # owned executors are not the connections domain's credential references.
-    *_gap("seraph.mail.v1", _CAP, UNTRACKED_SEAM_SLICE, "mail read/reply execution has no seam or domain row yet",
+    *_gap("seraph.mail.v1", _CAP, "#1333", "mail read/reply execution has no seam or domain row yet",
           {**{f"src.integrations.mail_reply_runtime:{name}": "thread" for name in (
                "actual_source", "execute", "observe", "paired_account", "reserve_private", "snapshot")},
            "src.integrations.mail_reply_runtime:run_owned": "background_task",
            "src.integrations.gmail_controls:run_mail_source_control": "thread"}),
-    *_gap("seraph.calendar.v1", _CAP, UNTRACKED_SEAM_SLICE, "calendar reschedule execution has no seam or domain row yet",
+    *_gap("seraph.calendar.v1", _CAP, "#1334", "calendar reschedule execution has no seam or domain row yet",
           {**{f"src.integrations.calendar_reschedule_runtime:{name}": "thread" for name in (
                "create_consent", "execute", "observe", "paired_proof", "reserve_private", "snapshot")},
            "src.integrations.calendar_reschedule_runtime:run_owned": "background_task",
            "src.integrations.calendar_controls:_run_control": "thread"}),
-    *_gap("seraph.github.v1", _CAP, UNTRACKED_SEAM_SLICE, "the GitHub CLI reader has no seam or domain row yet",
+    *_gap("seraph.github.v1", _CAP, "#1335", "the GitHub CLI reader has no seam or domain row yet",
           {"src.integrations.github_cli:GhCliReader._run": "background_task thread",
            "src.integrations.github_cli:GhCliReader.alocate": "thread"}),
 )
@@ -521,6 +523,9 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
 )
 
 
+_ISSUE_REF = re.compile(r"#[1-9][0-9]*")
+
+
 def row_problems(row: Owner | Gap | Exclusion) -> list[str]:
     """Why one row is invalid; empty when it is consistent with the domain, bundle and owner catalogues."""
     from .ownership import DOMAINS
@@ -555,6 +560,8 @@ def row_problems(row: Owner | Gap | Exclusion) -> list[str]:
             problems.append("bundle_unknown")
         if row.owner not in GAP_OWNERS:
             problems.append("gap_owner_unknown")
+        if not _ISSUE_REF.fullmatch(row.owner):
+            problems.append("gap_owner_untracked")
     if isinstance(row, (Gap, Exclusion)) and (not row.reason.strip() or "\n" in row.reason):
         problems.append("reason_not_one_line")
     if isinstance(row, Exclusion) and row.kind not in EXCLUSION_KINDS:
@@ -809,5 +816,5 @@ def stale(found: set[tuple[str, str]]) -> list[tuple[str, str]]:
 
 __all__ = ["EXCLUSIONS", "EXCLUSION_KINDS", "Exclusion", "GAPS", "GAP_OWNERS", "Gap", "OWNERS", "Owner",
            "PLANNED_SEAMS", "PROCESS_HOOK_CALLS", "PROVIDERS", "SHAPES", "SUBPROCESS_CALLS", "THREAD_CALLS",
-           "UNTRACKED_SEAM_SLICE", "accounted", "row_problems", "rows", "scan_lifecycle_shapes", "stale",
+           "accounted", "row_problems", "rows", "scan_lifecycle_shapes", "stale",
            "unaccounted"]

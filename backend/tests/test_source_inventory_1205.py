@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+import re
 import textwrap
 
 import pytest
@@ -48,6 +49,14 @@ def test_every_row_passes_row_problems():
         assert bundle is None or bundle in BUNDLE_NAMES, target
 
 
+def test_every_gap_cites_a_tracked_issue():
+    assert not hasattr(inventory, "UNTRACKED_SEAM_SLICE")
+    untracked = {row.key: row.owner for row in inventory.GAPS if not re.fullmatch(r"#[1-9][0-9]*", row.owner)}
+    assert not untracked, f"gaps whose owner is not a tracked issue: {untracked}"
+    assert all(re.fullmatch(r"#[1-9][0-9]*", owner) for owner in inventory.GAP_OWNERS), dict(inventory.GAP_OWNERS)
+    assert {row.owner for row in inventory.GAPS} == set(inventory.GAP_OWNERS), "remove unused GAP_OWNERS entries"
+
+
 _OWNER = inventory.Owner("src.pkg.mod:Thing", frozenset({"lifecycle_method"}), "seraph.memory.v1",
                          "seraph-domains", "python", False)
 _GAP = inventory.Gap("src.pkg.mod:Thing", frozenset({"router"}), "seraph.http.v1", "seraph-cockpit", "python",
@@ -67,6 +76,7 @@ _GAP = inventory.Gap("src.pkg.mod:Thing", frozenset({"router"}), "seraph.http.v1
     (dataclasses.replace(_GAP, bundle="seraph-edge"), "gap_bundle_mismatch"),
     (dataclasses.replace(_GAP, target="seraph.memory.v1"), "gap_has_owner_domain"),
     (dataclasses.replace(_GAP, owner="#9999"), "gap_owner_unknown"),
+    (dataclasses.replace(_GAP, owner="untracked: some seam"), "gap_owner_untracked"),
     (dataclasses.replace(_GAP, reason="two\nlines"), "reason_not_one_line"),
     (inventory.Exclusion("src.pkg.mod:Thing", frozenset({"thread"}), "vibes", "why"), "exclusion_kind_unknown"),
     (inventory.Exclusion("src.pkg.mod:Thing", frozenset({"thread"}), "utility", " "), "reason_not_one_line"),

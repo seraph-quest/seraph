@@ -370,10 +370,10 @@ owner contradicts the catalogues. Partial because:
   composition;
 - a call reached only dynamically (`getattr`, `importlib`, a stored callable) is
   not seen by the scan;
-- most gaps belong to later A3.3 slices (#1208, #1209, #1211) or to the
-  capability seam issues (#1327 browser, #1328 repository, #1329 sandbox,
-  #1330 documents, #1331 MCP adapters), and the mail, calendar and GitHub
-  executor seams have no tracking issue yet.
+- the gaps are still unowned. Every gap cites a tracked issue: a later A3.3
+  slice (#1208, #1209, #1211) or a capability seam issue (#1327 browser,
+  #1328 repository, #1329 sandbox, #1330 documents, #1331 MCP adapters,
+  #1333 mail, #1334 calendar, #1335 GitHub).
 
 See the
 [guide section](./12-current-app-guide.md#source-inventory-1205).

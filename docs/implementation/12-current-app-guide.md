@@ -1301,55 +1301,87 @@ into its keyless run.
 
 This is A3.3 slice 2 (#1026, design §5). `runtime_plugins/inventory.py` is
 data plus a pure AST scan: it imports no runtime service, starts nothing and
-changes no composition.
+changes no composition. Its coverage is the lifecycle shapes the scan
+recognises, not every line of runtime code.
 
 **What the scan finds.** Each finding is a `module:symbol` key and a shape:
 - `lifecycle_method`: a `def start`/`def stop`, keyed by its class;
 - `scheduler_job`: an `add_job` call, and each system-job literal, keyed
   `init_scheduler[job=<id>]`;
-- `router`: an `APIRouter` or a route declared on the FastAPI `app`;
+- `router`: an `APIRouter`, an `add_api_route` call, or a route declared on the
+  FastAPI `app`;
 - `websocket`: a `@router.websocket` endpoint;
 - `app_factory`: a `FastAPI(...)` construction;
-- `background_task`: `asyncio.create_task`/`ensure_future` and `track_task`
-  (a repository's `create_task` method is not one);
-- `thread`: a `threading.Thread`;
-- `subprocess`: `asyncio.create_subprocess_*`, `subprocess.*`,
-  `os.fork`/`spawn`/`exec`, `pty.spawn` and `multiprocessing.Process`;
+- `background_task`: `asyncio.create_task`/`ensure_future`, the loop and
+  `asyncio.TaskGroup` forms, and `track_task` (a repository's `create_task`
+  method is not one);
+- `thread`: `threading.Thread`/`Timer`, `concurrent.futures.ThreadPoolExecutor`,
+  `asyncio.to_thread` and any `.run_in_executor(...)`;
+- `subprocess`: exactly `subprocess.Popen`/`run`/`call`/`check_call`/
+  `check_output`/`getoutput`/`getstatusoutput`,
+  `asyncio.create_subprocess_exec`/`create_subprocess_shell`, `os.system`/
+  `os.popen`, `pty.spawn`/`pty.fork`, `multiprocessing.Process`/`Pool` (also
+  through `get_context()`), `concurrent.futures.ProcessPoolExecutor`, the
+  `os.fork`/`forkpty`/`spawn*`/`exec*`/`posix_spawn*` prefixes, and a loop's
+  `subprocess_exec`/`subprocess_shell`;
+- `process_hook`: `atexit.register`, `signal.signal` and any
+  `.add_signal_handler(...)`;
 - `lifespan_step`: a step call in the `src.app` lifespan functions, keyed
-  `<function>[step=<callee>]`.
+  `<function>[step=<callee>]`, plus `@app.on_event` handlers and
+  `add_event_handler` calls.
+
+Names resolve through each module's imports, so `import subprocess as sp`,
+`from subprocess import run` and `from concurrent import futures` reach the same
+form. **Known limitation:** a call reached only dynamically is invisible to the
+scan. That covers `getattr`, `importlib`, `__import__`, `exec`/`eval`, and a
+callable first stored in a variable or attribute. Review has to catch those.
 
 **Where each finding goes.** Every finding is in exactly one table:
 
-| Table | Holds | Each row names |
+| Table | Holds | Each row states |
 | --- | --- | --- |
-| `OWNERS` | a responsibility whose domain row exists in `ownership.DOMAINS` | domain, the A3.3-1 bundle `trust.DOMAIN_BUNDLES` gives it, provider (`python` or `node`), required (true only for `seraph-trust`) |
-| `GAPS` | a responsibility with no plugin owner yet | planned seam, its ADR-036 §4 bundle, provider, required, owning work, reason |
+| `OWNERS` | a responsibility whose domain row exists in `ownership.DOMAINS` | domain, bundle, provider (`python` or `node`), required |
+| `GAPS` | a responsibility with no plugin owner yet | planned seam, bundle, provider, required, owning work, reason |
 | `EXCLUSIONS` | not a plugin by decision | kind (`bootstrap`, `utility`, `contract`, `test_helper`) and a one-line reason |
+
+Each row states its bundle and required flag explicitly. `row_problems` checks
+them against the catalogues:
+- an owner's bundle must be the one `trust.DOMAIN_BUNDLES` gives its domain;
+- `required` is true exactly for `seraph-trust`;
+- a gap's bundle must match its planned seam;
+- a gap's seam must not already be a domain;
+- a gap's owner must be listed in `GAP_OWNERS`.
 
 The gaps, by planned owner:
 - `seraph.settings.v1`, `seraph.http.v1` and `seraph.websocket.v1`
   (`seraph-cockpit`, #1208): every router and WebSocket endpoint, `create_app`,
-  the home projection, the native folder dialog and the operator-report routes
-  that spawn the strategy-claim scan;
+  the request-scoped threads and tasks of the API handlers, the REST and
+  WebSocket chat turn workers, the composition owner-transition API, the home
+  projection, the native folder dialog and the operator-report routes that spawn
+  the strategy-claim scan;
 - `seraph.observer.v1` (`seraph-edge`) and `seraph.channels.v1`
-  (`seraph-channels`), #1209: observer, selected-context and screenshot adapters,
-  the screen retention job, the lifespan's observer mode loading, and Telegram;
+  (`seraph-channels`), #1209: observer, capture-upload, screenshot and
+  selected-context adapters, the screen retention job, the lifespan's observer
+  mode loading, and Telegram;
 - the Python-spawns-Node `CordisHost` and its lifespan steps (#1211, after the
   #1210 Node entry);
-- the `seraph-capabilities` seams for browser, repository, sandbox (process
-  tools and tool packages), documents and MCP adapters. No tracking issue owns
-  these yet (`UNTRACKED_SEAM_SLICE`); ADR-036 §5 makes each its own slice.
+- the `seraph-capabilities` seams: browser (#1327), repository (#1328),
+  sandbox, process and tool packages (#1329), documents (#1330) and MCP adapters
+  (#1331). The mail, calendar and GitHub executor seams have no tracking issue
+  yet (`UNTRACKED_SEAM_SLICE`).
 
 Scheduler-gated system jobs map to the domain `lifecycle.job_domain` gives
 them, and the test checks that.
 
-**The guard.** `tests/test_source_inventory_1205.py` fails when a scanned
-finding is in no table, including a new shape inside an already-listed owner.
-It also fails when a row is no longer found, when an owner names a domain
-outside `DOMAINS` or a bundle other than its domain's, and when a gap names a
-domain that now exists. A new capability (for example a #1308 child) adds its
-rows here. Its domain row must exist before it can be an owner; until then it
-is a gap.
+**The guard.** `tests/test_source_inventory_1205.py` fails when:
+- a scanned finding is in no table, including a new shape inside an owner that
+  is already listed;
+- a row is no longer found;
+- `row_problems` rejects a row. A planted wrong-bundle row proves this check
+  can fail.
+
+A new capability (for example a #1308 child) adds its rows here. Its domain row
+must exist before it can be an owner; until then it is a gap.
 
 **Not yet built:** the inventory records ownership only. Interface domains,
 the worker entry and the Node entry are later slices (#1207 to #1211).

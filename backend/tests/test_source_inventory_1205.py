@@ -6,6 +6,7 @@ bundle, a listed gap with tracked work, or a reasoned exclusion.
 """
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 import textwrap
 
@@ -15,7 +16,7 @@ from src.runtime_plugins import inventory
 from src.runtime_plugins.lifecycle import job_domain
 from src.runtime_plugins.ownership import DOMAINS
 from src.runtime_plugins.profiles import BUNDLE_NAMES
-from src.runtime_plugins.trust import DOMAIN_BUNDLES, TRUST_BUNDLE
+from src.runtime_plugins.trust import TRUST_BUNDLE
 
 
 @pytest.fixture(scope="module")
@@ -36,45 +37,43 @@ def test_no_inventory_row_is_stale(scan):
     assert not gone, f"inventory rows the scan no longer finds (delete or rename them): {gone}"
 
 
-def test_each_key_is_listed_once_with_known_shapes():
+def test_every_row_passes_row_problems():
     rows = inventory.rows()
     assert len(rows) == len(inventory.OWNERS) + len(inventory.GAPS) + len(inventory.EXCLUSIONS)
-    for key, row in rows.items():
-        module, _, symbol = key.partition(":")
-        assert module.startswith("src") and symbol, key
-        assert row.shapes and row.shapes <= inventory.SHAPES, key
-
-
-def test_owners_name_a_real_domain_and_its_a33_1_bundle():
-    assert inventory.OWNERS
-    for row in inventory.OWNERS:
-        assert row.domain in DOMAINS, row.key
-        assert row.bundle == DOMAIN_BUNDLES[row.domain] and row.bundle in BUNDLE_NAMES, row.key
-        assert row.provider in inventory.PROVIDERS, row.key
-        # Required exactly for the pinned seraph-trust services (ADR-036 §3).
-        assert row.required is (row.bundle == TRUST_BUNDLE), row.key
-
-
-def test_gaps_are_unowned_and_name_their_bundle_owner_and_reason():
-    assert inventory.GAPS
-    for row in inventory.GAPS:
-        assert row.target not in DOMAINS, f"{row.key} has an owner domain now; move it to OWNERS"
-        assert row.target in inventory.PLANNED_SEAMS, row.key
-        assert row.bundle == inventory.PLANNED_SEAMS[row.target], row.key
-        assert row.bundle is None or row.bundle in BUNDLE_NAMES, row.key
-        assert row.owner in inventory.GAP_OWNERS, row.key
-        assert row.provider in inventory.PROVIDERS, row.key
-        assert row.reason.strip() and "\n" not in row.reason, row.key
+    assert inventory.OWNERS and inventory.GAPS and inventory.EXCLUSIONS
+    bad = {key: problems for key, row in rows.items() if (problems := inventory.row_problems(row))}
+    assert not bad, f"inventory rows that contradict the domain, bundle or owner catalogues: {bad}"
     for target, bundle in inventory.PLANNED_SEAMS.items():
         assert target is None or target not in DOMAINS, target
         assert bundle is None or bundle in BUNDLE_NAMES, target
 
 
-def test_every_exclusion_has_a_kind_and_a_one_line_reason():
-    assert inventory.EXCLUSIONS
-    for row in inventory.EXCLUSIONS:
-        assert row.kind in inventory.EXCLUSION_KINDS, row.key
-        assert row.reason.strip() and "\n" not in row.reason, row.key
+_OWNER = inventory.Owner("src.pkg.mod:Thing", frozenset({"lifecycle_method"}), "seraph.memory.v1",
+                         "seraph-domains", "python", False)
+_GAP = inventory.Gap("src.pkg.mod:Thing", frozenset({"router"}), "seraph.http.v1", "seraph-cockpit", "python",
+                     False, "#1208", "one line")
+
+
+@pytest.mark.parametrize(("row", "problem"), [
+    # A stated bundle that is not the domain's A3.3-1 bundle.
+    (dataclasses.replace(_OWNER, bundle="seraph-agent"), "owner_bundle_mismatch"),
+    (dataclasses.replace(_OWNER, bundle="seraph-nonesuch"), "bundle_unknown"),
+    (dataclasses.replace(_OWNER, domain="seraph.nonesuch.v1"), "owner_domain_unknown"),
+    (dataclasses.replace(_OWNER, required=True), "owner_required_mismatch"),
+    (dataclasses.replace(_OWNER, domain="seraph.state.v1", bundle=TRUST_BUNDLE), "owner_required_mismatch"),
+    (dataclasses.replace(_OWNER, provider="rust"), "provider_unknown"),
+    (dataclasses.replace(_OWNER, shapes=frozenset({"teleport"})), "shape_unknown"),
+    (dataclasses.replace(_OWNER, key="no-colon"), "key_invalid"),
+    (dataclasses.replace(_GAP, bundle="seraph-edge"), "gap_bundle_mismatch"),
+    (dataclasses.replace(_GAP, target="seraph.memory.v1"), "gap_has_owner_domain"),
+    (dataclasses.replace(_GAP, owner="#9999"), "gap_owner_unknown"),
+    (dataclasses.replace(_GAP, reason="two\nlines"), "reason_not_one_line"),
+    (inventory.Exclusion("src.pkg.mod:Thing", frozenset({"thread"}), "vibes", "why"), "exclusion_kind_unknown"),
+    (inventory.Exclusion("src.pkg.mod:Thing", frozenset({"thread"}), "utility", " "), "reason_not_one_line"),
+])
+def test_row_problems_rejects_a_planted_bad_row(row, problem):
+    assert inventory.row_problems(_OWNER) == [] and inventory.row_problems(_GAP) == []
+    assert problem in inventory.row_problems(row)
 
 
 def test_system_jobs_map_to_the_domain_that_gates_them(scan):
@@ -141,6 +140,82 @@ def test_scan_finds_each_planted_shape(tmp_path):
         ("src.pkg.planted:spawn", "thread"),
         ("src.pkg.planted:make", "app_factory"),
     }
+
+
+@pytest.mark.parametrize(("imports", "body", "shape"), [
+    # Executor and timer threads.
+    ("import asyncio", "asyncio.get_running_loop().run_in_executor(None, print)", "thread"),
+    ("import threading", "threading.Timer(1, print)", "thread"),
+    ("from threading import Timer", "Timer(1, print)", "thread"),
+    ("from concurrent.futures import ThreadPoolExecutor", "ThreadPoolExecutor(thread_name_prefix='p')", "thread"),
+    ("import concurrent.futures", "concurrent.futures.ThreadPoolExecutor(max_workers=1)", "thread"),
+    ("from concurrent import futures", "futures.ThreadPoolExecutor()", "thread"),
+    ("import asyncio", "asyncio.to_thread(print)", "thread"),
+    ("from asyncio import to_thread", "to_thread(print)", "thread"),
+    ("from threading import Thread as T", "T(target=print)", "thread"),
+    # Subprocess aliases and forms.
+    ("import subprocess as sp", "sp.run(['true'])", "subprocess"),
+    ("from subprocess import run", "run(['true'])", "subprocess"),
+    ("from subprocess import check_output", "check_output(['true'])", "subprocess"),
+    ("from subprocess import Popen as P", "P(['true'])", "subprocess"),
+    ("import os", "os.system('true')", "subprocess"),
+    ("import os", "os.popen('true')", "subprocess"),
+    ("import os", "os.execv('/bin/true', ['true'])", "subprocess"),
+    ("import multiprocessing as mp", "mp.Process(target=print)", "subprocess"),
+    ("from multiprocessing import Process", "Process(target=print)", "subprocess"),
+    ("import multiprocessing", "multiprocessing.get_context('spawn').Process(target=print)", "subprocess"),
+    ("from concurrent.futures import ProcessPoolExecutor", "ProcessPoolExecutor()", "subprocess"),
+    ("import asyncio as aio", "aio.create_subprocess_exec('true')", "subprocess"),
+    ("import asyncio", "asyncio.get_running_loop().subprocess_exec(object, 'true')", "subprocess"),
+    # Task spawns.
+    ("from asyncio import create_task", "create_task(print())", "background_task"),
+    ("import asyncio", "asyncio.TaskGroup().create_task(print())", "background_task"),
+    # Routes, hooks and process-wide handlers.
+    ("", "app.add_api_route('/p', print)", "router"),
+    ("", "app.add_event_handler('startup', print)", "lifespan_step"),
+    ("import atexit", "atexit.register(print)", "process_hook"),
+    ("import signal", "signal.signal(signal.SIGTERM, print)", "process_hook"),
+    ("from signal import signal, SIGTERM", "signal(SIGTERM, print)", "process_hook"),
+    ("import asyncio", "asyncio.get_running_loop().add_signal_handler(15, print)", "process_hook"),
+])
+def test_scan_finds_each_planted_form(tmp_path, imports, body, shape):
+    source = f"{imports}\n\ndef planted(app):\n    {body}\n"
+    found = inventory.scan_lifecycle_shapes(_tree(tmp_path, {"pkg/planted.py": source}))
+    assert found == {("src.pkg.planted:planted", shape)}
+
+
+def test_scan_finds_taskgroup_and_on_event_forms(tmp_path):
+    source = """
+        import asyncio
+        import concurrent.futures
+
+        POOL = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="planted")
+
+        async def grouped():
+            async with asyncio.TaskGroup() as group:
+                group.create_task(asyncio.sleep(0))
+
+        @app.on_event("startup")
+        async def boot():
+            pass
+    """
+    found = inventory.scan_lifecycle_shapes(_tree(tmp_path, {"pkg/planted.py": source}))
+    assert found == {("src.pkg.planted:<module>", "thread"), ("src.pkg.planted:grouped", "background_task"),
+                     ("src.pkg.planted:boot", "lifespan_step")}
+
+
+def test_scan_ignores_non_spawning_lookalikes(tmp_path):
+    source = """
+        from threading import Lock
+        import signal
+
+        def planted(repository, board):
+            Lock()
+            repository.create_task(title="a board row")
+            board.run(["not", "subprocess"])
+            signal.getsignal(signal.SIGTERM)
+    """
+    assert inventory.scan_lifecycle_shapes(_tree(tmp_path, {"pkg/planted.py": source})) == set()
 
 
 def test_guard_fails_on_a_planted_unmapped_owner(tmp_path, scan):

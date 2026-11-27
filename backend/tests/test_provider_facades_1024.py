@@ -812,3 +812,93 @@ async def test_sigterm_ordering_aborts_a_drain_blocked_by_a_lifespan_owned_holde
     assert task.done() and copied == [], "no backup ran during shutdown"
     assert app.state.provider_worker.last_maintenance["reason_code"] == "state_maintenance_shutdown"
     assert state_gate() == (None, None) and worker_module.current_worker() is None
+
+
+@pytest.mark.asyncio
+async def test_a_control_session_admitted_after_the_wake_is_drained_before_the_copy(db, monkeypatch):
+    """Control admission closes and the open count is read in one step; no session spans the copy."""
+    calls, second_drain, held, release = [], asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_drain = db_engine.drain_open_sessions
+    holders = []
+
+    async def control_holder():
+        with db_engine.maintenance_control_scope():
+            async with get_session() as session:
+                await session.execute(select(Goal.id).limit(1))
+                held.set()
+                await release.wait()
+
+    async def racing_drain(wake=None):
+        calls.append(len(calls))
+        if len(calls) == 2:
+            second_drain.set()
+        await original_drain(wake)
+        if len(calls) == 1:
+            # A status/abort request is admitted in the gap between the wake and the copy.
+            holders.append(asyncio.create_task(control_holder()))
+            await held.wait()
+    monkeypatch.setattr(db_engine, "drain_open_sessions", racing_drain)
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    ran = []
+
+    async def maintain():
+        async with worker.maintenance("backup"):
+            ran.append(db_engine.open_session_count())
+    task = asyncio.create_task(maintain())
+    await second_drain.wait()
+    assert ran == [], "the step waits for the late control session"
+    # Control admission is closed now: no further status request can open a session.
+    with db_engine.maintenance_control_scope():
+        with pytest.raises(StateProviderUnavailable):
+            async with get_session():
+                pass
+    release.set()
+    await holders[0]
+    await task
+    assert ran == [0], "no session is open during the dispose and the copy"
+    assert state_gate() == ("active", None)
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_that_cannot_be_resolved_refuses_typed_and_reopens_the_gate(db, monkeypatch):
+    import src.workspace as workspace_module
+    from src.workspace.state_registry import WorkspaceStateError
+
+    original_root = workspace_module.canonical_workspace_root
+    refused = []
+
+    def unresolvable(root):
+        # Only the backup step's own resolution fails; resume's predicates resolve normally.
+        if not refused:
+            refused.append(root)
+            raise WorkspaceStateError("workspace root changed")
+        return original_root(root)
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    monkeypatch.setattr(workspace_module, "canonical_workspace_root", unresolvable)
+    await worker.start_backup()
+    await worker._maintenance_task
+    assert state_gate() == ("active", None), "never stuck in maintenance"
+    assert refused and worker.last_maintenance["reason_code"] == "state_maintenance_workspace_unavailable"
+    assert worker.maintenance_status()["phase"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_shutdown_rescue_uses_the_real_handle_of_a_step_that_copied(db):
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    await worker._begin_maintenance("backup")
+    worker._maintenance_handle = {"operation": "backup", "outcome": "completed", "reason_code": None,
+                                  "receipt": None, "copied": True}
+
+    async def ended():
+        return None
+    worker._maintenance_task = asyncio.create_task(ended())
+    await worker._maintenance_task
+    await worker.wait_maintenance()
+    # A copy ran, so shutdown keeps the gate closed instead of reopening it as for an abort.
+    assert state_gate() == ("maintenance", "state_provider_maintenance")
+    assert worker.status["state"].state == "deactivated"
+    assert worker.last_maintenance["resume_reason_code"] == "state_maintenance_shutdown"
+    worker.close_gate()

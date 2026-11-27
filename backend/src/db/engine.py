@@ -252,9 +252,11 @@ _MAINTENANCE_CONTROL_OPEN: list[bool] = [False]
 _MAINTENANCE_CONTROL_SCOPE: ContextVar[bool] = ContextVar("seraph_maintenance_control_scope", default=False)
 
 
-def set_maintenance_control(open_: bool) -> None:
+def set_maintenance_control(open_: bool) -> int:
+    """Open or close control admission; returns the sessions open at that same instant."""
     with _OPEN_SESSIONS.lock:
         _MAINTENANCE_CONTROL_OPEN[0] = bool(open_)
+        return _OPEN_SESSIONS.open
 
 
 @contextmanager

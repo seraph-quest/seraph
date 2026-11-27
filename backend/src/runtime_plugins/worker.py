@@ -357,6 +357,8 @@ class ProviderWorker:
         self._maintenance_phase: str | None = None
         self._maintenance_abort: str | None = None
         self._maintenance_task: asyncio.Task | None = None
+        # The running step's handle once it entered its context (resume needs ``copied``).
+        self._maintenance_handle: dict | None = None
         self._shutting_down = False
         # Statuses held across a maintenance window, restored by its predicates.
         self.last_maintenance: dict | None = None
@@ -676,13 +678,21 @@ class ProviderWorker:
             await self._begin_maintenance(operation)
         handle = {"operation": operation, "outcome": "completed", "reason_code": None, "receipt": None,
                   "copied": False}
+        self._maintenance_handle = handle
         try:
-            await drain_open_sessions(self._maintenance_wake)
-            if self._maintenance_abort is not None:
-                # Woken by an operator abort or by shutdown before anything was copied.
-                raise StateMaintenanceRefused(self._maintenance_abort)
+            while True:
+                await drain_open_sessions(self._maintenance_wake)
+                if self._maintenance_abort is not None:
+                    # Woken by an operator abort or by shutdown before anything was copied.
+                    raise StateMaintenanceRefused(self._maintenance_abort)
+                # Close control admission and read the open count in one step: a status or
+                # abort request admitted after the wake would otherwise be open (and may
+                # write auth bookkeeping) during the dispose and the copy. Nothing more can
+                # be admitted after this, so a second drain always ends.
+                if set_maintenance_control(False) == 0:
+                    break
+                self._maintenance_wake = asyncio.Event()
             self._maintenance_phase = "copying"
-            set_maintenance_control(False)
             handle["copied"] = True
             await close_db()
             if not await checkpoint_wal():
@@ -703,7 +713,16 @@ class ProviderWorker:
         """Reopen the gate only on proof; a resume failure surfaces typed, never raw."""
         from src.db.engine import set_maintenance_control, set_state_gate, state_provider_scope
         failure: BaseException | None = None
-        async with self._status_lock:
+        try:
+            await self._status_lock.acquire()
+        except BaseException:
+            # Cancelled before the resume could start: fail closed, never stay in ``maintenance``.
+            if self._maintenance is not None:
+                if not self._closed:
+                    set_state_gate("failed", "state_maintenance_resume_failed")
+                self._end_maintenance()
+            raise
+        try:
             self._maintenance_phase = "resuming"
             set_maintenance_control(False)
             try:
@@ -760,13 +779,19 @@ class ProviderWorker:
                 else:
                     set_state_gate("active")
             finally:
-                self._maintenance = None
-                self._maintenance_wake = self._maintenance_phase = self._maintenance_abort = None
-                self._maintenance_idle.set()
+                self._end_maintenance()
+        finally:
+            self._status_lock.release()
         if failure is not None:
             if isinstance(failure, asyncio.CancelledError):
                 raise failure
             raise StateMaintenanceRefused("state_maintenance_resume_failed") from failure
+
+    def _end_maintenance(self) -> None:
+        self._maintenance = None
+        self._maintenance_wake = self._maintenance_phase = self._maintenance_abort = None
+        self._maintenance_handle = None
+        self._maintenance_idle.set()
 
     def abort_maintenance(self, reason_code: str = "state_maintenance_aborted") -> bool:
         """Wake a step still draining so it refuses ``reason_code``; a copying step is never cut."""
@@ -795,9 +820,9 @@ class ProviderWorker:
         self.begin_shutdown()
         task = self._maintenance_task
         if task is not None and task.done() and self._maintenance is not None:
-            await self._resume_after_maintenance({"operation": self._maintenance, "outcome": "failed",
-                                                  "reason_code": "state_maintenance_shutdown", "receipt": None,
-                                                  "copied": False})
+            # Rescue with the step's real handle when it had one, so a copy is never taken for
+            # an abort (and the gate never reopens over a copy that ran).
+            await self._resume_after_maintenance(self._maintenance_handle or self._unentered_handle())
         await self._maintenance_idle.wait()
 
     async def start_backup(self) -> dict:
@@ -816,6 +841,15 @@ class ProviderWorker:
             await self.maintenance_backup(_begun=True)
         except StateMaintenanceRefused as exc:
             logger.warning("In-process backup refused: %s", exc.reason_code)
+        finally:
+            if self._maintenance is not None and self._maintenance_handle is None:
+                # The gate closed in ``start_backup`` but the step never entered its
+                # context (so no resume ran): nothing was copied, reopen through resume.
+                await self._resume_after_maintenance(self._unentered_handle())
+
+    def _unentered_handle(self) -> dict:
+        return {"operation": self._maintenance or "backup", "outcome": "failed",
+                "reason_code": "state_maintenance_interrupted", "receipt": None, "copied": False}
 
     def maintenance_status(self) -> dict:
         from src.db.engine import open_session_count
@@ -838,10 +872,13 @@ class ProviderWorker:
         from config.settings import settings
         from src.workspace import canonical_workspace_registry, canonical_workspace_root
         from src.workspace.lifecycle import WorkspaceLifecycleError, backup_workspace
-        root = canonical_workspace_root(self.workspace_dir or settings.workspace_dir)
         cancelled = False
         async with self.maintenance("backup", _begun=_begun) as handle:
-            registry = canonical_workspace_registry(root)
+            try:
+                root = canonical_workspace_root(self.workspace_dir or settings.workspace_dir)
+                registry = canonical_workspace_registry(root)
+            except Exception as exc:  # noqa: BLE001 - typed refusal; the resume reopens the gate
+                raise StateMaintenanceRefused("state_maintenance_workspace_unavailable") from exc
             context = contextvars.copy_context()
             future = asyncio.get_running_loop().run_in_executor(
                 None, functools.partial(context.run, backup_workspace, root, registry=registry))

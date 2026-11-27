@@ -3,7 +3,8 @@ import test from 'node:test';
 import { Context, FiberState, symbols } from 'cordis';
 import { readFileSync } from 'node:fs';
 import { Composition, MANDATORY_PLUGINS, validateProfile } from '../src/composition.js';
-import { decodeJson, validateFrame, validateProviderReport } from '../src/protocol.js';
+import { decodeJson, validateFacadeRequest, validateFrame, validateProviderReport } from '../src/protocol.js';
+import { facadeActivations } from '../src/plugins/proxy.js';
 import { hostProviderReports } from '../src/plugins/state/index.js';
 import { invokeService, servicePlugins, SERVICE_KEYS } from '../src/plugins/index.js';
 import { SERVICE_METHODS, validateInput, validateResult, type Input, type ServiceMethod } from '../src/contracts/methods.js';
@@ -272,4 +273,36 @@ test('the dispatch facade is a readiness-only provider: no method, timer, store 
     assert.equal(order.indexOf('seraph.dispatch.v1'), order.indexOf('seraph.scheduler.v1') + 1);
     assert.equal(SERVICE_KEYS[order.indexOf('seraph.dispatch.v1')], 'seraphDispatch');
   } finally { await composition.dispose(); }
+});
+
+test('facade activation frames are closed, never name a pinned domain, and a deactivated facade forwards nothing (#1024)', async () => {
+  const frame = {protocol: 1, boot_nonce: 'a'.repeat(64), request_id: 'r-2', seq: 2, kind: 'request', method: 'provider.activate',
+    invocation_ref: null, composition_epoch: null, composition_digest: 'b'.repeat(64), package_digest: 'c'.repeat(64), deadline_at: 2000000000000,
+    payload: {domain: 'seraph.memory.v1', owner_kind: 'cordis', epoch: 2, composition_digest: 'd'.repeat(64)}};
+  assert.equal(validateFrame(frame as never).method, 'provider.activate');
+  for (const change of [{domain: 'seraph.state.v1'}, {domain: 'seraph.authority.v1'}, {domain: 'seraph.audit.v1'}, {domain: 'seraph.tasks.v1'},
+    {owner_kind: 'legacy'}, {epoch: 0}, {vault_key: 'k'}, {database_handle: 'x'}]) {
+    assert.throws(() => validateFrame({...frame, payload: {...frame.payload, ...change}} as never), /facade|fields|integer/);
+  }
+  assert.ok(validateFacadeRequest({domain: 'seraph.goals.v1', epoch: 3, reason_code: 'host_stopping'}, 'provider.deactivate'));
+  assert.throws(() => validateFrame({...frame, kind: 'response', payload: {domain: 'seraph.memory.v1', state: 'activated', epoch: 2, plugin_digest: null, reason_code: null}} as never), /facade/);
+  assert.ok(validateFrame({...frame, kind: 'response', payload: {domain: 'seraph.memory.v1', state: 'activated', epoch: 2, plugin_digest: 'd'.repeat(64), reason_code: null}} as never));
+  const composition = new Composition(profile()); await composition.start();
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive: () => true, request: async () => { contacts++; return blocked; }};
+  try {
+    assert.match(composition.facadeDigest('seraph.memory.v1') ?? '', /^[0-9a-f]{64}$/);
+    assert.equal(composition.facadeDigest('seraph.unreviewed.v1'), undefined);
+    // Never asked: a legacy-owned facade keeps forwarding (Python decides).
+    assert.deepEqual(await composition.invoke('memory.retrieve', {query_ref: 'native-1', limit: 1}, client), blocked);
+    assert.equal(contacts, 1);
+    facadeActivations.deactivate('seraph.memory.v1', 2);
+    assert.deepEqual(await composition.invoke('memory.retrieve', {query_ref: 'native-1', limit: 1}, client),
+      {status: 'blocked', reason_code: 'provider_facade_inactive', memory_status: 'no_learning'});
+    assert.equal(contacts, 1, 'a deactivated facade never contacts the native owner');
+    facadeActivations.activate('seraph.memory.v1', 3);
+    assert.deepEqual(await composition.invoke('memory.retrieve', {query_ref: 'native-1', limit: 1}, client), blocked);
+    assert.equal(contacts, 2);
+  } finally { facadeActivations.clear(); await composition.dispose(); }
+  assert.equal(composition.facadeDigest('seraph.memory.v1'), undefined, 'a disposed composition activates nothing');
 });

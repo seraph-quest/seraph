@@ -39,6 +39,7 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.auth.service:_LOCAL_ROOT_LOCKS": Entry("container", RESTORE),
     "src.browser.task_lane:_QUARANTINED_LANES": Entry("container", RESTORE),
     "src.db.engine:_STATE_GATE": Entry("container", RESTORE),
+    "src.db.engine:_MAINTENANCE_CONTROL_OPEN": Entry("container", RESTORE),
     "src.evolution.engine:_EVOLUTION_TARGET_LOCKS": Entry("container", RESTORE),
     "src.execution.repo_isolation:_cache": Entry("container", RESTORE),
     "src.execution.repo_isolation:_userns_flag_cache": Entry("container", RESTORE),

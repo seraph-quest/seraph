@@ -2,7 +2,7 @@
 import { TextDecoder } from 'node:util';
 import type { Readable, Writable } from 'node:stream';
 import { Resources } from './resources.js';
-import { isServiceMethod, validateInput, validateResult, type ServiceMethod } from './contracts/methods.js';
+import { FACADE_DOMAINS, isServiceMethod, validateInput, validateResult, type ServiceMethod } from './contracts/methods.js';
 import { PROVIDER_DOMAINS, type ProviderReport } from './contracts/state.js';
 
 export const MAX_FRAME = 1_048_576;
@@ -10,10 +10,14 @@ export const CONTROL_TIMEOUT_MS = 5_000;
 export const ORDINARY_TIMEOUT_MS = 30_000;
 export const MAX_PENDING = 32;
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel' | ProviderMethod | ServiceMethod;
+export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel' | ProviderMethod | FacadeMethod | ServiceMethod;
 /** Host-to-child provider reports (#1024); the child never sends one. */
 export type ProviderMethod = 'provider.readiness' | 'provider.quiesce';
 export const PROVIDER_METHODS: ReadonlySet<string> = new Set(['provider.readiness', 'provider.quiesce']);
+/** Host-to-child facade activation of a Cordis-owned domain (#1024): the
+ * facade's answer is the decision, Python's provider is the mechanism. */
+export type FacadeMethod = 'provider.activate' | 'provider.deactivate';
+export const FACADE_METHODS: ReadonlySet<string> = new Set(['provider.activate', 'provider.deactivate']);
 export interface Frame {
   protocol: 1; boot_nonce: string; request_id: string; seq: number;
   kind: 'request' | 'response'; method: Method; invocation_ref: string | null;
@@ -22,7 +26,7 @@ export interface Frame {
 }
 export class ProtocolError extends Error {}
 const fields = ['protocol', 'boot_nonce', 'request_id', 'seq', 'kind', 'method', 'invocation_ref', 'composition_epoch', 'composition_digest', 'package_digest', 'deadline_at', 'payload'];
-const methods = new Set<string>(['bootstrap.hello', 'runtime.ready', 'runtime.status', 'runtime.quiesce', 'runtime.shutdown', 'invocation.cancel', 'provider.readiness', 'provider.quiesce']);
+const methods = new Set<string>(['bootstrap.hello', 'runtime.ready', 'runtime.status', 'runtime.quiesce', 'runtime.shutdown', 'invocation.cancel', 'provider.readiness', 'provider.quiesce', 'provider.activate', 'provider.deactivate']);
 const hex64 = /^[0-9a-f]{64}$/;
 const token = /^[A-Za-z0-9_.:-]{1,128}$/;
 
@@ -136,6 +140,36 @@ export function validateProviderReport(value: Json | undefined, method: string):
   integer(report.epoch, 1);
   return report as unknown as ProviderReport;
 }
+export interface FacadeActivate { domain: (typeof FACADE_DOMAINS)[number]; owner_kind: 'cordis'; epoch: number; composition_digest: string; }
+export interface FacadeDeactivate { domain: (typeof FACADE_DOMAINS)[number]; epoch: number; reason_code: string; }
+const facadeDomain = (value: Json | undefined): boolean => typeof value === 'string' && (FACADE_DOMAINS as readonly string[]).includes(value);
+/** Closed facade activation request: a pinned or Python-only domain is never activatable. */
+export function validateFacadeRequest(value: Json | undefined, method: string): FacadeActivate | FacadeDeactivate {
+  if (method === 'provider.activate') {
+    const request = closed(value, ['domain', 'owner_kind', 'epoch', 'composition_digest']);
+    if (!facadeDomain(request.domain) || request.owner_kind !== 'cordis' || typeof request.composition_digest !== 'string' || !hex64.test(request.composition_digest)) throw new ProtocolError('invalid facade activation');
+    integer(request.epoch, 1);
+    return request as unknown as FacadeActivate;
+  }
+  const request = closed(value, ['domain', 'epoch', 'reason_code']);
+  if (!facadeDomain(request.domain) || typeof request.reason_code !== 'string' || !token.test(request.reason_code)) throw new ProtocolError('invalid facade deactivation');
+  integer(request.epoch, 1);
+  return request as unknown as FacadeDeactivate;
+}
+function facadeResponse(value: Json | undefined, method: string): void {
+  if (method === 'provider.deactivate') {
+    const result = closed(value, ['domain', 'state', 'epoch']);
+    if (!facadeDomain(result.domain) || result.state !== 'deactivated') throw new ProtocolError('invalid facade acknowledgement');
+    integer(result.epoch, 1);
+    return;
+  }
+  const result = closed(value, ['domain', 'state', 'epoch', 'plugin_digest', 'reason_code']);
+  const activated = result.state === 'activated';
+  if (!facadeDomain(result.domain) || (!activated && result.state !== 'unavailable')
+    || (result.plugin_digest !== null && (typeof result.plugin_digest !== 'string' || !hex64.test(result.plugin_digest)))
+    || (activated ? (result.reason_code !== null || result.plugin_digest === null) : (typeof result.reason_code !== 'string' || !token.test(result.reason_code)))) throw new ProtocolError('invalid facade acknowledgement');
+  integer(result.epoch, 1);
+}
 function plugins(value: Json | undefined): void {
   if (!Array.isArray(value) || value.length > 64) throw new ProtocolError('invalid plugins');
   const seen = new Set<string>();
@@ -168,10 +202,13 @@ export function validateFrame(value: Json): Frame {
   if (frame.kind === 'request') {
     if (frame.method === 'runtime.ready') throw new ProtocolError('ready is response only');
     if (PROVIDER_METHODS.has(frame.method)) validateProviderReport(payload, frame.method);
+    else if (FACADE_METHODS.has(frame.method)) validateFacadeRequest(payload, frame.method);
     else closed(payload, []);
   } else if (PROVIDER_METHODS.has(frame.method)) {
     const result = closed(payload, ['domain', 'state']);
     if (typeof result.domain !== 'string' || !(PROVIDER_DOMAINS as readonly string[]).includes(result.domain) || result.state !== (frame.method === 'provider.quiesce' ? 'quiescing' : 'recorded')) throw new ProtocolError('invalid provider acknowledgement');
+  } else if (FACADE_METHODS.has(frame.method)) {
+    facadeResponse(payload, frame.method);
   } else if (frame.method === 'runtime.ready') {
     const result = closed(payload, ['state', 'plugins']);
     if (result.state !== 'ready') throw new ProtocolError('invalid readiness');

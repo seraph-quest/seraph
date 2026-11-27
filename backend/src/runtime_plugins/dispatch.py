@@ -426,6 +426,7 @@ class NativeServiceDispatcher:
 
     async def dispatch(self, frame, *, called_scope):
         from src.auth.service import AuthFailure
+        from src.db.engine import StateProviderUnavailable
         from src.workflows.job_runtime import DurableJobError
         from .ownership import CompositionBindingError
         method = frame["method"]
@@ -457,9 +458,11 @@ class NativeServiceDispatcher:
             from .worker import domain_provider_unavailable
             unavailable = domain_provider_unavailable(METHOD_DOMAINS[method], *method_dependencies(
                 method, goal_bound=scope.binding.goal_bound, presets=scope.binding.presets_bound,
-                state=scope.binding.state_bound))
+                state=scope.binding.state_bound), vector=scope.binding.dependency_vector,
+                boot_nonce=called_scope.host_boot_nonce)
             if unavailable is not None:
-                # Any provider this method depends on that is degraded or failed (#1024) blocks typed.
+                # Any provider this method depends on that is degraded or failed, or a
+                # Cordis-owned facade without this boot's activation (#1024), blocks typed.
                 return blocked(unavailable)
             if scope.binding.native_branch == "governed":
                 from .governed_services import dispatch_governed
@@ -485,6 +488,12 @@ class NativeServiceDispatcher:
         except NativeServiceBlocked as exc:
             return blocked(exc.reason_code)
         except CompositionBindingError as exc:
+            return blocked(exc.reason_code)
+        except StateProviderUnavailable as exc:
+            # The state gate closed mid-call (maintenance or shutdown, #1024): typed, never a fence.
+            # A callback whose owner path spans more than one unit of work may already have
+            # committed an earlier one when a later session is refused, and that cannot be told
+            # apart here; the job's own CAS and recovery (not this result) say what landed.
             return blocked(exc.reason_code)
         except (AuthFailure, DurableJobError):
             return blocked("native_original_job_authority_changed")

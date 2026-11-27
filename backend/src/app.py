@@ -612,7 +612,13 @@ async def _provider_worker_lifespan(app: FastAPI):
     try:
         await worker.activate()
         async with _lifespan_services(app):
-            yield
+            try:
+                yield
+            finally:
+                # First teardown step, before the services stop (#1024): a
+                # maintenance step still draining is aborted, never turned into
+                # a backup by the holders shutdown is about to close.
+                worker.begin_shutdown()
     finally:
         try:
             mcp_manager.disconnect_all()
@@ -626,7 +632,12 @@ async def _provider_worker_lifespan(app: FastAPI):
                 shutdown_error = exc
             finally:
                 try:
-                    worker.close_gate()
+                    # A running in-process maintenance step (#1024) ends before the
+                    # gate closes and the lease it runs under is released.
+                    try:
+                        await worker.wait_maintenance()
+                    finally:
+                        worker.close_gate()
                 finally:
                     try:
                         await worker.close_state()
@@ -853,6 +864,8 @@ async def _lifespan_services(app: FastAPI):
                             cordis_host.node_path = Path(settings.cordis_node_path)
                         # Every (re)start reports what Python hosts to the facades (#1024).
                         cordis_host.provider_reports_source = app.state.provider_worker.current_reports
+                        # ... then asks each Cordis-owned facade domain's facade to activate.
+                        cordis_host.facade_activation_source = app.state.provider_worker.activate_facades
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
@@ -886,6 +899,7 @@ async def _lifespan_services(app: FastAPI):
                     except Exception:
                         logging.getLogger(__name__).exception("Runtime lifecycle shutdown failed")
                     cordis_host.provider_reports_source = None
+                    cordis_host.facade_activation_source = None
                     try:
                         await cordis_host.stop()
                     finally:
@@ -945,6 +959,14 @@ def create_app() -> FastAPI:
     # A route or service that lets an AuthFailure escape answers its typed
     # 4xx/503 with the reason code, never a bare 500 (#1175).
     app.add_exception_handler(AuthFailure, auth_failure_handler)
+    # A closed state gate (maintenance or shutdown, #1024) answers a typed 503.
+    from src.db.engine import StateProviderUnavailable
+
+    from src.auth.middleware import state_provider_unavailable_response
+
+    async def state_provider_unavailable(_request, error):
+        return state_provider_unavailable_response(error.reason_code)
+    app.add_exception_handler(StateProviderUnavailable, state_provider_unavailable)
 
     # Keep the authentication boundary outside API handlers so model and
     # capability authority cannot depend on model discretion. WebSocket

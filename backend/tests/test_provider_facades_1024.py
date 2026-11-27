@@ -487,7 +487,9 @@ def _ids(path: Path) -> dict:
 @pytest.mark.asyncio
 async def test_in_process_backup_and_host_restore_keep_canonical_ids_and_history(workspace_db):
     root, database = workspace_db
-    worker = attach(ProviderWorker())
+    # The production owner lease is held for the worker's life; the backup runs under it.
+    worker = attach(ProviderWorker(hold_workspace_lock=True, workspace_dir=str(root)))
+    worker.acquire_workspace()
     await worker.activate()
     async with get_session() as session:
         session.add(Memory(id="memory-1024", content="kept memory", summary="kept"))
@@ -518,12 +520,22 @@ async def test_in_process_backup_and_host_restore_keep_canonical_ids_and_history
     # Work after the backup, then the host-side restore against the stopped backend.
     async with get_session() as session:
         session.add(Memory(id="memory-after", content="after", summary="after"))
+    # While the backend holds its lease, the host CLI's fence cannot be taken.
+    from src.workspace import canonical_workspace_registry, canonical_workspace_root
+    from src.workspace.production import (DuplicateWorkspaceOwnerError, ProductionWorkspace, maintenance_fence,
+                                          reconcile_production_restore)
+    workspace = ProductionWorkspace(host_root=canonical_workspace_root(root))
+    with pytest.raises(DuplicateWorkspaceOwnerError):
+        with maintenance_fence(workspace):
+            pass
     worker.close_gate()
     await worker.close_state()
+    worker.release_workspace()
     worker.detach()
-    from src.workspace import canonical_workspace_registry
-    with lifecycle_fence_marker():
-        restore_workspace(root, archive, registry=canonical_workspace_registry(root), confirm=True)
+    with maintenance_fence(workspace):
+        # As the host CLI does against the stopped backend.
+        restore_workspace(root, archive, registry=canonical_workspace_registry(root), confirm=True,
+                          reconcile_restore=reconcile_production_restore)
     restored = _ids(root / "seraph.db")
     assert restored["memories"] == before["memories"] and restored["goals"] == before["goals"]
     assert restored["runtime_composition_states"] == before["runtime_composition_states"]
@@ -546,9 +558,103 @@ async def test_a_cancelled_backup_keeps_the_gate_closed_until_the_archive_step_e
     await asyncio.to_thread(started.wait)
     task.cancel()
     await asyncio.to_thread(lambda: None)
+    # The cancel reached the task, which still waits for the archive step.
+    assert task.cancelling() == 1 and not task.done()
     assert state_gate() == ("maintenance", "state_provider_maintenance"), "a cancel never reopens mid-copy"
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert state_gate() == ("active", None)
-    assert worker.last_maintenance["outcome"] == "completed"
+    # The archive step itself finished; only its caller was cancelled.
+    assert worker.last_maintenance["outcome"] == "completed" and worker.last_maintenance["audited"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_held_wal_refuses_the_copy_typed_and_audits_it(workspace_db, monkeypatch):
+    root, _database = workspace_db
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    from src.workspace import lifecycle
+    copied = []
+    monkeypatch.setattr(lifecycle, "backup_workspace", lambda *args, **kwargs: copied.append(args))
+    async with get_session() as session:
+        session.add(Memory(id="memory-wal", content="wal", summary="wal"))
+    with closing(sqlite3.connect(root / "seraph.db")) as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM memories").fetchall()
+        with pytest.raises(StateMaintenanceRefused, match="state_maintenance_checkpoint_busy"):
+            await worker.maintenance_backup()
+        reader.execute("COMMIT")
+    assert copied == [], "a busy checkpoint never copies a partial file"
+    assert state_gate() == ("active", None)
+    assert worker.last_maintenance["outcome"] == "failed" and worker.last_maintenance["audited"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_resume_interrupted_by_an_untyped_failure_leaves_the_gate_failed(db, monkeypatch):
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    seen = []
+
+    async def broken_tasks():
+        seen.append(state_gate())
+        raise RuntimeError("unexpected")
+    with pytest.raises(RuntimeError):
+        async with worker.maintenance("backup"):
+            monkeypatch.setitem(worker_module._PREDICATES, "tasks", broken_tasks)
+    # The predicate ran while the gate was still closed to everyone else.
+    assert seen == [("maintenance", "state_provider_maintenance")]
+    assert state_gate() == ("failed", "state_maintenance_resume_failed")
+    assert worker.snapshot()["maintenance"] is None and worker.last_maintenance["audited"] is False
+    with pytest.raises(StateProviderUnavailable):
+        async with get_session():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_running_maintenance_step(db, monkeypatch):
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    inside, leave = asyncio.Event(), asyncio.Event()
+
+    async def maintain():
+        async with worker.maintenance("backup"):
+            inside.set()
+            await leave.wait()
+    task = asyncio.create_task(maintain())
+    await inside.wait()
+    waiter = asyncio.create_task(worker.wait_maintenance())
+    await asyncio.to_thread(lambda: None)
+    assert not waiter.done(), "shutdown does not release the lease under a running step"
+    leave.set()
+    await task
+    await waiter
+    worker.close_gate()
+    assert state_gate() == ("deactivating", "state_provider_deactivating")
+
+
+@pytest.mark.asyncio
+async def test_the_backup_route_requires_an_operator_and_maps_refusals(db):
+    from fastapi import HTTPException
+    from src.api.runtime_composition import MaintenanceBackup, maintenance_backup
+    from src.auth.service import AuthenticatedOperator
+    request = SimpleNamespace(state=SimpleNamespace(operator=None), app=SimpleNamespace(state=SimpleNamespace()))
+    with pytest.raises(HTTPException) as denied:
+        await maintenance_backup(request, MaintenanceBackup(confirm="backup"))
+    assert denied.value.status_code == 401
+    operator = AuthenticatedOperator.__new__(AuthenticatedOperator)
+    principal = SimpleNamespace(authenticated=True, revoked=False, principal_id="operator:root")
+    object.__setattr__(operator, "principal", principal)
+    object.__setattr__(operator, "ownership_continuity", "stable")
+    request.state.operator = operator
+    with pytest.raises(HTTPException) as unavailable:
+        await maintenance_backup(request, MaintenanceBackup(confirm="backup"))
+    assert (unavailable.value.status_code, unavailable.value.detail["code"]) == (409, "state_maintenance_unavailable")
+    request.app.state.provider_worker = attach(ProviderWorker())
+    with pytest.raises(HTTPException) as refused:
+        await maintenance_backup(request, MaintenanceBackup(confirm="backup"))
+    assert (refused.value.status_code, refused.value.detail["code"]) == (409, "state_maintenance_unavailable")
+    object.__setattr__(operator, "ownership_continuity", "recovering")
+    with pytest.raises(HTTPException) as recovering:
+        await maintenance_backup(request, MaintenanceBackup(confirm="backup"))
+    assert recovering.value.status_code == 403

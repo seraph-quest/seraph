@@ -236,6 +236,19 @@ class _SessionCounter:
 
 
 _OPEN_SESSIONS = _SessionCounter()
+# The state provider's own resume checks run while the gate is still
+# ``maintenance``: only code inside ``state_provider_scope`` passes it.
+_STATE_PROVIDER_SCOPE: ContextVar[bool] = ContextVar("seraph_state_provider_scope", default=False)
+
+
+@contextmanager
+def state_provider_scope() -> Iterator[None]:
+    """Let the state provider's resume predicates open sessions through a ``maintenance`` gate."""
+    token = _STATE_PROVIDER_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _STATE_PROVIDER_SCOPE.reset(token)
 
 
 def set_state_gate(state: str | None, reason_code: str | None = None) -> None:
@@ -258,6 +271,8 @@ def state_gate() -> tuple[str | None, str | None]:
 
 def _require_state_gate_open() -> None:
     state, reason = _STATE_GATE
+    if state == "maintenance" and _STATE_PROVIDER_SCOPE.get():
+        return
     if state in _CLOSED_GATES:
         raise StateProviderUnavailable(reason or f"state_provider_{state}")
 

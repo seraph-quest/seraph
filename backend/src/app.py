@@ -626,7 +626,12 @@ async def _provider_worker_lifespan(app: FastAPI):
                 shutdown_error = exc
             finally:
                 try:
-                    worker.close_gate()
+                    # A running in-process maintenance step (#1024) ends before the
+                    # gate closes and the lease it runs under is released.
+                    try:
+                        await worker.wait_maintenance()
+                    finally:
+                        worker.close_gate()
                 finally:
                     try:
                         await worker.close_state()
@@ -948,6 +953,13 @@ def create_app() -> FastAPI:
     # A route or service that lets an AuthFailure escape answers its typed
     # 4xx/503 with the reason code, never a bare 500 (#1175).
     app.add_exception_handler(AuthFailure, auth_failure_handler)
+    # A closed state gate (maintenance or shutdown, #1024) answers a typed 503.
+    from src.db.engine import StateProviderUnavailable
+
+    async def state_provider_unavailable(_request, error):
+        return JSONResponse(status_code=503, content={"detail": {
+            "code": error.reason_code, "automatic_retry": False, "recovery_action": "retry_after_maintenance"}})
+    app.add_exception_handler(StateProviderUnavailable, state_provider_unavailable)
 
     # Keep the authentication boundary outside API handlers so model and
     # capability authority cannot depend on model discretion. WebSocket

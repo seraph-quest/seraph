@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from urllib.parse import urlsplit
 
 from config.settings import settings
-from src.db.engine import is_database_locked
+from src.db.engine import StateProviderUnavailable, is_database_locked
 from src.auth.service import (
     AuthFailure,
     AuthenticatedOperator,
@@ -392,6 +392,10 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
                 operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))
         except AuthFailure as exc:
             return _auth_failure_response(request.url.path, exc.code, status_code=401)
+        except StateProviderUnavailable as exc:
+            # The state gate is closed (maintenance or shutdown, #1024): not an
+            # authentication verdict; a typed 503 that keeps the cookie valid.
+            return _auth_failure_response(request.url.path, exc.reason_code, status_code=503)
         except (OperationalError, SQLAlchemyTimeoutError) as exc:
             # Storage contention is not an authentication verdict: answer an
             # explicit retryable 503 (the session cookie stays valid), never a

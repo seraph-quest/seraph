@@ -265,9 +265,10 @@ facade forwards nothing in the child. The pinned trust facades still only
 report readiness (operator decision on #1024). An in-process maintenance
 handoff takes a workspace backup from the running backend
 (`POST /api/runtime/maintenance/backup`): it closes the state gate, drains open
-sessions, disposes the engine and writes the archive under the owner lease the
-worker already holds, then reruns the mandatory predicates and reopens the
-gate (or leaves it `failed`). Partial because no production path yet moves
+sessions, disposes the engine, checkpoints the WAL and writes the archive under
+the owner lease the worker already holds, then reruns the mandatory predicates
+and audits the outcome with the gate still closed, reopening it only if they
+pass (otherwise it stays `failed`). Partial because no production path yet moves
 `goals`, `memory` or `artifacts` to Cordis (their cutover is its own ADR-036
 §5 slice), and restore and rollback stay with the host CLI against a stopped
 backend. See the

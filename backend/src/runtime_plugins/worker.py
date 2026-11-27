@@ -348,6 +348,9 @@ class ProviderWorker:
         self._facades: dict[str, dict] = {}
         self._facade_host = None
         self._maintenance: str | None = None
+        # Set while no maintenance step runs; shutdown waits on it before the lease goes.
+        self._maintenance_idle = asyncio.Event()
+        self._maintenance_idle.set()
         # Statuses held across a maintenance window, restored by its predicates.
         self.last_maintenance: dict | None = None
 
@@ -447,8 +450,9 @@ class ProviderWorker:
         """Ask the running child's facades to activate each Cordis-owned facade domain.
 
         Called by the host after the provider reports and before it admits
-        anything, on every child (re)start, and after a facade domain's owner
-        changed. The facade's answer is the decision: the provider activates
+        anything, on every child (re)start. (No production path changes a
+        facade domain's owner yet; a future cutover slice must call this after
+        its transition.) The facade's answer is the decision: the provider activates
         only on ``activated`` with the plugin digest the Cordis owner row and
         the reviewed build both name. A legacy-owned facade domain is never
         asked (Python decides). Never touches a mandatory provider.
@@ -504,7 +508,13 @@ class ProviderWorker:
     def facade_unavailable(self, runtime_domain: str, dependency, boot_nonce: str | None) -> str | None:
         """Typed reason when a Cordis-owned facade dependency lacks this boot's activation."""
         name = DOMAIN_PROVIDERS.get(runtime_domain)
-        if name not in FACADE_PROVIDERS or dependency is None or dependency.owner_kind != "cordis":
+        if name not in FACADE_PROVIDERS:
+            return None
+        if dependency is None:
+            # Unbound in the vector: fail closed while the current row is Cordis-owned.
+            row = self._facade_rows.get(name)
+            return f"native_provider_{name}_facade_inactive" if row is not None and row[0] == "cordis" else None
+        if dependency.owner_kind != "cordis":
             return None
         receipt = self._facades.get(name)
         host = self._facade_host
@@ -628,17 +638,20 @@ class ProviderWorker:
         """The in-process maintenance handoff through the state provider.
 
         Refuses typed, before closing anything, unless every mandatory
-        provider is active, no other maintenance runs and (production) this
-        worker holds the workspace owner lease. Then: the gate closes
-        (``maintenance``: later session requests fail typed, never hang),
-        dependent work blocks with ``native_provider_state_unavailable``,
-        open sessions drain (woken by the last one to close), the engine is
-        disposed, the WAL is checkpointed into the database file (busy refuses
-        typed), and the step runs under the held lease. Afterwards the
-        mandatory predicates run again (with the audit write probe); the gate
-        reopens only if they pass and stays ``failed`` otherwise.
+        provider is active, no other maintenance runs, the worker is not
+        shutting down and (production) it holds the workspace owner lease.
+        Then: the gate closes (``maintenance``: later session requests fail
+        typed, never hang), dependent work blocks with
+        ``native_provider_state_unavailable``, open sessions drain (woken by
+        the last one to close), the engine is disposed, the WAL is
+        checkpointed into the database file (busy refuses typed), and the step
+        runs under the held lease. The gate stays closed while the state
+        provider re-verifies every mandatory provider (inside
+        ``state_provider_scope``) and records the outcome; it reopens only if
+        all of them pass, and is left ``failed`` on any failure or interruption.
+        Yields a handle the step fills with its ``receipt`` or failure.
         """
-        from src.db.engine import drain_open_sessions, set_state_gate
+        from src.db.engine import checkpoint_wal, drain_open_sessions, set_state_gate
         from src.workspace.lifecycle import lifecycle_fence_marker
         if operation not in MAINTENANCE_OPERATIONS:
             raise StateMaintenanceRefused("state_maintenance_operation_unsupported")
@@ -651,48 +664,71 @@ class ProviderWorker:
             if self.hold_workspace_lock and self._owner is None:
                 raise StateMaintenanceRefused("state_maintenance_lease_missing")
             self._maintenance = operation
+            self._maintenance_idle.clear()
             set_state_gate("maintenance", "state_provider_maintenance")
             self.status["state"].state, self.status["state"].reason_code = "maintenance", "state_provider_maintenance"
+        handle = {"operation": operation, "outcome": "completed", "reason_code": None, "receipt": None}
         try:
             await drain_open_sessions()
             await close_db()
-            from src.db.engine import checkpoint_wal
             if not await checkpoint_wal():
                 # Another connection still holds the WAL: the file is not a whole copy.
                 raise StateMaintenanceRefused("state_maintenance_checkpoint_busy")
             with lifecycle_fence_marker():
-                yield
+                yield handle
+        except StateMaintenanceRefused as exc:
+            handle["outcome"], handle["reason_code"] = "failed", exc.reason_code
+            raise
+        except BaseException:
+            handle["outcome"], handle["reason_code"] = "failed", handle["reason_code"] or "state_maintenance_interrupted"
+            raise
         finally:
-            await self._resume_after_maintenance()
+            await self._resume_after_maintenance(handle)
 
-    async def _resume_after_maintenance(self) -> None:
-        from src.db.engine import set_state_gate
+    async def _resume_after_maintenance(self, handle: dict) -> None:
+        from src.db.engine import set_state_gate, state_provider_scope
         async with self._status_lock:
             try:
-                set_state_gate("activating")
-                await _state_predicate(run_init=False)
-                self.status["state"].state, self.status["state"].reason_code = "active", None
+                if self._closed:
+                    return  # shutdown began: its gate marks win, nothing reopens
+                try:
+                    with state_provider_scope():
+                        await _state_predicate(run_init=False)
+                        self.status["state"].state, self.status["state"].reason_code = "active", None
+                        for name in MANDATORY[1:]:
+                            await _PREDICATES[name]()
+                            self.status[name].state, self.status[name].reason_code = "active", None
+                            if name == "audit":
+                                self._write_failed.discard(name)
+                                self._record_audit_probe("passed", None)
+                        self.last_maintenance = await self._record_maintenance(handle)
+                        await self._read_facade_rows()
+                        for name in DEGRADABLE:
+                            try:
+                                await _PREDICATES[name]()
+                                self._facade_passed(name)
+                            except ProviderActivationError as exc:
+                                self.status[name].state, self.status[name].reason_code = "degraded", exc.reason_code
+                except BaseException as exc:
+                    typed = isinstance(exc, ProviderActivationError)
+                    provider = exc.provider if typed else "state"
+                    reason = exc.reason_code if typed else "state_maintenance_resume_failed"
+                    self.status[provider].state, self.status[provider].reason_code = "failed", reason
+                    set_state_gate("failed", reason)
+                    logger.error("Provider %s failed after maintenance: %s", provider, reason)
+                    self.last_maintenance = {**self._maintenance_details(handle), "audited": False,
+                                             "resume_reason_code": reason}
+                    if not typed:
+                        raise
+                    return
                 set_state_gate("active")
-                for name in MANDATORY[1:]:
-                    await _PREDICATES[name]()
-                    self.status[name].state, self.status[name].reason_code = "active", None
-                    if name == "audit":
-                        self._write_failed.discard(name)
-                        self._record_audit_probe("passed", None)
-            except ProviderActivationError as exc:
-                self.status[exc.provider].state, self.status[exc.provider].reason_code = "failed", exc.reason_code
-                set_state_gate("failed", exc.reason_code)
-                logger.error("Provider %s failed after maintenance: %s", exc.provider, exc.reason_code)
-                return
             finally:
                 self._maintenance = None
-            await self._read_facade_rows()
-            for name in DEGRADABLE:
-                try:
-                    await _PREDICATES[name]()
-                    self._facade_passed(name)
-                except ProviderActivationError as exc:
-                    self.status[name].state, self.status[name].reason_code = "degraded", exc.reason_code
+                self._maintenance_idle.set()
+
+    async def wait_maintenance(self) -> None:
+        """Shutdown waits for a running maintenance step before releasing the lease."""
+        await self._maintenance_idle.wait()
 
     async def maintenance_backup(self) -> dict:
         """Take a workspace backup in process, through the maintenance handoff.
@@ -700,8 +736,9 @@ class ProviderWorker:
         The existing ``backup_workspace`` owner writes the archive to the
         workspace's default backup directory. The step cannot be abandoned
         midway: a cancelled caller still waits for the archive step to end
-        before the gate reopens, so live writes never meet a running copy.
-        One ``runtime_state_maintenance`` audit event records the outcome.
+        before the gate can reopen, so live writes never meet a running copy.
+        The resume step records one ``runtime_state_maintenance`` audit event
+        (a resume that fails before it can write is reported, not audited).
         """
         import contextvars
         import functools
@@ -709,10 +746,8 @@ class ProviderWorker:
         from src.workspace import canonical_workspace_registry, canonical_workspace_root
         from src.workspace.lifecycle import WorkspaceLifecycleError, backup_workspace
         root = canonical_workspace_root(self.workspace_dir or settings.workspace_dir)
-        receipt: dict | None = None
-        reason: str | None = None
         cancelled = False
-        async with self.maintenance("backup"):
+        async with self.maintenance("backup") as handle:
             registry = canonical_workspace_registry(root)
             context = contextvars.copy_context()
             future = asyncio.get_running_loop().run_in_executor(
@@ -726,37 +761,35 @@ class ProviderWorker:
                     break
             error = future.exception()
             if error is None:
-                receipt = future.result()
-            elif isinstance(error, WorkspaceLifecycleError):
-                reason = "state_maintenance_backup_failed"
+                handle["receipt"] = future.result()
             else:
-                reason = "state_maintenance_backup_unavailable"
-        self.last_maintenance = await self._record_maintenance("backup", receipt, reason)
+                handle["outcome"] = "failed"
+                handle["reason_code"] = ("state_maintenance_backup_failed" if isinstance(error, WorkspaceLifecycleError)
+                                         else "state_maintenance_backup_unavailable")
         if cancelled:
             raise asyncio.CancelledError
-        if reason is not None:
-            raise StateMaintenanceRefused(reason)
-        return receipt
+        if handle["reason_code"] is not None:
+            raise StateMaintenanceRefused(handle["reason_code"])
+        return handle["receipt"]
 
-    async def _record_maintenance(self, operation: str, receipt: dict | None, reason: str | None) -> dict:
+    @staticmethod
+    def _maintenance_details(handle: dict) -> dict:
+        receipt = handle.get("receipt") or {}
+        return {"operation": handle["operation"], "outcome": handle["outcome"], "reason_code": handle["reason_code"],
+                "archive_manifest_sha256": receipt.get("archive_manifest_sha256"),
+                "member_count": receipt.get("member_count"), "secret_values_included": False}
+
+    async def _record_maintenance(self, handle: dict) -> dict:
+        """Runs inside the resume scope, so the gate is still closed to everyone else."""
         import json
         from datetime import datetime, timezone
         from src.db import engine as db_engine
         from src.db.models import AuditEvent
-        details = {"operation": operation, "outcome": "failed" if reason else "completed", "reason_code": reason,
-                   "archive_manifest_sha256": None if receipt is None else receipt.get("archive_manifest_sha256"),
-                   "member_count": None if receipt is None else receipt.get("member_count"),
-                   "secret_values_included": False}
-        try:
-            async with db_engine.get_session() as db:
-                db.add(AuditEvent(session_id=None, actor="runtime", event_type=MAINTENANCE_EVENT,
-                                  summary="In-process state maintenance", details_json=json.dumps(details, sort_keys=True)))
-        except Exception:  # noqa: BLE001 - the gate stayed closed; status shows the typed reason
-            logger.error("State maintenance outcome could not be audited")
-            details["audited"] = False
-        else:
-            details["audited"] = True
-        return {**details, "finished_at": datetime.now(timezone.utc).isoformat()}
+        details = self._maintenance_details(handle)
+        async with db_engine.get_session() as db:
+            db.add(AuditEvent(session_id=None, actor="runtime", event_type=MAINTENANCE_EVENT,
+                              summary="In-process state maintenance", details_json=json.dumps(details, sort_keys=True)))
+        return {**details, "audited": True, "finished_at": datetime.now(timezone.utc).isoformat()}
 
     # ---------------------------------------------------------------- shutdown
 

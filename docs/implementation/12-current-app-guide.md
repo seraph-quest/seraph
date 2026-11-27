@@ -1188,23 +1188,34 @@ that cutover is its own ADR-036 §5 slice.
 (authenticated operator with stable ownership continuity, body
 `{"confirm": "backup"}`) takes a workspace backup from the running backend
 through the state provider. It refuses typed before closing anything unless
-every mandatory provider is active, no other maintenance runs and, in
-production, the worker holds the owner lease (`state_maintenance_unavailable`,
-`state_maintenance_in_progress`, `state_maintenance_lease_missing`). Then the
-`get_session` gate closes (`maintenance`; new sessions fail
-`state_provider_maintenance` and dependent Cordis callbacks block
-`native_provider_state_unavailable`, never fence), the open sessions drain
-(the last one to close wakes the step), the engine is disposed, and the
-existing `backup_workspace` writes the archive to the default backup
-directory under the held lease (the fence marker; no second lock is opened).
-A cancelled caller still waits for the archive step before the gate reopens.
-Afterwards the mandatory predicates run again with the audit write probe; the
-gate reopens only if they pass and otherwise stays `failed` until restart.
-One `runtime_state_maintenance` audit event records the outcome, and
-`/api/runtime/status` shows `maintenance` and `last_maintenance`. Restore and
+every mandatory provider is active, no other maintenance runs, the worker is
+not shutting down and, in production, it holds the owner lease
+(`state_maintenance_unavailable`, `state_maintenance_in_progress`,
+`state_maintenance_lease_missing`). Then the `get_session` gate closes
+(`maintenance`): new sessions fail `state_provider_maintenance`, HTTP routes
+and authentication answer a typed 503 with that code, and dependent Cordis
+callbacks block `native_provider_state_unavailable` instead of fencing the
+child. The open sessions drain (the last one to close wakes the step; there is
+no time bound, so one long-held session keeps the window open until it ends),
+the engine is disposed, and the WAL is checkpointed into `seraph.db`
+(`state_maintenance_checkpoint_busy` when another connection holds it; nothing
+is copied). The existing `backup_workspace` then writes the archive to the
+default backup directory under the held lease (the fence marker; no second
+lock is opened, and the host CLI's fence stays refused while the backend
+runs). A cancelled caller still waits for the archive step before anything
+reopens. The gate stays closed while the state provider re-runs every
+mandatory predicate (with the audit write probe) and writes one
+`runtime_state_maintenance` audit event inside its own resume scope; it
+reopens only if all of that passes and is otherwise left `failed`
+(`state_maintenance_resume_failed` for an untyped failure) until restart, in
+which case the outcome is reported in `last_maintenance` but not audited.
+Shutdown waits for a running step before it closes the gate and releases the
+lease. Facade receipts are kept across the window; a child restarted during it
+blocks at its provider reports and needs a backend restart. Restore and
 rollback replace the live workspace root and stay with the host CLI against a
 stopped backend. Residual risk: a sync writer that bypasses `get_session`
-during the copy is caught only by the backup's own change checks.
+during the copy is caught only by the backup's own checks, which compare the
+database's size, schema and row counts, not its content.
 
 ### Pinned trust domains and composition dump (#1198)
 

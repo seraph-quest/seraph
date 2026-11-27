@@ -539,8 +539,12 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
 # * every ``$NAME_ENABLED`` or ``${NAME_ENABLED...}`` reference in ``manage.sh``;
 # * every environment variable ``backend/src`` reads directly
 #   (``os.environ.get``/``os.getenv``/``os.environ[...]``/``in os.environ`` and
-#   the ``ENV_READER_FUNCS`` helpers), with module string constants and their
-#   imports resolved. A flag it finds belongs in ``ENV_FLAGS``; any other name
+#   the ``ENV_READER_FUNCS`` helpers, at their name argument), with module string
+#   constants and their imports resolved. Aliases of the environment mapping
+#   are best-effort: ``import os as o``, ``from os import environ as E`` /
+#   ``getenv as G`` and a simple ``env = os.environ`` assignment are tracked;
+#   a conditional or computed alias (``values = env or os.environ``) is not,
+#   and review catches those. A flag it finds belongs in ``ENV_FLAGS``; any other name
 #   (credential, path, platform, server process, test) is in ``ENV_READS``. A read
 #   whose name is computed at runtime is listed in ``DYNAMIC_ENV_READS``.
 #
@@ -656,6 +660,9 @@ ENV_READS: Mapping[str, tuple[str, str]] = MappingProxyType({
     "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR": ("path", "screen capture archive root"),
     "SERAPH_SCREENSHOT_FOLDER": ("path", "the operator's screenshot folder"),
     "SERAPH_WORKSPACE_LIFECYCLE_PATH": ("path", "production workspace lifecycle receipt path"),
+    "BACKEND_DATA_PATH_PROD": ("path", "the production host workspace bind path"),
+    "WORKSPACE_DIR": ("path", "the workspace root, checked against the production bind"),
+    "SERAPH_PRODUCTION_MOUNT_SOURCE": ("server_process", "production container mount source check"),
     "SERAPH_PRODUCTION_BIND_IDENTITY": ("server_process", "production container bind identity check"),
     "FORWARDED_ALLOW_IPS": ("server_process", "auth startup validation of the ASGI server's proxy trust"),
     "SERVER_SOFTWARE": ("server_process", "auth startup validation of the ASGI server"),
@@ -677,8 +684,8 @@ DYNAMIC_ENV_READS: Mapping[str, str] = MappingProxyType({
     f"{_ENV}:_env_enabled": "the ENV_READER_FUNCS helper; its callers' literal names are scanned",
     "src.model_fabric.contracts:ProviderProfile.api_key": "a profile's credential env name (credentials only)",
 })
-# Helpers whose first argument is an environment variable name.
-ENV_READER_FUNCS = frozenset({"_env_enabled"})
+# Helpers whose argument at the given position is an environment variable name.
+ENV_READER_FUNCS = frozenset({("_env_enabled", 0), ("_env_value", 1)})
 _ENV_GET = frozenset({"os.environ.get", "os.getenv", "os.environ.setdefault", "os.environ.pop"})
 
 
@@ -762,22 +769,43 @@ def scan_env_reads(root: Path = SRC_ROOT) -> tuple[dict[str, set[str]], set[str]
             return resolve(source[0], constants[source[0]][source[1]], depth + 1)
         return None
 
+    readers = dict(ENV_READER_FUNCS)
     found: dict[str, set[str]] = {}
     dynamic: set[str] = set()
     for module, tree in trees.items():
+        # Best-effort aliases of os, os.environ and os.getenv in this module.
+        os_names = {"os"} | {alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
+                             for alias in node.names if alias.name == "os" and alias.asname}
+        environ_names = {"os.environ", "environ"} | {f"{name}.environ" for name in os_names}
+        getenv_names = {"getenv"} | {f"{name}.getenv" for name in os_names}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "os":
+                for alias in node.names:
+                    if alias.name == "environ":
+                        environ_names.add(alias.asname or alias.name)
+                    elif alias.name == "getenv":
+                        getenv_names.add(alias.asname or alias.name)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and dotted(node.value) in environ_names):
+                environ_names.add(node.targets[0].id)
+        environ_calls = {f"{name}.{method}" for name in environ_names for method in ("get", "setdefault", "pop")}
+
         def visit(node: ast.AST, scope: list[str]) -> None:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 scope = [*scope, node.name]
             name_node = None
             if isinstance(node, ast.Call) and node.args:
                 func = dotted(node.func)
-                if func in _ENV_GET or func in {"environ.get", "getenv"} or func in ENV_READER_FUNCS:
+                if func in _ENV_GET or func in environ_calls or func in getenv_names:
                     name_node = node.args[0]
-            elif isinstance(node, ast.Subscript) and dotted(node.value) in {"os.environ", "environ"}:
+                elif func in readers and len(node.args) > readers[func]:
+                    name_node = node.args[readers[func]]
+            elif isinstance(node, ast.Subscript) and dotted(node.value) in environ_names:
                 name_node = node.slice
             elif (isinstance(node, ast.Compare) and len(node.comparators) == 1
                   and isinstance(node.ops[0], (ast.In, ast.NotIn))
-                  and dotted(node.comparators[0]) in {"os.environ", "environ"}):
+                  and dotted(node.comparators[0]) in environ_names):
                 name_node = node.left
             if name_node is not None:
                 where = f"{module}:{'.'.join(scope) or '<module>'}"

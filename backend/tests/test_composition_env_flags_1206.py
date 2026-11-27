@@ -96,6 +96,10 @@ def test_every_env_var_src_reads_is_classified():
     for name in ("SERAPH_SCREEN_ANALYSIS_PROVIDER", "SERAPH_SCREEN_ANALYSIS_ENABLED",
                  "SERAPH_PRESERVE_SCREEN_CAPTURES", "DAEMON_ENABLED"):
         assert name in found and kinds[name] == "security_switch", name
+    # Positional reader helpers: the production workspace resolver's _env_value(values, NAME).
+    assert inventory.ENV_READS["BACKEND_DATA_PATH_PROD"][0] == "path"
+    assert inventory.ENV_READS["SERAPH_PRODUCTION_MOUNT_SOURCE"][0] == "server_process"
+    assert "src.workspace.production:validate_container_workspace_mount" in found["SERAPH_PRODUCTION_MOUNT_SOURCE"]
 
 
 def test_a_planted_env_read_fails_the_guard(tmp_path):
@@ -107,10 +111,17 @@ def test_a_planted_env_read_fails_the_guard(tmp_path):
         "def read(name):\n"
         "    a = os.environ.get(ALIAS)\n    b = os.getenv('SERAPH_PLANTED_GETENV')\n"
         "    c = environ['SERAPH_PLANTED_SUBSCRIPT']\n    d = 'SERAPH_PLANTED_IN' in os.environ\n"
-        "    e = _env_enabled('SERAPH_PLANTED_HELPER')\n    return os.environ.get(name)\n")
+        "    e = _env_enabled('SERAPH_PLANTED_HELPER')\n    f = _env_value(os.environ, 'SERAPH_PLANTED_POSITIONAL')\n"
+        "    return os.environ.get(name)\n")
+    (root / "pkg" / "aliases.py").write_text(
+        "import os as o\nfrom os import environ as E, getenv as G\nENV = o.environ\n"
+        "def read():\n    return (o.getenv('SERAPH_PLANTED_OS_ALIAS'), E['SERAPH_PLANTED_ENVIRON_ALIAS'],\n"
+        "            G('SERAPH_PLANTED_GETENV_ALIAS'), ENV.get('SERAPH_PLANTED_ASSIGNED_ALIAS'))\n")
     found, dynamic = inventory.scan_env_reads(root)
     assert set(found) == {"SERAPH_PLANTED_SWITCH", "SERAPH_PLANTED_GETENV", "SERAPH_PLANTED_SUBSCRIPT",
-                          "SERAPH_PLANTED_IN", "SERAPH_PLANTED_HELPER"}
+                          "SERAPH_PLANTED_IN", "SERAPH_PLANTED_HELPER", "SERAPH_PLANTED_POSITIONAL",
+                          "SERAPH_PLANTED_OS_ALIAS", "SERAPH_PLANTED_ENVIRON_ALIAS", "SERAPH_PLANTED_GETENV_ALIAS",
+                          "SERAPH_PLANTED_ASSIGNED_ALIAS"}
     assert dynamic == {"src.pkg.reader:read"}
 
 

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -182,14 +183,73 @@ class StateProviderUnavailable(RuntimeError):
 # that never constructs the worker) and the gate is open, as before. While a
 # worker is attached it is open in ``activating`` (init_db and the activation
 # predicates need sessions) and ``active``; ``failed`` and ``deactivating``
-# refuse typed before a session is yielded.
+# refuse typed before a session is yielded. ``maintenance`` (the in-process
+# maintenance handoff, #1024) also refuses new sessions while in-flight ones
+# drain and the state provider's maintenance step runs.
 _STATE_GATE: list[str | None] = [None, None]
+_CLOSED_GATES = frozenset({"failed", "deactivating", "maintenance"})
+
+
+class _SessionCounter:
+    """Default-factory sessions currently open, across threads and loops.
+
+    The maintenance handoff waits for this to reach zero after the gate
+    closed. A waiter is woken through its own loop (``call_soon_threadsafe``)
+    when the last session closes: a cause, never a poll or a sleep.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.open = 0
+        self.waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
+
+    def admit(self) -> None:
+        # The gate check and the count are one step under the lock, so a
+        # session either counts before the gate closes or is refused.
+        with self.lock:
+            _require_state_gate_open()
+            self.open += 1
+
+    def leave(self) -> None:
+        with self.lock:
+            self.open -= 1
+            waiters = self.waiters if self.open == 0 else []
+            if waiters:
+                self.waiters = []
+        for loop, event in waiters:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                pass  # that waiter's loop already closed; it is gone
+
+    async def drained(self) -> None:
+        event = asyncio.Event()
+        with self.lock:
+            if self.open == 0:
+                return
+            self.waiters.append((asyncio.get_running_loop(), event))
+        try:
+            await event.wait()
+        finally:
+            with self.lock:
+                self.waiters = [item for item in self.waiters if item[1] is not event]
+
+
+_OPEN_SESSIONS = _SessionCounter()
 
 
 def set_state_gate(state: str | None, reason_code: str | None = None) -> None:
-    if state not in {None, "activating", "active", "failed", "deactivating"}:
+    if state not in {None, "activating", "active", "failed", "deactivating", "maintenance"}:
         raise ValueError("unknown state gate")
-    _STATE_GATE[:] = [state, reason_code]
+    with _OPEN_SESSIONS.lock:
+        _STATE_GATE[:] = [state, reason_code]
+
+
+async def drain_open_sessions() -> None:
+    """Wait until every default-factory session closed; only with the gate closed."""
+    if _STATE_GATE[0] not in _CLOSED_GATES:
+        raise RuntimeError("drain requires a closed state gate")
+    await _OPEN_SESSIONS.drained()
 
 
 def state_gate() -> tuple[str | None, str | None]:
@@ -198,7 +258,7 @@ def state_gate() -> tuple[str | None, str | None]:
 
 def _require_state_gate_open() -> None:
     state, reason = _STATE_GATE
-    if state in {"failed", "deactivating"}:
+    if state in _CLOSED_GATES:
         raise StateProviderUnavailable(reason or f"state_provider_{state}")
 
 
@@ -2256,6 +2316,25 @@ async def close_db() -> None:
     await engine.dispose()
 
 
+async def checkpoint_wal() -> bool:
+    """Fold the SQLite WAL into the database file; only with the state gate closed.
+
+    For the in-process maintenance handoff (#1024): the file a backup copies
+    then holds every committed transaction. Returns False when another
+    connection kept the checkpoint from completing (nothing is retried).
+    """
+    if _STATE_GATE[0] not in _CLOSED_GATES:
+        raise RuntimeError("checkpoint requires a closed state gate")
+    if engine.dialect.name != "sqlite":
+        return True
+    try:
+        async with engine.connect() as connection:
+            row = (await connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")).first()
+    finally:
+        await engine.dispose()
+    return row is not None and row[0] == 0
+
+
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """Yield an async DB session.
@@ -2266,8 +2345,13 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """
     factory = _session_factory_override.get()
     if factory is None:
-        _require_state_gate_open()
-        factory = async_session_factory
+        _OPEN_SESSIONS.admit()
+        try:
+            async with session_scope(async_session_factory) as session:
+                yield session
+        finally:
+            _OPEN_SESSIONS.leave()
+        return
     async with session_scope(factory) as session:
         yield session
 

@@ -1,10 +1,11 @@
 /** Trusted finite two-way bootstrap; native state and execution remain Python-owned. */
 import { Composition, packageIdentity } from './composition.js';
-import { MAX_PENDING, ProtocolError, readFrames, writeFrame, validateIncomingDeadline, validateProviderReport, type Frame, type Json, type Method } from './protocol.js';
+import { MAX_PENDING, ProtocolError, readFrames, writeFrame, validateFacadeRequest, validateIncomingDeadline, validateProviderReport, type FacadeActivate, type Frame, type Json, type Method } from './protocol.js';
 import { isServiceMethod, validateInput, validateResult, type Input, type ServiceMethod } from './contracts/methods.js';
 import type { ScopedRequestClient } from './contracts/client.js';
 import { Resources } from './resources.js';
 import { hostProviderReports } from './plugins/state/index.js';
+import { facadeActivations } from './plugins/proxy.js';
 
 interface Pending { frame: Frame; resolve(value: unknown): void; reject(error: Error): void; }
 async function main(): Promise<void> {
@@ -108,6 +109,20 @@ async function main(): Promise<void> {
         const report = validateProviderReport(frame.payload, frame.method);
         hostProviderReports.record(report);
         await response(frame, frame.method, { domain: report.domain, state: frame.method === "provider.quiesce" ? "quiescing" : "recorded" });
+      } else if (frame.method === "provider.activate") {
+        // The facade decides: it activates only while it is composed and active
+        // at exactly the reviewed digest the Cordis owner row names.
+        const request = validateFacadeRequest(frame.payload, frame.method) as FacadeActivate;
+        const digest = quiescing ? undefined : composition.facadeDigest(request.domain);
+        const activated = digest !== undefined && digest === request.composition_digest;
+        if (activated) facadeActivations.activate(request.domain, request.epoch);
+        else facadeActivations.deactivate(request.domain, request.epoch);
+        await response(frame, frame.method, { domain: request.domain, state: activated ? "activated" : "unavailable", epoch: request.epoch,
+          plugin_digest: digest ?? null, reason_code: activated ? null : digest === undefined ? "facade_not_composed" : "facade_digest_mismatch" });
+      } else if (frame.method === "provider.deactivate") {
+        const request = validateFacadeRequest(frame.payload, frame.method);
+        facadeActivations.deactivate(request.domain, request.epoch);
+        await response(frame, frame.method, { domain: request.domain, state: "deactivated", epoch: request.epoch });
       } else if (frame.method === "invocation.cancel") {
         for (const scope of scopes.values()) if (scope.frame.invocation_ref === frame.invocation_ref) scope.active = false;
         // Local fencing is not positive physical cancellation of native work.

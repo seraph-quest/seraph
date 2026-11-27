@@ -101,3 +101,7 @@ export function validateResult<M extends ServiceMethod>(method: M, value: unknow
   const memoryStatus = method === 'memory.propose' ? 'proposal_only' : method === 'memory.applyReviewed' ? 'reviewed_update' : method === 'memory.forget' ? 'forgotten' : 'no_learning';
   return object({status: literal('succeeded'), value: serviceSchemas[method].output, memory_status: literal(memoryStatus)}).parse(candidate) as Result<M>;
 }
+/** Facades that own activation of their Python provider while their domain is
+ * Cordis-owned (#1024). The pinned trust facades are never activatable. */
+export const FACADE_DOMAINS = Object.freeze(['seraph.goals.v1', 'seraph.memory.v1', 'seraph.artifacts.v1'] as const);
+export type FacadeDomain = (typeof FACADE_DOMAINS)[number];

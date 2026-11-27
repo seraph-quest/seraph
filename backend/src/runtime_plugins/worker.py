@@ -6,10 +6,29 @@ them aborts startup. ``vault`` is the pinned credential vault (ADR-036 §3,
 #1199): a Python-only trust service with its own owner row and no Cordis
 facade, so its readiness is never reported to the child.
 ``goals``, ``memory`` and ``artifacts`` follow and may only degrade; their
-Cordis service methods then return a typed block. The Cordis plugins of the
-same names report readiness and own no activation (operator decision on
-#1024, 2026-10-16), because the database must be open before the ownership
-table can be read or the Node child started.
+Cordis service methods then return a typed block. The Cordis state,
+authority and audit facades report readiness and own no activation (operator
+decision on #1024, 2026-10-16), because the database must be open before the
+ownership table can be read or the Node child started.
+
+Facade activation (#1024, #1026 §1): ``goals``, ``memory`` and ``artifacts``
+are the facade providers. While a facade domain's owner row is ``legacy``,
+Python decides and its predicate alone activates the provider. While the row
+is ``cordis``, the facade decides and Python is the mechanism: the provider is
+``awaiting_facade`` until the running child's facade answers a host-sent
+``provider.activate`` for exactly that row (owner, epoch, reviewed digest) in
+the current boot, and every Cordis callback that depends on the domain is
+checked against that receipt (boot nonce, epoch and digest). A child restart,
+a new epoch or a deactivation therefore needs a fresh activation.
+
+In-process maintenance handoff (#1024): ``maintenance()`` closes the
+``get_session`` gate (``maintenance``), waits for the open sessions to close,
+disposes the engine and runs the maintenance step under the workspace owner
+lease this worker already holds (the lifecycle fence marker; no second lock
+is opened, so the live lease is handed to the step instead of racing it), then
+re-runs the mandatory predicates and reopens the gate, or leaves it ``failed``.
+Only ``backup`` runs in process; restore and rollback replace the live
+workspace root and stay with the host CLI against a stopped backend.
 
 Importing this module creates nothing: no session, connection, task, thread,
 scheduler job or file. A provider reuses the existing owner (``init_db`` /
@@ -24,6 +43,7 @@ worker's life.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import logging
 import os
@@ -48,6 +68,12 @@ DOMAIN_PROVIDERS = {f"seraph.{name}.v1": name for name in PROVIDERS}
 # Providers with no Cordis facade: Python-only trust services whose readiness
 # never crosses IPC (the child's closed report set has no such domain).
 PYTHON_ONLY = frozenset({"vault"})
+# Facade providers: activated by their Cordis facade while their domain is
+# Cordis-owned (never a pinned trust provider).
+FACADE_PROVIDERS = DEGRADABLE
+# Maintenance steps the running backend may perform through the state provider.
+MAINTENANCE_OPERATIONS = frozenset({"backup"})
+MAINTENANCE_EVENT = "runtime_state_maintenance"
 _AUTHORITY_TABLES = ("operator_sessions", "sessions")
 _TASK_TABLES = ("workflow_run_states", "work_board_tasks", "work_board_attempts")
 _GOAL_TABLES = ("goals",)
@@ -62,10 +88,19 @@ class ProviderActivationError(RuntimeError):
         self.reason_code = reason_code
 
 
+class StateMaintenanceRefused(RuntimeError):
+    """The in-process maintenance handoff refused before it closed anything."""
+
+    def __init__(self, reason_code: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 @dataclass
 class ProviderStatus:
     name: str
-    state: str = "inactive"  # inactive | active | degraded | failed | deactivated
+    # inactive | active | awaiting_facade | degraded | failed | maintenance | deactivated
+    state: str = "inactive"
     reason_code: str | None = None
 
     def payload(self) -> dict[str, str | None]:
@@ -307,6 +342,14 @@ class ProviderWorker:
         self.audit_probe: dict | None = None
         # Providers failed by a write probe: only a passing write probe recovers them.
         self._write_failed: set[str] = set()
+        # Facade providers' owner rows as last read: name -> (owner_kind, epoch, digest, state).
+        self._facade_rows: dict[str, tuple[str, int, str, str]] = {}
+        # This boot's facade activations: name -> {"boot_nonce", "epoch", "digest"}.
+        self._facades: dict[str, dict] = {}
+        self._facade_host = None
+        self._maintenance: str | None = None
+        # Statuses held across a maintenance window, restored by its predicates.
+        self.last_maintenance: dict | None = None
 
     # ---------------------------------------------------------------- lock
 
@@ -359,14 +402,117 @@ class ProviderWorker:
             set_state_gate("failed", exc.reason_code)
             logger.error("Mandatory provider %s failed to activate: %s", exc.provider, exc.reason_code)
             raise
+        await self._read_facade_rows()
         for name in DEGRADABLE:
             try:
                 await _PREDICATES[name]()
-                self.status[name].state = "active"
+                self._facade_passed(name)
             except ProviderActivationError as exc:
                 self.status[name].state, self.status[name].reason_code = "degraded", exc.reason_code
                 logger.warning("Provider %s degraded: %s", name, exc.reason_code)
         self._activated = True
+
+    # ---------------------------------------------------------------- facades
+
+    async def _read_facade_rows(self) -> None:
+        from src.db import engine as db_engine
+        from .ownership import inventory
+        async with db_engine.get_session() as db:
+            rows = await inventory(db)
+        self._facade_rows = {
+            name: (row.owner_kind, row.epoch, row.composition_digest, row.state)
+            for name in FACADE_PROVIDERS if (row := rows.get(f"seraph.{name}.v1")) is not None}
+
+    def _receipt_current(self, name: str) -> bool:
+        """This boot's facade answer still names the facade domain's current owner row."""
+        receipt, row, host = self._facades.get(name), self._facade_rows.get(name), self._facade_host
+        return (receipt is not None and row is not None and host is not None
+                and receipt["boot_nonce"] == getattr(host, "boot_nonce", None)
+                and getattr(host, "state", None) in {"starting", "ready"}
+                and (receipt["epoch"], receipt["digest"]) == (row[1], row[2]) and row[0] == "cordis"
+                and row[3] == "ready")
+
+    def _facade_passed(self, name: str) -> None:
+        """A facade provider's predicate passed: who activates depends on its owner row."""
+        row = self._facade_rows.get(name)
+        status = self.status[name]
+        if row is not None and row[0] == "cordis" and not self._receipt_current(name):
+            status.state = "awaiting_facade"
+            if status.reason_code is None or not status.reason_code.startswith("provider_facade_"):
+                status.reason_code = "provider_facade_not_activated"
+            return
+        status.state, status.reason_code = "active", None
+
+    async def activate_facades(self, host) -> list[dict]:
+        """Ask the running child's facades to activate each Cordis-owned facade domain.
+
+        Called by the host after the provider reports and before it admits
+        anything, on every child (re)start, and after a facade domain's owner
+        changed. The facade's answer is the decision: the provider activates
+        only on ``activated`` with the plugin digest the Cordis owner row and
+        the reviewed build both name. A legacy-owned facade domain is never
+        asked (Python decides). Never touches a mandatory provider.
+        """
+        async with self._status_lock:
+            if not self._activated or self._closed or self._maintenance:
+                return []
+            await self._read_facade_rows()
+            self._facade_host = host
+            results = []
+            for name in FACADE_PROVIDERS:
+                domain = f"seraph.{name}.v1"
+                row, status = self._facade_rows.get(name), self.status[name]
+                self._facades.pop(name, None)
+                if row is None or row[0] != "cordis":
+                    if status.state == "awaiting_facade":
+                        status.state, status.reason_code = "active", None
+                    continue
+                if status.state not in {"active", "awaiting_facade"}:
+                    continue  # its own predicate failed: nothing to activate
+                if row[3] != "ready":
+                    status.state, status.reason_code = "awaiting_facade", "provider_facade_owner_not_ready"
+                    continue
+                result = await host.activate_facade(
+                    {"domain": domain, "owner_kind": "cordis", "epoch": row[1], "composition_digest": row[2]})
+                reviewed = (getattr(getattr(host, "reviewed", None), "plugin_digests", None) or {}).get(domain)
+                if result["state"] == "activated" and result["plugin_digest"] == row[2] == reviewed:
+                    self._facades[name] = {"boot_nonce": host.boot_nonce, "epoch": row[1], "digest": row[2]}
+                    status.state, status.reason_code = "active", None
+                else:
+                    reason = {"facade_not_composed": "provider_facade_not_composed"}.get(
+                        result["reason_code"], "provider_facade_digest_mismatch")
+                    status.state, status.reason_code = "awaiting_facade", reason
+                    if result["state"] == "activated":
+                        # The facade activated against a digest the reviewed build does not name.
+                        await host.deactivate_facade(domain, row[1], "facade_digest_mismatch")
+                results.append({"domain": domain, "state": status.state, "epoch": row[1],
+                                "reason_code": status.reason_code})
+            return results
+
+    async def deactivate_facades(self, reason_code: str = "provider_deactivated") -> None:
+        """Deactivate every activated facade in the child; their providers await activation again."""
+        async with self._status_lock:
+            host, activated = self._facade_host, list(self._facades.items())
+            self._facades.clear()
+            for name, receipt in activated:
+                if self.status[name].state == "active":
+                    self.status[name].state, self.status[name].reason_code = (
+                        "awaiting_facade", "provider_facade_deactivated")
+                if host is not None and getattr(host, "boot_nonce", None) == receipt["boot_nonce"]:
+                    await host.deactivate_facade(f"seraph.{name}.v1", receipt["epoch"], reason_code)
+
+    def facade_unavailable(self, runtime_domain: str, dependency, boot_nonce: str | None) -> str | None:
+        """Typed reason when a Cordis-owned facade dependency lacks this boot's activation."""
+        name = DOMAIN_PROVIDERS.get(runtime_domain)
+        if name not in FACADE_PROVIDERS or dependency is None or dependency.owner_kind != "cordis":
+            return None
+        receipt = self._facades.get(name)
+        host = self._facade_host
+        if (receipt is None or boot_nonce is None or receipt["boot_nonce"] != boot_nonce
+                or host is None or getattr(host, "boot_nonce", None) != boot_nonce
+                or (receipt["epoch"], receipt["digest"]) != (dependency.epoch, dependency.composition_digest)):
+            return f"native_provider_{name}_facade_inactive"
+        return None
 
     def _record_audit_probe(self, outcome: str, reason_code: str | None) -> None:
         from datetime import datetime, timezone
@@ -387,14 +533,18 @@ class ProviderWorker:
         the audit provider's state unchanged rather than failing it.
         """
         async with self._status_lock:
-            if not self._activated or self._closed:
+            if not self._activated or self._closed or self._maintenance:
                 return self.snapshot()
+            try:
+                await self._read_facade_rows()
+            except Exception:  # noqa: BLE001 - the state recheck below reports the typed reason
+                pass
             checks = {"state": lambda: _state_predicate(run_init=False), **_PREDICATES,
                       "audit": _audit_write_probe if probe_writes else _audit_read_predicate}
             for name in PROVIDERS:
                 if self._closed:
                     break  # shutdown began mid-recheck: its marks win
-                if self.status[name].state not in {"active", "degraded", "failed"}:
+                if self.status[name].state not in {"active", "awaiting_facade", "degraded", "failed"}:
                     continue
                 if name in self._write_failed and not probe_writes:
                     # A read-only recheck can never revive a provider whose writes failed.
@@ -403,7 +553,10 @@ class ProviderWorker:
                     await checks[name]()
                     if self._closed:
                         break
-                    self.status[name].state, self.status[name].reason_code = "active", None
+                    if name in FACADE_PROVIDERS:
+                        self._facade_passed(name)
+                    else:
+                        self.status[name].state, self.status[name].reason_code = "active", None
                     if name == "audit" and probe_writes:
                         self._write_failed.discard(name)
                         self._record_audit_probe("passed", None)
@@ -425,9 +578,24 @@ class ProviderWorker:
         await self.readiness(probe_writes=True)
         return await self.provider_reports()
 
+    def _effective(self, name: str) -> dict[str, str | None]:
+        payload = self.status[name].payload()
+        row = self._facade_rows.get(name)
+        if (name in FACADE_PROVIDERS and payload["state"] == "active" and row is not None and row[0] == "cordis"
+                and not self._receipt_current(name)):
+            # The answering boot stopped or the row moved since: awaiting a fresh activation.
+            payload = {**payload, "state": "awaiting_facade", "reason_code": "provider_facade_not_activated"}
+        if name in FACADE_PROVIDERS:
+            payload["owner_kind"] = None if row is None else row[0]
+            payload["facade"] = ("activated" if self._receipt_current(name)
+                                 else "not_required" if row is None or row[0] != "cordis" else "inactive")
+        return payload
+
     def snapshot(self) -> dict:
-        return {"providers": [self.status[name].payload() for name in PROVIDERS],
+        return {"providers": [self._effective(name) for name in PROVIDERS],
                 "mandatory_ready": all(self.status[name].state == "active" for name in MANDATORY),
+                "maintenance": self._maintenance,
+                "last_maintenance": None if self.last_maintenance is None else dict(self.last_maintenance),
                 "audit_write_probe": None if self.audit_probe is None else dict(self.audit_probe)}
 
     async def provider_reports(self) -> list[dict]:
@@ -442,14 +610,153 @@ class ProviderWorker:
                 continue
             row = rows.get(f"seraph.{name}.v1")
             status = self.status[name]
-            if row is None or status.state not in {"active", "degraded", "failed"}:
+            if row is None or status.state not in {"active", "awaiting_facade", "degraded", "failed"}:
                 continue
-            reports.append({"domain": row.runtime_domain, "state": status.state, "epoch": row.epoch,
+            # Awaiting its facade is not ready: the closed report says degraded, with the reason.
+            state = "degraded" if status.state == "awaiting_facade" else status.state
+            reports.append({"domain": row.runtime_domain, "state": state, "epoch": row.epoch,
                             "composition_digest": row.composition_digest, "reason_code": status.reason_code})
         return reports
 
     def provider_ready(self, provider: str) -> bool:
         return self.status[provider].state == "active"
+
+    # ---------------------------------------------------------------- maintenance
+
+    @asynccontextmanager
+    async def maintenance(self, operation: str):
+        """The in-process maintenance handoff through the state provider.
+
+        Refuses typed, before closing anything, unless every mandatory
+        provider is active, no other maintenance runs and (production) this
+        worker holds the workspace owner lease. Then: the gate closes
+        (``maintenance``: later session requests fail typed, never hang),
+        dependent work blocks with ``native_provider_state_unavailable``,
+        open sessions drain (woken by the last one to close), the engine is
+        disposed, the WAL is checkpointed into the database file (busy refuses
+        typed), and the step runs under the held lease. Afterwards the
+        mandatory predicates run again (with the audit write probe); the gate
+        reopens only if they pass and stays ``failed`` otherwise.
+        """
+        from src.db.engine import drain_open_sessions, set_state_gate
+        from src.workspace.lifecycle import lifecycle_fence_marker
+        if operation not in MAINTENANCE_OPERATIONS:
+            raise StateMaintenanceRefused("state_maintenance_operation_unsupported")
+        async with self._status_lock:
+            if self._maintenance is not None:
+                raise StateMaintenanceRefused("state_maintenance_in_progress")
+            if (not self._activated or self._closed
+                    or not all(self.status[name].state == "active" for name in MANDATORY)):
+                raise StateMaintenanceRefused("state_maintenance_unavailable")
+            if self.hold_workspace_lock and self._owner is None:
+                raise StateMaintenanceRefused("state_maintenance_lease_missing")
+            self._maintenance = operation
+            set_state_gate("maintenance", "state_provider_maintenance")
+            self.status["state"].state, self.status["state"].reason_code = "maintenance", "state_provider_maintenance"
+        try:
+            await drain_open_sessions()
+            await close_db()
+            from src.db.engine import checkpoint_wal
+            if not await checkpoint_wal():
+                # Another connection still holds the WAL: the file is not a whole copy.
+                raise StateMaintenanceRefused("state_maintenance_checkpoint_busy")
+            with lifecycle_fence_marker():
+                yield
+        finally:
+            await self._resume_after_maintenance()
+
+    async def _resume_after_maintenance(self) -> None:
+        from src.db.engine import set_state_gate
+        async with self._status_lock:
+            try:
+                set_state_gate("activating")
+                await _state_predicate(run_init=False)
+                self.status["state"].state, self.status["state"].reason_code = "active", None
+                set_state_gate("active")
+                for name in MANDATORY[1:]:
+                    await _PREDICATES[name]()
+                    self.status[name].state, self.status[name].reason_code = "active", None
+                    if name == "audit":
+                        self._write_failed.discard(name)
+                        self._record_audit_probe("passed", None)
+            except ProviderActivationError as exc:
+                self.status[exc.provider].state, self.status[exc.provider].reason_code = "failed", exc.reason_code
+                set_state_gate("failed", exc.reason_code)
+                logger.error("Provider %s failed after maintenance: %s", exc.provider, exc.reason_code)
+                return
+            finally:
+                self._maintenance = None
+            await self._read_facade_rows()
+            for name in DEGRADABLE:
+                try:
+                    await _PREDICATES[name]()
+                    self._facade_passed(name)
+                except ProviderActivationError as exc:
+                    self.status[name].state, self.status[name].reason_code = "degraded", exc.reason_code
+
+    async def maintenance_backup(self) -> dict:
+        """Take a workspace backup in process, through the maintenance handoff.
+
+        The existing ``backup_workspace`` owner writes the archive to the
+        workspace's default backup directory. The step cannot be abandoned
+        midway: a cancelled caller still waits for the archive step to end
+        before the gate reopens, so live writes never meet a running copy.
+        One ``runtime_state_maintenance`` audit event records the outcome.
+        """
+        import contextvars
+        import functools
+        from config.settings import settings
+        from src.workspace import canonical_workspace_registry, canonical_workspace_root
+        from src.workspace.lifecycle import WorkspaceLifecycleError, backup_workspace
+        root = canonical_workspace_root(self.workspace_dir or settings.workspace_dir)
+        receipt: dict | None = None
+        reason: str | None = None
+        cancelled = False
+        async with self.maintenance("backup"):
+            registry = canonical_workspace_registry(root)
+            context = contextvars.copy_context()
+            future = asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(context.run, backup_workspace, root, registry=registry))
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:  # noqa: BLE001 - read below through future.exception()
+                    break
+            error = future.exception()
+            if error is None:
+                receipt = future.result()
+            elif isinstance(error, WorkspaceLifecycleError):
+                reason = "state_maintenance_backup_failed"
+            else:
+                reason = "state_maintenance_backup_unavailable"
+        self.last_maintenance = await self._record_maintenance("backup", receipt, reason)
+        if cancelled:
+            raise asyncio.CancelledError
+        if reason is not None:
+            raise StateMaintenanceRefused(reason)
+        return receipt
+
+    async def _record_maintenance(self, operation: str, receipt: dict | None, reason: str | None) -> dict:
+        import json
+        from datetime import datetime, timezone
+        from src.db import engine as db_engine
+        from src.db.models import AuditEvent
+        details = {"operation": operation, "outcome": "failed" if reason else "completed", "reason_code": reason,
+                   "archive_manifest_sha256": None if receipt is None else receipt.get("archive_manifest_sha256"),
+                   "member_count": None if receipt is None else receipt.get("member_count"),
+                   "secret_values_included": False}
+        try:
+            async with db_engine.get_session() as db:
+                db.add(AuditEvent(session_id=None, actor="runtime", event_type=MAINTENANCE_EVENT,
+                                  summary="In-process state maintenance", details_json=json.dumps(details, sort_keys=True)))
+        except Exception:  # noqa: BLE001 - the gate stayed closed; status shows the typed reason
+            logger.error("State maintenance outcome could not be audited")
+            details["audited"] = False
+        else:
+            details["audited"] = True
+        return {**details, "finished_at": datetime.now(timezone.utc).isoformat()}
 
     # ---------------------------------------------------------------- shutdown
 
@@ -491,17 +798,29 @@ def current_worker() -> ProviderWorker | None:
     return _CURRENT[0]
 
 
-def domain_provider_unavailable(*runtime_domains: str) -> str | None:
-    """Typed reason for the first domain whose attached-worker provider is not active."""
+def domain_provider_unavailable(*runtime_domains: str, vector=(), boot_nonce: str | None = None) -> str | None:
+    """Typed reason for the first domain whose attached-worker provider is not active.
+
+    ``vector`` is the invocation's bound dependency vector: a Cordis-owned
+    facade dependency also needs this boot's facade activation at exactly its
+    bound epoch and digest (#1024).
+    """
     worker = current_worker()
     if worker is None:
         return None
+    bound = {item.runtime_domain: item for item in vector}
     for runtime_domain in runtime_domains:
         provider = DOMAIN_PROVIDERS.get(runtime_domain)
-        if provider is not None and worker.status[provider].state != "active":
+        if provider is None:
+            continue
+        if worker.status[provider].state != "active":
             return f"native_provider_{provider}_unavailable"
+        facade = worker.facade_unavailable(runtime_domain, bound.get(runtime_domain), boot_nonce)
+        if facade is not None:
+            return facade
     return None
 
 
-__all__ = ["DEGRADABLE", "DEPENDENCIES", "MANDATORY", "PROVIDERS", "PYTHON_ONLY", "ProviderActivationError",
-           "ProviderWorker", "attach", "current_worker", "domain_provider_unavailable"]
+__all__ = ["DEGRADABLE", "DEPENDENCIES", "FACADE_PROVIDERS", "MAINTENANCE_OPERATIONS", "MANDATORY", "PROVIDERS",
+           "PYTHON_ONLY", "ProviderActivationError", "ProviderWorker", "StateMaintenanceRefused", "attach",
+           "current_worker", "domain_provider_unavailable"]

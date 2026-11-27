@@ -64,7 +64,7 @@ class HostBlocked(RuntimeError):
 
 # A boot whose provider reports cannot be produced or acknowledged never admits (#1024).
 _PROVIDER_REPORT_BLOCKS = frozenset({"provider_reports_unavailable", "provider_report_invalid",
-                                     "provider_report_not_acknowledged"})
+                                     "provider_report_not_acknowledged", "provider_activation_unavailable"})
 
 
 @dataclass
@@ -108,6 +108,12 @@ class CordisHost:
         # the host's source of fresh reports, sent after every (re)start.
         self._provider_reports: dict[str, dict[str, Any]] = {}
         self.provider_reports_source: Any = None
+        # The worker's facade activation step (#1024): called with this host after
+        # the reports, before admission, so a Cordis-owned facade domain's
+        # provider activates only on this boot's facade answer.
+        self.facade_activation_source: Any = None
+        # Facade domains this boot activated: deactivated (best effort) at stop.
+        self._facade_activations: dict[str, dict[str, Any]] = {}
 
     @property
     def admitting(self) -> bool:
@@ -203,6 +209,7 @@ class CordisHost:
             self.state, self.reason = "starting", None
             self.boot_nonce = secrets.token_hex(32)
             self._provider_reports = {}
+            self._facade_activations = {}
             self._readiness_checked_at = None
             self._in_seq = self._out_seq = 0
             self._pending.clear()
@@ -243,6 +250,15 @@ class CordisHost:
                     except (ProtocolError, TypeError, ValueError) as exc:
                         raise HostBlocked("provider_report_invalid") from exc
                     await self._send_provider_reports(reports)
+                if self.facade_activation_source is not None:
+                    try:
+                        await self.facade_activation_source(self)
+                    except asyncio.CancelledError:
+                        raise
+                    except ProtocolError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - typed block, child stopped below
+                        raise HostBlocked("provider_activation_unavailable") from exc
                 self.state, self.reason = "ready", None
                 return True
             except asyncio.CancelledError:
@@ -423,6 +439,38 @@ class CordisHost:
             acknowledged.append(response["payload"])
         return acknowledged
 
+    async def activate_facade(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Ask this boot's facade whether it activates at the Cordis owner's epoch (#1024).
+
+        Host to child only; the closed request names a non-pinned facade
+        domain, its Cordis owner epoch and digest, and nothing else. The answer
+        is validated and returned; the caller (the provider worker) decides.
+        """
+        from .protocol import validate_facade_request, validate_facade_response
+        if self.state not in {"starting", "ready"} or self.process is None:
+            raise HostBlocked(self.reason or "runtime_not_ready")
+        request = validate_facade_request(dict(request), "provider.activate")
+        response = await self._rpc("provider.activate", internal=True, payload=request)
+        result = validate_facade_response(response["payload"], "provider.activate")
+        if result["domain"] != request["domain"] or result["epoch"] != request["epoch"]:
+            raise ProtocolError("facade answer does not match its request")
+        if result["state"] == "activated":
+            self._facade_activations[request["domain"]] = {"epoch": request["epoch"]}
+        else:
+            self._facade_activations.pop(request["domain"], None)
+        return result
+
+    async def deactivate_facade(self, domain: str, epoch: int, reason_code: str) -> None:
+        """Tell this boot's facade it no longer forwards; best effort, never blocks a stop."""
+        from .protocol import validate_facade_request, validate_facade_response
+        self._facade_activations.pop(domain, None)
+        if self.state not in {"starting", "ready", "quiescing"} or self.process is None:
+            return
+        request = validate_facade_request({"domain": domain, "epoch": epoch, "reason_code": reason_code},
+                                          "provider.deactivate")
+        response = await self._rpc("provider.deactivate", internal=True, payload=request)
+        validate_facade_response(response["payload"], "provider.deactivate")
+
     async def refresh_status(self, *, deadline_at: int | None = None) -> dict[str, Any]:
         """One current-boot readback, bounded below the browser's five seconds.
 
@@ -561,6 +609,15 @@ class CordisHost:
         drain_deadline = min([now + 10_000, *[pending.frame["deadline_at"] for pending in self._pending.values()]])
         if process.returncode is None and not preserve_blocked:
             try:
+                for domain, activation in list(self._facade_activations.items()):
+                    # Best effort: the facade stops forwarding before the child quiesces.
+                    try:
+                        request = {"domain": domain, "epoch": activation["epoch"], "reason_code": "host_stopping"}
+                        await self._rpc("provider.deactivate", internal=True, deadline_at=drain_deadline,
+                                        payload=request)
+                    except (HostBlocked, ProtocolError):
+                        break
+                self._facade_activations.clear()
                 for report in list(self._provider_reports.values()):
                     # Best effort: the facades report quiescing; providers stay
                     # Python-owned, and a lost report never blocks shutdown.

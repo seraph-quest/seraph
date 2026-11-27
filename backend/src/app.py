@@ -853,6 +853,8 @@ async def _lifespan_services(app: FastAPI):
                             cordis_host.node_path = Path(settings.cordis_node_path)
                         # Every (re)start reports what Python hosts to the facades (#1024).
                         cordis_host.provider_reports_source = app.state.provider_worker.current_reports
+                        # ... then asks each Cordis-owned facade domain's facade to activate.
+                        cordis_host.facade_activation_source = app.state.provider_worker.activate_facades
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
@@ -886,6 +888,7 @@ async def _lifespan_services(app: FastAPI):
                     except Exception:
                         logging.getLogger(__name__).exception("Runtime lifecycle shutdown failed")
                     cordis_host.provider_reports_source = None
+                    cordis_host.facade_activation_source = None
                     try:
                         await cordis_host.stop()
                     finally:

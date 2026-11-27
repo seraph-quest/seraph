@@ -256,10 +256,21 @@ schema 1 and 2 bindings decode byte-identically, and state, authority and audit
 never move to Cordis. The Cordis state, authority and audit facades are mandatory with fixed
 dependencies and only record closed host-to-child provider reports. Verified
 locally with temporary state and the real reviewed child; external network and
-inference denied. Partial because the Cordis facades only report readiness
-and own no activation of the Python-hosted providers (operator decision on
-#1024), and backup/restore stay with the host CLI with no in-process
-maintenance handoff. See the
+inference denied. Facade activation: while a `goals`, `memory` or
+`artifacts` owner row is Cordis-owned, its provider stays `awaiting_facade`
+until the running child's facade answers a host-sent `provider.activate` for
+exactly that row (epoch and reviewed digest) in the current boot, and every
+dependent callback is checked against that boot's receipt; a deactivated
+facade forwards nothing in the child. The pinned trust facades still only
+report readiness (operator decision on #1024). An in-process maintenance
+handoff takes a workspace backup from the running backend
+(`POST /api/runtime/maintenance/backup`): it closes the state gate, drains open
+sessions, disposes the engine and writes the archive under the owner lease the
+worker already holds, then reruns the mandatory predicates and reopens the
+gate (or leaves it `failed`). Partial because no production path yet moves
+`goals`, `memory` or `artifacts` to Cordis (their cutover is its own ADR-036
+§5 slice), and restore and rollback stay with the host CLI against a stopped
+backend. See the
 [guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
 
 **Pinned trust domains and composition dump** from

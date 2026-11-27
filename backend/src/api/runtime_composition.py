@@ -112,3 +112,32 @@ async def transition_domain_owner(request: Request, domain: str, body: OwnerTran
     except CompositionBindingError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.reason_code, "recovery_action": "reload_domains"}) from exc
     return {"transition": receipt, "domains": await _domains()}
+
+
+class MaintenanceBackup(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirm: Literal["backup"]
+
+
+@router.post("/runtime/maintenance/backup")
+async def maintenance_backup(request: Request, body: MaintenanceBackup):
+    """In-process workspace backup through the state provider's maintenance handoff (#1024).
+
+    The running backend closes its session gate, drains, disposes the engine
+    and writes the archive under the owner lease it already holds; restore and
+    rollback stay with the host CLI against a stopped backend.
+    """
+    from src.runtime_plugins.worker import ProviderWorker, StateMaintenanceRefused
+    operator = _operator(request)
+    if operator.ownership_continuity != "stable":
+        raise HTTPException(status_code=403, detail={"code": "operator_ownership_recovery_required",
+                                                     "recovery_action": "complete_ownership_recovery"})
+    worker = getattr(request.app.state, "provider_worker", None)
+    if type(worker) is not ProviderWorker:
+        raise HTTPException(status_code=409, detail={"code": "state_maintenance_unavailable",
+                                                     "recovery_action": "use_host_cli"})
+    try:
+        receipt = await worker.maintenance_backup()
+    except StateMaintenanceRefused as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.reason_code, "recovery_action": "use_host_cli"}) from exc
+    return {"backup": receipt, "maintenance": worker.last_maintenance}

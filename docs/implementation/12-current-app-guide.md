@@ -1157,9 +1157,54 @@ activate or deactivate anything. Private reads recheck tombstones, the Root and
 the composition vector in the transaction that serves them, so a forget,
 revoke or owner change during an in-flight read denies it and the child holds
 no cache. A provider or child restart never touches `unknown_external_effect`
-or `cost_liability` jobs and never replays their effects. Backup and restore
-stay with the host CLI against a stopped backend; there is no in-process
-maintenance handoff.
+or `cost_liability` jobs and never replays their effects.
+
+**Facade activation.** `goals`, `memory` and `artifacts` are the facade
+providers. While a facade domain's owner row is `legacy`, Python decides and
+its predicate alone activates the provider. While the row is `cordis`, the
+facade decides and Python is the mechanism (#1026 §1): the provider is
+`awaiting_facade` (`provider_facade_not_activated`) until, after the provider
+reports and before the boot admits anything, the host sends the closed
+`provider.activate {domain, owner_kind, epoch, composition_digest}` and the
+child's facade answers `activated` with the plugin digest that both the owner
+row and the reviewed build name. Any other answer (`facade_not_composed`, a
+foreign digest, an owner row that is not `ready`) leaves it awaiting with a
+typed reason, and a facade that activated against the wrong digest is
+deactivated again. The receipt belongs to that boot: every dependent Cordis
+callback is checked against its boot nonce, epoch and digest
+(`native_provider_<name>_facade_inactive` otherwise), so a child restart or a
+new owner epoch needs a fresh activation. At stop the host sends
+`provider.deactivate` (best effort) before the provider quiesce reports; a
+deactivated facade forwards nothing and answers `provider_facade_inactive` in
+the child. A facade the host never asked about (a legacy-owned domain) keeps
+forwarding. Both frames flow host to child only, name only the three facade
+domains (a pinned domain or any extra field is a protocol error), and a
+child-sent one fences the host. `/api/runtime/status` shows each facade
+provider's `owner_kind` and `facade` (`activated`, `inactive`,
+`not_required`). No production path moves these three domains to Cordis yet;
+that cutover is its own ADR-036 §5 slice.
+
+**In-process maintenance handoff.** `POST /api/runtime/maintenance/backup`
+(authenticated operator with stable ownership continuity, body
+`{"confirm": "backup"}`) takes a workspace backup from the running backend
+through the state provider. It refuses typed before closing anything unless
+every mandatory provider is active, no other maintenance runs and, in
+production, the worker holds the owner lease (`state_maintenance_unavailable`,
+`state_maintenance_in_progress`, `state_maintenance_lease_missing`). Then the
+`get_session` gate closes (`maintenance`; new sessions fail
+`state_provider_maintenance` and dependent Cordis callbacks block
+`native_provider_state_unavailable`, never fence), the open sessions drain
+(the last one to close wakes the step), the engine is disposed, and the
+existing `backup_workspace` writes the archive to the default backup
+directory under the held lease (the fence marker; no second lock is opened).
+A cancelled caller still waits for the archive step before the gate reopens.
+Afterwards the mandatory predicates run again with the audit write probe; the
+gate reopens only if they pass and otherwise stays `failed` until restart.
+One `runtime_state_maintenance` audit event records the outcome, and
+`/api/runtime/status` shows `maintenance` and `last_maintenance`. Restore and
+rollback replace the live workspace root and stay with the host CLI against a
+stopped backend. Residual risk: a sync writer that bypasses `get_session`
+during the copy is caught only by the backup's own change checks.
 
 ### Pinned trust domains and composition dump (#1198)
 

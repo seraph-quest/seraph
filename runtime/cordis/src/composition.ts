@@ -282,6 +282,10 @@ export class Composition {
   assertReady(): void {
     if (this.disposed || this.cordisErrors || this.fibers.some(({ spec, fiber }) => spec.required && (fiber.state !== FiberState.ACTIVE || (SERVICE_KEY_BY_PLUGIN[spec.id] !== undefined && !this.context.get(SERVICE_KEY_BY_PLUGIN[spec.id]!)))) || this.context.get('hostLifecycle')?.ready !== true) throw new ProtocolError('required plugin unavailable');
   }
+  /** The reviewed digest of a composed, active facade; undefined otherwise. */
+  facadeDigest(id: string): string | undefined {
+    return this.disposed || !Object.hasOwn(SERVICE_KEY_BY_PLUGIN, id) || !this.composed(id) ? undefined : this.pluginDigests[id];
+  }
   private composed(id: string): boolean {
     const entry = this.fibers.find(({ spec }) => spec.id === id);
     return entry !== undefined && entry.fiber.state === FiberState.ACTIVE && !!this.context.get(SERVICE_KEY_BY_PLUGIN[id]!);

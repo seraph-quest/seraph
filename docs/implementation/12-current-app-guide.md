@@ -1233,12 +1233,13 @@ catalogues:
   | `seraph.delegation.v1#enabled` | `USE_DELEGATION` | `false`, `true` | `false` | supported | #1338 |
   | `seraph.scheduler.v1#screenshot_folder_ingest` | `SCREENSHOT_FOLDER_INGEST_ENABLED` | `false` only | `true` | supported | #1339 |
   | `seraph.scheduler.v1#screenshot_observation_digest` | `SCREENSHOT_OBSERVATION_DIGEST_ENABLED` | `false` only | `true` | supported | #1340 |
-  | `seraph.scheduler.v1#end_of_day_report` | `END_OF_DAY_REPORT_ENABLED` | `false`, `true` | `true` | supported | #1341 |
+  | `seraph.scheduler.v1#end_of_day_report` | `END_OF_DAY_REPORT_ENABLED` | `false` only | `true` | supported | #1341 |
 
-  The two screenshot rows are disable-only: they start observation or a
-  screen-derived prompt, so a patch may turn them off but never on, and never
-  restores an operator's `false` (ADR-036 §6). The screenshot-folder row gates
-  both the ingest and the analysis job.
+  The two screenshot rows and the end-of-day report row are disable-only: they
+  start observation, a screen-derived prompt or a screen-derived report, so a
+  patch may turn them off but never on, and never restores an operator's
+  `false` (ADR-036 §6). The screenshot-folder row gates both the ingest and the
+  analysis job.
 
 **Boot order.** The lifespan calls `boot_profile()` before the provider worker
 takes the workspace lock. That function applies the layers in a fixed order:
@@ -1314,8 +1315,10 @@ one of:
 - `supported`: the env flag is the base layer;
 - `deprecated`: still the base layer, so nothing changes, but each boot that
   sets the flag logs a warning naming the row and writes one
-  `composition_env_flag_deprecated` audit event. `SCHEDULER_ENABLED` is the first
-  and so far only deprecated flag;
+  `composition_env_flag_deprecated` audit event (also when a patch row overrides
+  it: "deprecated; overridden by patch row …"). The row's stage, not where its
+  value came from, chooses the event. `SCHEDULER_ENABLED` is the first and so
+  far only deprecated flag;
 - `retired`: the flag is no longer read. A value still set to the default is
   ignored, as is any value a patch row covers (audited
   `composition_env_flag_ignored`). A non-default value with no patch row refuses
@@ -1327,12 +1330,22 @@ one of:
 lifespan once the provider worker has opened the state gate, and an unwritable
 audit never blocks boot. Each flag's removal is its own issue (#1337 to #1341).
 
-**Classified flags.** `inventory.ENV_FLAGS` classifies every boolean setting
-in `config/settings.py`, every `${NAME_ENABLED:-}` flag `manage.sh` reads and
-the string selectors `SCREEN_ANALYSIS_PROVIDER` and `SERAPH_VLM_MODE`. Each is
-a `row`, a `security_switch`, `removed` or `not_composition`, and
+**Classified flags.** `inventory.ENV_FLAGS` classifies every name found by
+three scans:
+- every boolean settings field in `config/settings.py`, including
+  `StrictBool`, `Optional`/`Union`/`bool | None` and `Annotated` forms and
+  nested models;
+- every `$NAME_ENABLED` or `${NAME_ENABLED...}` reference in `manage.sh`;
+- every variable `backend/src` reads directly from the environment, with module
+  string constants and their imports resolved.
+
+Non-flag environment reads (credentials, paths, platform and server-process
+variables, a test canary) are listed in `inventory.ENV_READS`. Reads whose name
+is computed at runtime are listed in `DYNAMIC_ENV_READS`. The string selectors
+`SCREEN_ANALYSIS_PROVIDER` and `SERAPH_VLM_MODE` are hand-kept and review-only.
+Each flag is a `row`, a `security_switch`, `removed` or `not_composition`, and
 `tests/test_composition_env_flags_1206.py` fails on an unclassified or stale
-flag. The security switches stay startup-validated environment settings:
+name. The security switches stay startup-validated environment settings:
 - authentication: `OPERATOR_AUTH_LOCAL_NO_LOGIN`,
   `OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS`, `OPERATOR_AUTH_COOKIE_SECURE`;
 - pinned inference (ADR-036 §3): the `OPENROUTER_*` routing booleans,
@@ -1340,14 +1353,17 @@ flag. The security switches stay startup-validated environment settings:
   `SCREEN_ANALYSIS_PROVIDER`, `SERAPH_VLM_MODE`;
 - consent and privacy: `SCREEN_DERIVED_LLM_ALLOW_REMOTE`,
   `SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF`, `END_OF_DAY_REPORT_LLM_ENABLED`,
-  `LLM_LOG_CONTENT`, and the launcher's `DAEMON_ENABLED` (native screen
-  capture);
+  `LLM_LOG_CONTENT`, the observer's direct reads `SERAPH_SCREEN_ANALYSIS_PROVIDER`
+  (an alias of `SCREEN_ANALYSIS_PROVIDER`), `SERAPH_SCREEN_ANALYSIS_ENABLED` and
+  `SERAPH_PRESERVE_SCREEN_CAPTURES`, and the launcher's `DAEMON_ENABLED` (native
+  screen capture);
 - egress and transport: `EMAIL_REPORTS_ENABLED`,
   `EMAIL_REPORTS_PREVIEW_REQUIRED`, `SMTP_USE_TLS`;
 - execution: `REPO_SANDBOX__ENABLED`, `REPO_SANDBOX__REQUIRE_ISOLATION`, and the
   launcher's `PROXY_ENABLED` (stdio MCP proxy).
 
-`DEBUG` and `DATABASE_ECHO` are diagnostics, not composition. The composition dump shows two fields:
+`DEBUG`, `DATABASE_ECHO` and manage.sh's own `TRACE_WAS_ENABLED` are not
+composition. The composition dump shows two fields:
 - `profile`: `state`, `profile_id`, `source` (`explicit` or
   `deployment_environment`), `env_file`, `bundles`, `operator_patch`
   (`present` or `absent`) and `digest`. When the profile is invalid it shows

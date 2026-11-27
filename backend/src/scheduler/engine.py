@@ -294,7 +294,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "screenshot_folder_ingest",
             "name": "Screenshot folder image ingest",
-            "next_run_time": _startup_next_run(screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled)),
+            "next_run_time": _startup_next_run(
+                screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled)),
             "misfire_grace_time": 120,
         },
         {
@@ -304,8 +305,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "screenshot_folder_analysis",
             "name": "Screenshot folder semantic analysis",
-            "next_run_time": _startup_next_run(screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled),
-                                               delay_seconds=10),
+            "next_run_time": _startup_next_run(
+                screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled), delay_seconds=10),
             "misfire_grace_time": 120,
         },
         {

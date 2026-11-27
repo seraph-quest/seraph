@@ -531,10 +531,21 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
 
 # --- Composition environment flags (#1206, ADR-036 §6) --------------------------
 #
-# Every boolean setting in ``config/settings.py`` and every ``${NAME_ENABLED:-}``
-# flag ``manage.sh`` reads is classified here, plus the string selectors named
-# below. ``tests/test_source_inventory_1205.py`` scans both files and fails on an
-# unclassified flag or a stale entry.
+# Three scans feed this table, and ``tests/test_composition_env_flags_1206.py``
+# fails on any unclassified or stale name:
+# * every boolean settings field in ``config/settings.py`` (``bool``,
+#   ``StrictBool``, ``Optional``/``Union``/``bool | None`` and ``Annotated``
+#   wrappers, and nested settings models joined by ``__``);
+# * every ``$NAME_ENABLED`` or ``${NAME_ENABLED...}`` reference in ``manage.sh``;
+# * every environment variable ``backend/src`` reads directly
+#   (``os.environ.get``/``os.getenv``/``os.environ[...]``/``in os.environ`` and
+#   the ``ENV_READER_FUNCS`` helpers), with module string constants and their
+#   imports resolved. A flag it finds belongs in ``ENV_FLAGS``; any other name
+#   (credential, path, platform, server process, test) is in ``ENV_READS``. A read
+#   whose name is computed at runtime is listed in ``DYNAMIC_ENV_READS``.
+#
+# ``STRING_SELECTORS`` is hand-kept and review-only: no scan finds a string
+# settings field that selects composition, so review must add each one.
 #
 # * ``row``: selects composition, so it has a catalogued patch row in
 #   ``profiles.PATCH_ROWS`` (typed schema, env base stage, removal issue). ``gates``
@@ -619,12 +630,56 @@ ENV_FLAGS: tuple[EnvFlag, ...] = (
           _CONSENT + "starts the native screen-capture daemon under the OS capture permission", launcher=True),
     _flag("PROXY_ENABLED", "security_switch",
           "execution authority: starts the stdio proxy that exposes local MCP servers", launcher=True),
+    # Read straight from the process environment by the observer (not settings fields).
+    _flag("SERAPH_SCREEN_ANALYSIS_PROVIDER", "security_switch",
+          _PINNED_INFERENCE + "alias of SCREEN_ANALYSIS_PROVIDER read by the observer", launcher=True),
+    _flag("SERAPH_SCREEN_ANALYSIS_ENABLED", "security_switch",
+          _CONSENT + "default for whether screen analysis runs", launcher=True),
+    _flag("SERAPH_PRESERVE_SCREEN_CAPTURES", "security_switch",
+          "privacy: default for whether screen capture images are preserved", launcher=True),
+    _flag("TRACE_WAS_ENABLED", "not_composition",
+          "manage.sh's own xtrace bookkeeping variable; never read from the env file", launcher=True),
     _flag("DEBUG", "not_composition", "diagnostics only; selects no plugin, provider or job"),
     _flag("DATABASE_ECHO", "not_composition", "SQL echo diagnostics only; selects no plugin, provider or job"),
 )
-# String selectors the boolean scan cannot see; review keeps this list.
+# String settings fields that select composition. Hand-kept and review-only:
+# no scan finds these, so review adds each new selector here.
 STRING_SELECTORS = frozenset({"SCREEN_ANALYSIS_PROVIDER", "SERAPH_VLM_MODE"})
-_LAUNCHER_FLAG = re.compile(r"\$\{([A-Z][A-Z0-9_]*_ENABLED):-")
+_LAUNCHER_FLAG = re.compile(r"\$\{?([A-Z][A-Z0-9_]*_ENABLED)\b")
+_ENV = "src.observer.screen_analysis_settings"
+
+# Environment variables ``backend/src`` reads directly that are not flags.
+ENV_READ_KINDS = frozenset({"credential", "path", "platform", "server_process", "test"})
+ENV_READS: Mapping[str, tuple[str, str]] = MappingProxyType({
+    "OPENROUTER_API_KEY": ("credential", "retired provider key, read only to redact and hydrate the vault"),
+    "SERAPH_DAEMON_STATUS_FILE": ("path", "where the native daemon writes its status"),
+    "SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR": ("path", "screen capture archive root"),
+    "SERAPH_SCREENSHOT_FOLDER": ("path", "the operator's screenshot folder"),
+    "SERAPH_WORKSPACE_LIFECYCLE_PATH": ("path", "production workspace lifecycle receipt path"),
+    "SERAPH_PRODUCTION_BIND_IDENTITY": ("server_process", "production container bind identity check"),
+    "FORWARDED_ALLOW_IPS": ("server_process", "auth startup validation of the ASGI server's proxy trust"),
+    "SERVER_SOFTWARE": ("server_process", "auth startup validation of the ASGI server"),
+    "UVICORN_HOST": ("server_process", "auth startup validation of the bind host"),
+    "UVICORN_WORKERS": ("server_process", "auth startup validation of the worker count"),
+    "WEB_CONCURRENCY": ("server_process", "auth startup validation of the worker count"),
+    "GUNICORN_CMD_ARGS": ("server_process", "auth startup validation of the worker count"),
+    "DBUS_SESSION_BUS_ADDRESS": ("platform", "passed through to the GitHub CLI's credential helper"),
+    "XDG_CONFIG_HOME": ("platform", "the GitHub CLI's configuration directory"),
+    "XDG_RUNTIME_DIR": ("platform", "the GitHub CLI's runtime directory"),
+    "PLAYWRIGHT_BROWSERS_PATH": ("platform", "where the browser runtime is installed"),
+    "SERAPH_SECURE_HOST_SHOULD_NOT_LEAK": ("test", "deterministic contract harness canary"),
+})
+# Reads whose variable name is computed at runtime, by ``module:function``.
+DYNAMIC_ENV_READS: Mapping[str, str] = MappingProxyType({
+    "src.llm_runtime:_redact_text": "provider key names from a literal tuple, read only to redact them",
+    "src.llm_runtime:_secret_value": "a provider profile's credential env name (credentials only)",
+    "src.tools.mcp_manager:MCPManager._resolve_env_vars": "${VAR} references in the operator's MCP config",
+    f"{_ENV}:_env_enabled": "the ENV_READER_FUNCS helper; its callers' literal names are scanned",
+    "src.model_fabric.contracts:ProviderProfile.api_key": "a profile's credential env name (credentials only)",
+})
+# Helpers whose first argument is an environment variable name.
+ENV_READER_FUNCS = frozenset({"_env_enabled"})
+_ENV_GET = frozenset({"os.environ.get", "os.getenv", "os.environ.setdefault", "os.environ.pop"})
 
 
 def scan_env_flags(settings_file: Path = SETTINGS_FILE, launcher_file: Path = LAUNCHER_FILE) -> dict[str, str | None]:
@@ -640,17 +695,101 @@ def scan_env_flags(settings_file: Path = SETTINGS_FILE, launcher_file: Path = LA
 
     settings_class = classes["Settings"]
     for name, annotation in fields(settings_class):
-        if isinstance(annotation, ast.Name) and annotation.id == "bool":
+        if _is_bool(annotation):
             found[name.upper()] = name
         elif isinstance(annotation, ast.Name) and annotation.id in classes:
             nested[name] = annotation.id
     for prefix, class_name in nested.items():
         for name, annotation in fields(classes[class_name]):
-            if isinstance(annotation, ast.Name) and annotation.id == "bool":
+            if _is_bool(annotation):
                 found[f"{prefix}__{name}".upper()] = f"{prefix}__{name}"
     for name in _LAUNCHER_FLAG.findall(launcher_file.read_text()):
         found.setdefault(name, None)
     return found
+
+
+def _is_bool(annotation: ast.expr | None) -> bool:
+    """A boolean annotation, unwrapping Optional, Union, ``X | None``, Annotated and string forms."""
+    if annotation is None:
+        return False
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            return _is_bool(ast.parse(annotation.value, mode="eval").body)
+        except SyntaxError:
+            return False
+    if isinstance(annotation, ast.Name):
+        return annotation.id in {"bool", "StrictBool"}
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr in {"bool", "StrictBool"}
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _is_bool(annotation.left) or _is_bool(annotation.right)
+    if isinstance(annotation, ast.Subscript):
+        base = dotted(annotation.value).rpartition(".")[2]
+        members = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+        if base in {"Optional", "Union"}:
+            return any(_is_bool(member) for member in members)
+        if base == "Annotated":
+            return _is_bool(members[0])
+    return False
+
+
+def _module_name(path: Path, root: Path) -> str:
+    parts = path.relative_to(root.parent).with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def scan_env_reads(root: Path = SRC_ROOT) -> tuple[dict[str, set[str]], set[str]]:
+    """({ENV_NAME: {module:function}}, {module:function with a computed name}) for ``backend/src``."""
+    trees = {_module_name(path, root): ast.parse(path.read_text(), filename=str(path))
+             for path in sorted(root.rglob("*.py"))}
+    constants: dict[str, dict[str, ast.expr]] = {}
+    imports: dict[str, dict[str, tuple[str, str]]] = {}
+    for module, tree in trees.items():
+        constants[module] = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
+                             for target in node.targets if isinstance(target, ast.Name)}
+        imports[module] = {(alias.asname or alias.name): (node.module, alias.name) for node in tree.body
+                           if isinstance(node, ast.ImportFrom) and node.module for alias in node.names}
+
+    def resolve(module: str, node: ast.expr, depth: int = 0) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if not isinstance(node, ast.Name) or depth > 8:
+            return None
+        if node.id in constants.get(module, {}):
+            return resolve(module, constants[module][node.id], depth + 1)
+        source = imports.get(module, {}).get(node.id)
+        if source and source[0] in constants and source[1] in constants[source[0]]:
+            return resolve(source[0], constants[source[0]][source[1]], depth + 1)
+        return None
+
+    found: dict[str, set[str]] = {}
+    dynamic: set[str] = set()
+    for module, tree in trees.items():
+        def visit(node: ast.AST, scope: list[str]) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = [*scope, node.name]
+            name_node = None
+            if isinstance(node, ast.Call) and node.args:
+                func = dotted(node.func)
+                if func in _ENV_GET or func in {"environ.get", "getenv"} or func in ENV_READER_FUNCS:
+                    name_node = node.args[0]
+            elif isinstance(node, ast.Subscript) and dotted(node.value) in {"os.environ", "environ"}:
+                name_node = node.slice
+            elif (isinstance(node, ast.Compare) and len(node.comparators) == 1
+                  and isinstance(node.ops[0], (ast.In, ast.NotIn))
+                  and dotted(node.comparators[0]) in {"os.environ", "environ"}):
+                name_node = node.left
+            if name_node is not None:
+                where = f"{module}:{'.'.join(scope) or '<module>'}"
+                name = resolve(module, name_node)
+                if name is None:
+                    dynamic.add(where)
+                else:
+                    found.setdefault(name, set()).add(where)
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+        visit(tree, [])
+    return found, dynamic
 
 
 def env_flag_problems(flags: tuple[EnvFlag, ...] = ENV_FLAGS) -> list[str]:

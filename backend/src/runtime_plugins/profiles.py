@@ -113,9 +113,9 @@ class PatchRow:
     env_setting: str
     env_name: str
     # The row's typed schema: the values a patch layer may set. ``(False,)`` is
-    # disable-only: the flag starts observation or a screen-derived prompt, so a
-    # patch may turn it off but never on (ADR-036 §6: a patch never enables a
-    # consent-gated provider or restores an opt-out).
+    # disable-only: the flag starts observation, a screen-derived prompt or a
+    # screen-derived report, so a patch may turn it off but never on (ADR-036
+    # §6: a patch never enables a consent-gated provider or restores an opt-out).
     values: tuple[bool, ...] = (False, True)
     # The value when neither a patch layer nor the environment sets it; it equals
     # the settings field default, so retiring the env base changes nothing.
@@ -147,7 +147,8 @@ PATCH_ROWS: dict[str, PatchRow] = {row.row_id: row for row in (
          default=True, removal_issue="#1339"),
     _row("seraph.scheduler.v1#screenshot_observation_digest", "screenshot_observation_digest_enabled",
          values=(False,), default=True, removal_issue="#1340"),
-    _row("seraph.scheduler.v1#end_of_day_report", "end_of_day_report_enabled", default=True,
+    # Disable-only: a patch never undoes an operator's END_OF_DAY_REPORT_ENABLED=false.
+    _row("seraph.scheduler.v1#end_of_day_report", "end_of_day_report_enabled", values=(False,), default=True,
          removal_issue="#1341"),
 )}
 SCHEDULER_ROW = "seraph.scheduler.v1#enabled"
@@ -171,7 +172,8 @@ SECURITY_SETTINGS = frozenset({
     "screen_derived_llm_require_profile_proof", "end_of_day_report_llm_enabled", "email_reports_enabled",
     "email_reports_preview_required", "smtp_use_tls", "llm_log_enabled", "llm_log_content",
     "repo_sandbox__enabled", "repo_sandbox__require_isolation", "screen_analysis_provider", "seraph_vlm_mode",
-    "daemon_enabled", "proxy_enabled",
+    "daemon_enabled", "proxy_enabled", "seraph_screen_analysis_provider", "seraph_screen_analysis_enabled",
+    "seraph_preserve_screen_captures",
 })
 _ROW_ID = re.compile(r"(seraph\.[a-z0-9-]+\.v[0-9]+)#([a-z][a-z0-9_]{0,63})\Z")
 
@@ -313,7 +315,7 @@ def validate_patch(rows: Any, *, layer: str, bundles: tuple[str, ...]) -> list[t
             # Every catalogued row is a boolean today; no string can carry a credential.
             raise CompositionProfileInvalid("patch_value_invalid", row_id=row_id)
         if row["value"] not in spec.values:
-            # A disable-only row: a patch never turns observation or a screen-derived prompt on.
+            # A disable-only row: a patch never turns observation or a screen-derived job on.
             raise CompositionProfileInvalid("patch_value_consent_gated", row_id=row_id)
         if row_id in seen:
             raise CompositionProfileInvalid("patch_row_duplicate", row_id=row_id)
@@ -529,7 +531,8 @@ def env_base_notices(composed: ComposedProfile | None) -> list[dict[str, Any]]:
         spec = PATCH_ROWS[item.row_id]
         if not item.env_set or spec.env_stage == "supported":
             continue
-        event = ENV_DEPRECATED_EVENT if item.source == "env" else ENV_IGNORED_EVENT
+        # The row's stage chooses the event; the source only words it.
+        event = ENV_DEPRECATED_EVENT if spec.env_stage == "deprecated" else ENV_IGNORED_EVENT
         notices.append({"event_type": event, **item.payload()})
     return notices
 
@@ -544,7 +547,11 @@ async def record_env_base_layer() -> list[dict[str, Any]]:
     logger = logging.getLogger(__name__)
     notices = env_base_notices(_booted)
     for notice in notices:
-        if notice["event_type"] == ENV_DEPRECATED_EVENT:
+        if notice["event_type"] == ENV_DEPRECATED_EVENT and notice["source"] == "patch":
+            summary = (f"{notice['env']} is deprecated; overridden by patch row {notice['id']} in "
+                       f"<workspace>/{OPERATOR_PATCH_FILE}; remove it from the environment "
+                       f"({notice['removal_issue']})")
+        elif notice["event_type"] == ENV_DEPRECATED_EVENT:
             summary = (f"{notice['env']} is deprecated; move it to the patch row {notice['id']} in "
                        f"<workspace>/{OPERATOR_PATCH_FILE} ({notice['removal_issue']})")
         else:

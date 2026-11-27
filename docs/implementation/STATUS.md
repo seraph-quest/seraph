@@ -353,16 +353,17 @@ Partial because:
 **Composition env flags** from
 [#1206](https://github.com/seraph-quest/seraph/issues/1206) (A3.3 slice 3) are
 **Partial**. Every composition flag is a catalogued patch row with a typed
-schema and a removal issue: `SCHEDULER_ENABLED`, `USE_DELEGATION`,
-`END_OF_DAY_REPORT_ENABLED`, and the disable-only
-`SCREENSHOT_FOLDER_INGEST_ENABLED` and `SCREENSHOT_OBSERVATION_DIGEST_ENABLED`
-(a patch can turn them off, never on). Each row's readers use the effective
+schema and a removal issue: `SCHEDULER_ENABLED`, `USE_DELEGATION`, and the
+disable-only `SCREENSHOT_FOLDER_INGEST_ENABLED`,
+`SCREENSHOT_OBSERVATION_DIGEST_ENABLED` and `END_OF_DAY_REPORT_ENABLED` (a patch
+can turn them off, never on). Each row's readers use the effective
 value, so a patch row changes the actual jobs, delegation and settings payload,
 and an install without a patch file behaves exactly as its environment says.
-Every other boolean setting, launcher flag (`DAEMON_ENABLED`, `PROXY_ENABLED`)
-and screen-analysis selector is a classified security switch that stays an
-environment setting, or a diagnostic. A guard test fails on an unclassified
-flag. The env base layer has a removal path (supported, deprecated, retired).
+Every other boolean setting, launcher flag (`DAEMON_ENABLED`, `PROXY_ENABLED`),
+direct environment read in `backend/src` and screen-analysis selector is a
+classified security switch that stays an environment setting, a classified
+non-flag read (credential, path, platform, server process), or a diagnostic. A
+guard test fails on an unclassified name; string selectors stay review-only. The env base layer has a removal path (supported, deprecated, retired).
 A retired flag that would change behaviour refuses boot with the row to add,
 instead of being dropped silently. The composition dump shows the row
 catalogue and each row's env source. Partial because no flag is retired yet.

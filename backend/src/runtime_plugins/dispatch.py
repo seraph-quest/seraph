@@ -491,6 +491,9 @@ class NativeServiceDispatcher:
             return blocked(exc.reason_code)
         except StateProviderUnavailable as exc:
             # The state gate closed mid-call (maintenance or shutdown, #1024): typed, never a fence.
+            # A callback whose owner path spans more than one unit of work may already have
+            # committed an earlier one when a later session is refused, and that cannot be told
+            # apart here; the job's own CAS and recovery (not this result) say what landed.
             return blocked(exc.reason_code)
         except (AuthFailure, DurableJobError):
             return blocked("native_original_job_authority_changed")

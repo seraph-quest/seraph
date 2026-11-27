@@ -245,6 +245,34 @@ _OPEN_SESSIONS = _SessionCounter()
 _STATE_PROVIDER_SCOPE: ContextVar[bool] = ContextVar("seraph_state_provider_scope", default=False)
 
 
+# Maintenance control (#1024): while a step is still draining (nothing copied
+# yet), only the authentication of the maintenance status and abort routes may
+# open sessions through a ``maintenance`` gate; the drain waits for them too.
+_MAINTENANCE_CONTROL_OPEN: list[bool] = [False]
+_MAINTENANCE_CONTROL_SCOPE: ContextVar[bool] = ContextVar("seraph_maintenance_control_scope", default=False)
+
+
+def set_maintenance_control(open_: bool) -> None:
+    with _OPEN_SESSIONS.lock:
+        _MAINTENANCE_CONTROL_OPEN[0] = bool(open_)
+
+
+@contextmanager
+def maintenance_control_scope() -> Iterator[None]:
+    """Authenticate a maintenance status or abort request while a step drains."""
+    token = _MAINTENANCE_CONTROL_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _MAINTENANCE_CONTROL_SCOPE.reset(token)
+
+
+def open_session_count() -> int:
+    """Default-factory sessions open right now (what a maintenance drain waits for)."""
+    with _OPEN_SESSIONS.lock:
+        return _OPEN_SESSIONS.open
+
+
 @contextmanager
 def state_provider_scope() -> Iterator[None]:
     """Let the state provider's resume predicates open sessions through a ``maintenance`` gate."""
@@ -278,7 +306,8 @@ def state_gate() -> tuple[str | None, str | None]:
 
 def _require_state_gate_open() -> None:
     state, reason = _STATE_GATE
-    if state == "maintenance" and _STATE_PROVIDER_SCOPE.get():
+    if state == "maintenance" and (_STATE_PROVIDER_SCOPE.get() or (
+            _MAINTENANCE_CONTROL_SCOPE.get() and _MAINTENANCE_CONTROL_OPEN[0])):
         return
     if state in _CLOSED_GATES:
         raise StateProviderUnavailable(reason or f"state_provider_{state}")

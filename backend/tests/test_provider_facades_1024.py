@@ -180,11 +180,10 @@ async def test_a_cordis_owned_facade_domain_activates_only_on_its_facade_answer(
     host.state = "stopped"
     assert {item["provider"]: item["state"] for item in worker.snapshot()["providers"]}["memory"] == "awaiting_facade"
     host.state = "ready"
-    await worker.deactivate_facades("provider_deactivated")
-    assert host.deactivated == [("seraph.memory.v1", 2, "provider_deactivated")]
-    assert worker.status["memory"].state == "awaiting_facade"
+    # A new boot answers nothing yet: the old receipt never serves it.
+    host.boot_nonce = "3" * 64
     assert domain_provider_unavailable("seraph.memory.v1", vector=dep, boot_nonce=host.boot_nonce) == \
-        "native_provider_memory_unavailable"
+        "native_provider_memory_facade_inactive"
     # Mandatory providers are never asked or touched by facade activation.
     assert all(worker.status[name].state == "active" for name in MANDATORY)
 
@@ -298,7 +297,8 @@ async def test_real_child_facade_decides_a_cordis_owned_memory_read_in_both_proc
                                        host=host, jobs=jobs)
     assert result is not None
     # Child: a deactivated facade forwards nothing, so no callback reaches Python.
-    await worker.deactivate_facades("provider_deactivated")
+    row = worker._facade_rows["memory"]
+    await host.deactivate_facade("seraph.memory.v1", row[1], "provider_deactivated")
     before = len(calls)
     with pytest.raises(NativeServiceBlocked) as denied:
         await execute_native_read(operator=operator, candidate=_MEMORY_READ, idempotency_key="facade-off",
@@ -599,9 +599,14 @@ async def test_a_resume_interrupted_by_an_untyped_failure_leaves_the_gate_failed
     async def broken_tasks():
         seen.append(state_gate())
         raise RuntimeError("unexpected")
-    with pytest.raises(RuntimeError):
-        async with worker.maintenance("backup"):
+    with pytest.raises(StateMaintenanceRefused, match="state_maintenance_resume_failed") as refused:
+        async with worker.maintenance("backup") as handle:
+            handle["receipt"] = {"archive_path": "/kept.zip", "archive_manifest_sha256": "f" * 64, "member_count": 3}
             monkeypatch.setitem(worker_module._PREDICATES, "tasks", broken_tasks)
+    assert isinstance(refused.value.__cause__, RuntimeError), "typed, chained from the original"
+    # The archive's receipt is kept although the gate stays closed.
+    assert worker.last_maintenance["archive_manifest_sha256"] == "f" * 64
+    assert worker.last_maintenance["archive_path"] == "/kept.zip"
     # The predicate ran while the gate was still closed to everyone else.
     assert seen == [("maintenance", "state_provider_maintenance")]
     assert state_gate() == ("failed", "state_maintenance_resume_failed")
@@ -692,11 +697,118 @@ async def test_shutdown_aborts_a_step_still_draining_and_keeps_the_gate_closed(d
     with pytest.raises(StateMaintenanceRefused, match="state_maintenance_shutdown"):
         await task
     assert ran == [], "a step woken during its drain copies nothing"
-    assert state_gate() == ("maintenance", "state_provider_maintenance"), "shutdown keeps the gate closed"
+    # Nothing was copied, so the gate reopens for the service stops that follow.
+    assert state_gate() == ("active", None)
+    assert worker.last_maintenance["reason_code"] == "state_maintenance_shutdown"
+    assert worker.last_maintenance["audited"] is True
     with pytest.raises(StateMaintenanceRefused, match="state_maintenance_unavailable"):
         async with worker.maintenance("backup"):
             pass
-    worker.close_gate()
     release.set()
     await holding
+    worker.close_gate()
     assert state_gate() == ("deactivating", "state_provider_deactivating")
+
+
+@pytest.mark.asyncio
+async def test_an_operator_abort_ends_a_draining_step_and_reopens_the_gate(db, monkeypatch):
+    draining = asyncio.Event()
+    original_drain = db_engine.drain_open_sessions
+
+    async def observed_drain(wake=None):
+        draining.set()
+        await original_drain(wake)
+    monkeypatch.setattr(db_engine, "drain_open_sessions", observed_drain)
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def holder():
+        async with get_session() as session:
+            await session.execute(select(Goal.id).limit(1))
+            held.set()
+            await release.wait()
+    holding = asyncio.create_task(holder())
+    await held.wait()
+    assert worker.abort_maintenance() is False, "nothing to abort"
+    status = await worker.start_backup()
+    assert status["phase"] == "draining"
+    await draining.wait()
+    current = worker.maintenance_status()
+    assert current["phase"] == "draining" and current["draining_sessions"] == 1
+    # The status and abort routes may authenticate through the closed gate, nothing else.
+    with db_engine.maintenance_control_scope():
+        async with get_session() as session:
+            await session.execute(select(Goal.id).limit(1))
+    with pytest.raises(StateProviderUnavailable):
+        async with get_session():
+            pass
+    assert worker.abort_maintenance() is True
+    await worker._maintenance_task
+    assert state_gate() == ("active", None)
+    assert worker.last_maintenance["outcome"] == "failed"
+    assert worker.last_maintenance["reason_code"] == "state_maintenance_aborted"
+    assert worker.last_maintenance["audited"] is True
+    assert worker.maintenance_status()["phase"] is None
+    release.set()
+    await holding
+    # The control scope never opens a closed gate once the copy started or after the window.
+    set_state_gate("maintenance", "state_provider_maintenance")
+    with db_engine.maintenance_control_scope():
+        with pytest.raises(StateProviderUnavailable):
+            async with get_session():
+                pass
+    set_state_gate("active")
+
+
+@pytest.mark.asyncio
+async def test_sigterm_ordering_aborts_a_drain_blocked_by_a_lifespan_owned_holder(db, monkeypatch):
+    """Through the real worker lifespan: the route returns, then teardown aborts the drain.
+
+    A service the lifespan owns holds a session until its own stop. The backup
+    route returned 202 at once (so a server shutdown never waits on it); the
+    first teardown step aborts the draining step before that service stops,
+    so the drain never completes into a backup during shutdown.
+    """
+    from contextlib import asynccontextmanager
+    import src.app as app_module
+    from src.api.runtime_composition import MaintenanceBackup, maintenance_backup
+    from src.auth.service import AuthenticatedOperator
+    from src.workspace import lifecycle
+    copied, stopped = [], []
+    monkeypatch.setattr(lifecycle, "backup_workspace", lambda *args, **kwargs: copied.append(args))
+    held, release = asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def services(_app):
+        async def holder():
+            async with get_session() as session:
+                await session.execute(select(Goal.id).limit(1))
+                held.set()
+                await release.wait()
+        task = asyncio.create_task(holder())
+        try:
+            yield
+        finally:
+            # The service's own stop: it releases its session only now.
+            stopped.append(worker_module.current_worker()._maintenance_abort)
+            release.set()
+            await task
+    monkeypatch.setattr(app_module, "_lifespan_services", services)
+    app = SimpleNamespace(state=SimpleNamespace())
+    operator = AuthenticatedOperator.__new__(AuthenticatedOperator)
+    object.__setattr__(operator, "principal", SimpleNamespace(authenticated=True, revoked=False,
+                                                              principal_id="operator:root"))
+    object.__setattr__(operator, "ownership_continuity", "stable")
+    request = SimpleNamespace(state=SimpleNamespace(operator=operator), app=app)
+    async with app_module._provider_worker_lifespan(app):
+        await held.wait()
+        response = await maintenance_backup(request, MaintenanceBackup(confirm="backup"))
+        assert response["maintenance"]["phase"] == "draining"
+        assert state_gate() == ("maintenance", "state_provider_maintenance")
+        task = app.state.provider_worker._maintenance_task
+    # Teardown: abort first, then the service stop, then the wait, gate close and lease release.
+    assert stopped == ["state_maintenance_shutdown"], "the abort came before the holder's stop"
+    assert task.done() and copied == [], "no backup ran during shutdown"
+    assert app.state.provider_worker.last_maintenance["reason_code"] == "state_maintenance_shutdown"
+    assert state_gate() == (None, None) and worker_module.current_worker() is None

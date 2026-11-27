@@ -353,7 +353,10 @@ class ProviderWorker:
         self._maintenance_idle.set()
         # Shutdown wakes a step still draining (nothing copied yet) and aborts it.
         self._maintenance_wake: asyncio.Event | None = None
+        # draining | copying | resuming while a step runs.
         self._maintenance_phase: str | None = None
+        self._maintenance_abort: str | None = None
+        self._maintenance_task: asyncio.Task | None = None
         self._shutting_down = False
         # Statuses held across a maintenance window, restored by its predicates.
         self.last_maintenance: dict | None = None
@@ -497,18 +500,6 @@ class ProviderWorker:
                                 "reason_code": status.reason_code})
             return results
 
-    async def deactivate_facades(self, reason_code: str = "provider_deactivated") -> None:
-        """Deactivate every activated facade in the child; their providers await activation again."""
-        async with self._status_lock:
-            host, activated = self._facade_host, list(self._facades.items())
-            self._facades.clear()
-            for name, receipt in activated:
-                if self.status[name].state == "active":
-                    self.status[name].state, self.status[name].reason_code = (
-                        "awaiting_facade", "provider_facade_deactivated")
-                if host is not None and getattr(host, "boot_nonce", None) == receipt["boot_nonce"]:
-                    await host.deactivate_facade(f"seraph.{name}.v1", receipt["epoch"], reason_code)
-
     def facade_unavailable(self, runtime_domain: str, dependency, boot_nonce: str | None) -> str | None:
         """Typed reason when a Cordis-owned facade dependency lacks this boot's activation."""
         name = DOMAIN_PROVIDERS.get(runtime_domain)
@@ -609,6 +600,7 @@ class ProviderWorker:
         return {"providers": [self._effective(name) for name in PROVIDERS],
                 "mandatory_ready": all(self.status[name].state == "active" for name in MANDATORY),
                 "maintenance": self._maintenance,
+                "maintenance_status": self.maintenance_status(),
                 "last_maintenance": None if self.last_maintenance is None else dict(self.last_maintenance),
                 "audit_write_probe": None if self.audit_probe is None else dict(self.audit_probe)}
 
@@ -637,26 +629,9 @@ class ProviderWorker:
 
     # ---------------------------------------------------------------- maintenance
 
-    @asynccontextmanager
-    async def maintenance(self, operation: str):
-        """The in-process maintenance handoff through the state provider.
-
-        Refuses typed, before closing anything, unless every mandatory
-        provider is active, no other maintenance runs, the worker is not
-        shutting down and (production) it holds the workspace owner lease.
-        Then: the gate closes (``maintenance``: later session requests fail
-        typed, never hang), dependent work blocks with
-        ``native_provider_state_unavailable``, open sessions drain (woken by
-        the last one to close), the engine is disposed, the WAL is
-        checkpointed into the database file (busy refuses typed), and the step
-        runs under the held lease. The gate stays closed while the state
-        provider re-verifies every mandatory provider (inside
-        ``state_provider_scope``) and records the outcome; it reopens only if
-        all of them pass, and is left ``failed`` on any failure or interruption.
-        Yields a handle the step fills with its ``receipt`` or failure.
-        """
-        from src.db.engine import checkpoint_wal, drain_open_sessions, set_state_gate
-        from src.workspace.lifecycle import lifecycle_fence_marker
+    async def _begin_maintenance(self, operation: str) -> None:
+        """Refuse typed, or close the gate for ``operation``; nothing else is touched."""
+        from src.db.engine import set_maintenance_control, set_state_gate
         if operation not in MAINTENANCE_OPERATIONS:
             raise StateMaintenanceRefused("state_maintenance_operation_unsupported")
         async with self._status_lock:
@@ -667,18 +642,48 @@ class ProviderWorker:
                 raise StateMaintenanceRefused("state_maintenance_unavailable")
             if self.hold_workspace_lock and self._owner is None:
                 raise StateMaintenanceRefused("state_maintenance_lease_missing")
-            self._maintenance = operation
+            self._maintenance, self._maintenance_phase = operation, "draining"
+            self._maintenance_wake, self._maintenance_abort = asyncio.Event(), None
             self._maintenance_idle.clear()
             set_state_gate("maintenance", "state_provider_maintenance")
+            # Until the copy starts, the maintenance status and abort routes may authenticate.
+            set_maintenance_control(True)
             self.status["state"].state, self.status["state"].reason_code = "maintenance", "state_provider_maintenance"
-        handle = {"operation": operation, "outcome": "completed", "reason_code": None, "receipt": None}
+
+    @asynccontextmanager
+    async def maintenance(self, operation: str, *, _begun: bool = False):
+        """The in-process maintenance handoff through the state provider.
+
+        Refuses typed, before closing anything, unless every mandatory
+        provider is active, no other maintenance runs, the worker is not
+        shutting down and (production) it holds the workspace owner lease.
+        Then: the gate closes (``maintenance``: later session requests fail
+        typed, never hang), dependent work blocks with
+        ``native_provider_state_unavailable``, open sessions drain (woken by
+        the last one to close, or by an operator abort or shutdown, which
+        refuse ``state_maintenance_aborted``/``state_maintenance_shutdown``
+        and reopen the gate at once: nothing was copied), the engine is
+        disposed, the WAL is checkpointed into the database file (busy refuses
+        typed), and the step runs under the held lease. The gate stays closed
+        while the state provider re-verifies every mandatory provider (inside
+        ``state_provider_scope``) and records the outcome; it reopens only if
+        all of them pass, and is left ``failed`` on any failure or interruption.
+        Yields a handle the step fills with its ``receipt`` or failure.
+        """
+        from src.db.engine import checkpoint_wal, drain_open_sessions, set_maintenance_control
+        from src.workspace.lifecycle import lifecycle_fence_marker
+        if not _begun:
+            await self._begin_maintenance(operation)
+        handle = {"operation": operation, "outcome": "completed", "reason_code": None, "receipt": None,
+                  "copied": False}
         try:
-            self._maintenance_wake, self._maintenance_phase = asyncio.Event(), "draining"
             await drain_open_sessions(self._maintenance_wake)
-            if self._shutting_down:
-                # Shutdown began while sessions were still draining: nothing was copied.
-                raise StateMaintenanceRefused("state_maintenance_shutdown")
+            if self._maintenance_abort is not None:
+                # Woken by an operator abort or by shutdown before anything was copied.
+                raise StateMaintenanceRefused(self._maintenance_abort)
             self._maintenance_phase = "copying"
+            set_maintenance_control(False)
+            handle["copied"] = True
             await close_db()
             if not await checkpoint_wal():
                 # Another connection still holds the WAL: the file is not a whole copy.
@@ -695,11 +700,32 @@ class ProviderWorker:
             await self._resume_after_maintenance(handle)
 
     async def _resume_after_maintenance(self, handle: dict) -> None:
-        from src.db.engine import set_state_gate, state_provider_scope
+        """Reopen the gate only on proof; a resume failure surfaces typed, never raw."""
+        from src.db.engine import set_maintenance_control, set_state_gate, state_provider_scope
+        failure: BaseException | None = None
         async with self._status_lock:
+            self._maintenance_phase = "resuming"
+            set_maintenance_control(False)
             try:
+                if not handle["copied"]:
+                    # Aborted while draining: the engine and database were never touched,
+                    # so the gate reopens as it was and the outcome is audited normally.
+                    if self._closed:
+                        return  # close_gate already ran: its marks win
+                    set_state_gate("active")
+                    self.status["state"].state, self.status["state"].reason_code = "active", None
+                    try:
+                        self.last_maintenance = await self._record_maintenance(handle)
+                    except Exception:  # noqa: BLE001 - reported, the gate is already open
+                        self.last_maintenance = {**self._maintenance_details(handle), "audited": False}
+                    return
                 if self._closed or self._shutting_down:
-                    return  # shutdown began: the gate stays closed and its marks win
+                    # Shutdown began during the copy: the gate stays closed for it.
+                    self.status["state"].state = "deactivated"
+                    self.status["state"].reason_code = "state_maintenance_shutdown"
+                    self.last_maintenance = {**self._maintenance_details(handle), "audited": False,
+                                             "resume_reason_code": "state_maintenance_shutdown"}
+                    return
                 try:
                     with state_provider_scope():
                         await _state_predicate(run_init=False)
@@ -726,31 +752,78 @@ class ProviderWorker:
                     self.status[provider].state, self.status[provider].reason_code = "failed", reason
                     set_state_gate("failed", reason)
                     logger.error("Provider %s failed after maintenance: %s", provider, reason)
+                    # The receipt (archive and manifest hash) is kept even though the gate stays closed.
                     self.last_maintenance = {**self._maintenance_details(handle), "audited": False,
                                              "resume_reason_code": reason}
                     if not typed:
-                        raise
-                    return
-                set_state_gate("active")
+                        failure = exc
+                else:
+                    set_state_gate("active")
             finally:
                 self._maintenance = None
-                self._maintenance_wake = self._maintenance_phase = None
+                self._maintenance_wake = self._maintenance_phase = self._maintenance_abort = None
                 self._maintenance_idle.set()
+        if failure is not None:
+            if isinstance(failure, asyncio.CancelledError):
+                raise failure
+            raise StateMaintenanceRefused("state_maintenance_resume_failed") from failure
 
-    async def wait_maintenance(self) -> None:
-        """Shutdown: abort a step still draining, wait for one already copying.
+    def abort_maintenance(self, reason_code: str = "state_maintenance_aborted") -> bool:
+        """Wake a step still draining so it refuses ``reason_code``; a copying step is never cut."""
+        if self._maintenance_phase != "draining" or self._maintenance_wake is None:
+            return False
+        self._maintenance_abort = reason_code
+        self._maintenance_wake.set()
+        return True
 
-        A step that has not passed the drain has copied nothing, so it is woken
-        and refuses ``state_maintenance_shutdown``; a step that is copying is
-        waited for, so the lease it runs under is never released mid-copy.
-        Either way the gate stays closed for the shutdown that follows.
+    def begin_shutdown(self) -> None:
+        """First teardown step: no new step starts and a draining one is aborted.
+
+        Called before the lifespan services stop, so a step whose drain only
+        lifespan-owned holders blocked never turns into a backup during
+        shutdown; a step already copying is waited for by ``wait_maintenance``.
         """
         self._shutting_down = True
-        if self._maintenance_phase == "draining" and self._maintenance_wake is not None:
-            self._maintenance_wake.set()
+        self.abort_maintenance("state_maintenance_shutdown")
+
+    async def wait_maintenance(self) -> None:
+        """Shutdown waits for a running maintenance step before releasing the lease.
+
+        A tracked step cancelled before its first instruction never ran its
+        own resume; it is resumed here so the gate is never left stranded.
+        """
+        self.begin_shutdown()
+        task = self._maintenance_task
+        if task is not None and task.done() and self._maintenance is not None:
+            await self._resume_after_maintenance({"operation": self._maintenance, "outcome": "failed",
+                                                  "reason_code": "state_maintenance_shutdown", "receipt": None,
+                                                  "copied": False})
         await self._maintenance_idle.wait()
 
-    async def maintenance_backup(self) -> dict:
+    async def start_backup(self) -> dict:
+        """Close the gate now (or refuse typed) and run the backup as a worker-owned task.
+
+        The HTTP route returns at once, so a server shutdown never waits on an
+        in-flight request that is itself waiting on the drain.
+        """
+        from src.utils.background import track_task
+        await self._begin_maintenance("backup")
+        self._maintenance_task = track_task(self._background_backup(), name="state-maintenance-backup")
+        return self.maintenance_status()
+
+    async def _background_backup(self) -> None:
+        try:
+            await self.maintenance_backup(_begun=True)
+        except StateMaintenanceRefused as exc:
+            logger.warning("In-process backup refused: %s", exc.reason_code)
+
+    def maintenance_status(self) -> dict:
+        from src.db.engine import open_session_count
+        return {"operation": self._maintenance, "phase": self._maintenance_phase,
+                "draining_sessions": open_session_count() if self._maintenance_phase == "draining" else None,
+                "last_maintenance": None if self.last_maintenance is None else dict(self.last_maintenance)}
+
+    async def maintenance_backup(self, *, _begun: bool = False) -> dict:
         """Take a workspace backup in process, through the maintenance handoff.
 
         The existing ``backup_workspace`` owner writes the archive to the
@@ -767,7 +840,7 @@ class ProviderWorker:
         from src.workspace.lifecycle import WorkspaceLifecycleError, backup_workspace
         root = canonical_workspace_root(self.workspace_dir or settings.workspace_dir)
         cancelled = False
-        async with self.maintenance("backup") as handle:
+        async with self.maintenance("backup", _begun=_begun) as handle:
             registry = canonical_workspace_registry(root)
             context = contextvars.copy_context()
             future = asyncio.get_running_loop().run_in_executor(
@@ -796,19 +869,21 @@ class ProviderWorker:
     def _maintenance_details(handle: dict) -> dict:
         receipt = handle.get("receipt") or {}
         return {"operation": handle["operation"], "outcome": handle["outcome"], "reason_code": handle["reason_code"],
+                "archive_path": receipt.get("archive_path"),
                 "archive_manifest_sha256": receipt.get("archive_manifest_sha256"),
                 "member_count": receipt.get("member_count"), "secret_values_included": False}
 
     async def _record_maintenance(self, handle: dict) -> dict:
-        """Runs inside the resume scope, so the gate is still closed to everyone else."""
+        """Runs inside the resume scope (or with the gate reopened after an abort)."""
         import json
         from datetime import datetime, timezone
         from src.db import engine as db_engine
         from src.db.models import AuditEvent
         details = self._maintenance_details(handle)
+        audited = {key: value for key, value in details.items() if key != "archive_path"}
         async with db_engine.get_session() as db:
             db.add(AuditEvent(session_id=None, actor="runtime", event_type=MAINTENANCE_EVENT,
-                              summary="In-process state maintenance", details_json=json.dumps(details, sort_keys=True)))
+                              summary="In-process state maintenance", details_json=json.dumps(audited, sort_keys=True)))
         return {**details, "audited": True, "finished_at": datetime.now(timezone.utc).isoformat()}
 
     # ---------------------------------------------------------------- shutdown

@@ -612,7 +612,13 @@ async def _provider_worker_lifespan(app: FastAPI):
     try:
         await worker.activate()
         async with _lifespan_services(app):
-            yield
+            try:
+                yield
+            finally:
+                # First teardown step, before the services stop (#1024): a
+                # maintenance step still draining is aborted, never turned into
+                # a backup by the holders shutdown is about to close.
+                worker.begin_shutdown()
     finally:
         try:
             mcp_manager.disconnect_all()
@@ -956,9 +962,10 @@ def create_app() -> FastAPI:
     # A closed state gate (maintenance or shutdown, #1024) answers a typed 503.
     from src.db.engine import StateProviderUnavailable
 
+    from src.auth.middleware import state_provider_unavailable_response
+
     async def state_provider_unavailable(_request, error):
-        return JSONResponse(status_code=503, content={"detail": {
-            "code": error.reason_code, "automatic_retry": False, "recovery_action": "retry_after_maintenance"}})
+        return state_provider_unavailable_response(error.reason_code)
     app.add_exception_handler(StateProviderUnavailable, state_provider_unavailable)
 
     # Keep the authentication boundary outside API handlers so model and

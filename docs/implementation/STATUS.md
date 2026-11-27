@@ -264,7 +264,9 @@ dependent callback is checked against that boot's receipt; a deactivated
 facade forwards nothing in the child. The pinned trust facades still only
 report readiness (operator decision on #1024). An in-process maintenance
 handoff takes a workspace backup from the running backend
-(`POST /api/runtime/maintenance/backup`): it closes the state gate, drains open
+(`POST /api/runtime/maintenance/backup`, 202; `GET /api/runtime/maintenance`
+and `POST /api/runtime/maintenance/abort` report and end a draining step;
+shutdown aborts a draining step first): it closes the state gate, drains open
 sessions, disposes the engine, checkpoints the WAL and writes the archive under
 the owner lease the worker already holds, then reruns the mandatory predicates
 and audits the outcome with the gate still closed, reopening it only if they

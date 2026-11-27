@@ -381,9 +381,9 @@ async def test_maintenance_closes_the_gate_drains_open_sessions_then_reopens(db,
     held, release, drain_waiting, ran = asyncio.Event(), asyncio.Event(), asyncio.Event(), []
     original_drain = db_engine.drain_open_sessions
 
-    async def observed_drain():
+    async def observed_drain(wake=None):
         drain_waiting.set()
-        await original_drain()
+        await original_drain(wake)
     monkeypatch.setattr(db_engine, "drain_open_sessions", observed_drain)
 
     async def holder():
@@ -658,3 +658,45 @@ async def test_the_backup_route_requires_an_operator_and_maps_refusals(db):
     with pytest.raises(HTTPException) as recovering:
         await maintenance_backup(request, MaintenanceBackup(confirm="backup"))
     assert recovering.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_shutdown_aborts_a_step_still_draining_and_keeps_the_gate_closed(db, monkeypatch):
+    draining = asyncio.Event()
+    original_drain = db_engine.drain_open_sessions
+
+    async def observed_drain(wake=None):
+        draining.set()
+        await original_drain(wake)
+    monkeypatch.setattr(db_engine, "drain_open_sessions", observed_drain)
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def holder():
+        async with get_session() as session:
+            await session.execute(select(Goal.id).limit(1))
+            held.set()
+            await release.wait()
+    holding = asyncio.create_task(holder())
+    await held.wait()
+    ran = []
+
+    async def maintain():
+        async with worker.maintenance("backup"):
+            ran.append("copied")
+    task = asyncio.create_task(maintain())
+    await draining.wait()
+    assert worker._maintenance_phase == "draining"
+    await worker.wait_maintenance()
+    with pytest.raises(StateMaintenanceRefused, match="state_maintenance_shutdown"):
+        await task
+    assert ran == [], "a step woken during its drain copies nothing"
+    assert state_gate() == ("maintenance", "state_provider_maintenance"), "shutdown keeps the gate closed"
+    with pytest.raises(StateMaintenanceRefused, match="state_maintenance_unavailable"):
+        async with worker.maintenance("backup"):
+            pass
+    worker.close_gate()
+    release.set()
+    await holding
+    assert state_gate() == ("deactivating", "state_provider_deactivating")

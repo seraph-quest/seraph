@@ -351,6 +351,10 @@ class ProviderWorker:
         # Set while no maintenance step runs; shutdown waits on it before the lease goes.
         self._maintenance_idle = asyncio.Event()
         self._maintenance_idle.set()
+        # Shutdown wakes a step still draining (nothing copied yet) and aborts it.
+        self._maintenance_wake: asyncio.Event | None = None
+        self._maintenance_phase: str | None = None
+        self._shutting_down = False
         # Statuses held across a maintenance window, restored by its predicates.
         self.last_maintenance: dict | None = None
 
@@ -658,7 +662,7 @@ class ProviderWorker:
         async with self._status_lock:
             if self._maintenance is not None:
                 raise StateMaintenanceRefused("state_maintenance_in_progress")
-            if (not self._activated or self._closed
+            if (not self._activated or self._closed or self._shutting_down
                     or not all(self.status[name].state == "active" for name in MANDATORY)):
                 raise StateMaintenanceRefused("state_maintenance_unavailable")
             if self.hold_workspace_lock and self._owner is None:
@@ -669,7 +673,12 @@ class ProviderWorker:
             self.status["state"].state, self.status["state"].reason_code = "maintenance", "state_provider_maintenance"
         handle = {"operation": operation, "outcome": "completed", "reason_code": None, "receipt": None}
         try:
-            await drain_open_sessions()
+            self._maintenance_wake, self._maintenance_phase = asyncio.Event(), "draining"
+            await drain_open_sessions(self._maintenance_wake)
+            if self._shutting_down:
+                # Shutdown began while sessions were still draining: nothing was copied.
+                raise StateMaintenanceRefused("state_maintenance_shutdown")
+            self._maintenance_phase = "copying"
             await close_db()
             if not await checkpoint_wal():
                 # Another connection still holds the WAL: the file is not a whole copy.
@@ -689,8 +698,8 @@ class ProviderWorker:
         from src.db.engine import set_state_gate, state_provider_scope
         async with self._status_lock:
             try:
-                if self._closed:
-                    return  # shutdown began: its gate marks win, nothing reopens
+                if self._closed or self._shutting_down:
+                    return  # shutdown began: the gate stays closed and its marks win
                 try:
                     with state_provider_scope():
                         await _state_predicate(run_init=False)
@@ -701,7 +710,6 @@ class ProviderWorker:
                             if name == "audit":
                                 self._write_failed.discard(name)
                                 self._record_audit_probe("passed", None)
-                        self.last_maintenance = await self._record_maintenance(handle)
                         await self._read_facade_rows()
                         for name in DEGRADABLE:
                             try:
@@ -709,6 +717,8 @@ class ProviderWorker:
                                 self._facade_passed(name)
                             except ProviderActivationError as exc:
                                 self.status[name].state, self.status[name].reason_code = "degraded", exc.reason_code
+                        # Last step before the gate reopens, so the row never says more than happened.
+                        self.last_maintenance = await self._record_maintenance(handle)
                 except BaseException as exc:
                     typed = isinstance(exc, ProviderActivationError)
                     provider = exc.provider if typed else "state"
@@ -724,10 +734,20 @@ class ProviderWorker:
                 set_state_gate("active")
             finally:
                 self._maintenance = None
+                self._maintenance_wake = self._maintenance_phase = None
                 self._maintenance_idle.set()
 
     async def wait_maintenance(self) -> None:
-        """Shutdown waits for a running maintenance step before releasing the lease."""
+        """Shutdown: abort a step still draining, wait for one already copying.
+
+        A step that has not passed the drain has copied nothing, so it is woken
+        and refuses ``state_maintenance_shutdown``; a step that is copying is
+        waited for, so the lease it runs under is never released mid-copy.
+        Either way the gate stays closed for the shutdown that follows.
+        """
+        self._shutting_down = True
+        if self._maintenance_phase == "draining" and self._maintenance_wake is not None:
+            self._maintenance_wake.set()
         await self._maintenance_idle.wait()
 
     async def maintenance_backup(self) -> dict:

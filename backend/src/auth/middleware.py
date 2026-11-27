@@ -223,7 +223,7 @@ def _auth_failure_response(path: str, code: str, *, status_code: int) -> JSONRes
         if code in {"auth_not_configured", "authentication_required", "invalid_token", "session_unavailable"}:
             message = "Authentication is required"
             recovery = "login"
-        elif code == "auth_storage_busy":
+        elif code == "auth_storage_busy" or code.startswith("state_provider_"):
             # Contention is not a session verdict; the cookie remains valid.
             message = "The operator session could not be checked; retry shortly"
             recovery = "retry_existing_request"

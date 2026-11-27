@@ -222,8 +222,9 @@ class _SessionCounter:
             except RuntimeError:
                 pass  # that waiter's loop already closed; it is gone
 
-    async def drained(self) -> None:
-        event = asyncio.Event()
+    async def drained(self, event: asyncio.Event | None = None) -> None:
+        # ``event`` may also be set by its owner to stop waiting (shutdown abort).
+        event = event or asyncio.Event()
         with self.lock:
             if self.open == 0:
                 return
@@ -237,7 +238,10 @@ class _SessionCounter:
 
 _OPEN_SESSIONS = _SessionCounter()
 # The state provider's own resume checks run while the gate is still
-# ``maintenance``: only code inside ``state_provider_scope`` passes it.
+# ``maintenance``: only code inside ``state_provider_scope`` passes it. Tasks
+# created inside the scope inherit it (a ContextVar); the resume step creates
+# none beyond its predicates and audit write, and the bypass never applies to
+# a ``failed`` or ``deactivating`` gate.
 _STATE_PROVIDER_SCOPE: ContextVar[bool] = ContextVar("seraph_state_provider_scope", default=False)
 
 
@@ -258,11 +262,14 @@ def set_state_gate(state: str | None, reason_code: str | None = None) -> None:
         _STATE_GATE[:] = [state, reason_code]
 
 
-async def drain_open_sessions() -> None:
-    """Wait until every default-factory session closed; only with the gate closed."""
+async def drain_open_sessions(wake: asyncio.Event | None = None) -> None:
+    """Wait until every default-factory session closed, or ``wake`` is set by its owner.
+
+    Only with the gate closed. The caller tells the two apart.
+    """
     if _STATE_GATE[0] not in _CLOSED_GATES:
         raise RuntimeError("drain requires a closed state gate")
-    await _OPEN_SESSIONS.drained()
+    await _OPEN_SESSIONS.drained(wake)
 
 
 def state_gate() -> tuple[str | None, str | None]:

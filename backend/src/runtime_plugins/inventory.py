@@ -55,6 +55,11 @@ Every finding lands in exactly one table:
   §1), pure utilities, types and contracts, and test helpers. Each carries a
   one-line reason.
 
+``ENV_FLAGS`` (#1206) classifies every composition environment flag the scan
+of ``config/settings.py`` and ``manage.sh`` finds: a catalogued patch row, a
+security switch that stays an environment setting, a removed env base layer,
+or not composition at all.
+
 To add a capability (for example a #1308 child): give its new lifecycle
 shapes rows here. A new domain needs its row in ``ownership.DOMAINS`` and
 ``trust.DOMAIN_BUNDLES`` first; until then it is a gap.
@@ -494,6 +499,7 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
         f"{_PW}asyncio.to_thread]": ("lifespan_step", _BOOTSTRAP + "shutdown join of tracked threads"),
         "src.app:_provider_worker_lifespan": ("thread", _BOOTSTRAP + "that shutdown join runs on one to_thread call"),
         f"{_LS}run_boot_cutover]": ("lifespan_step", _BOOTSTRAP + "the #1019 boot cutover manifest step"),
+        f"{_LS}record_env_base_layer]": ("lifespan_step", _BOOTSTRAP + "audits deprecated composition env flags (#1206)"),
         "src.runtime_plugins.cli:build": ("subprocess", _BOOTSTRAP + "managed Cordis package build (manage.sh cordis build)"),
         "src.runtime_plugins.cli:reviewed_npm": ("subprocess", _BOOTSTRAP + "reviewed npm invocation for that build"),
         "src.runtime_plugins.composition:reviewed_node": ("subprocess", _BOOTSTRAP + "reviewed Node version probe"),
@@ -521,6 +527,169 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
             "thread", "deterministic contract harness, not a runtime path"),
     }),
 )
+
+
+# --- Composition environment flags (#1206, ADR-036 §6) --------------------------
+#
+# Every boolean setting in ``config/settings.py`` and every ``${NAME_ENABLED:-}``
+# flag ``manage.sh`` reads is classified here, plus the string selectors named
+# below. ``tests/test_source_inventory_1205.py`` scans both files and fails on an
+# unclassified flag or a stale entry.
+#
+# * ``row``: selects composition, so it has a catalogued patch row in
+#   ``profiles.PATCH_ROWS`` (typed schema, env base stage, removal issue). ``gates``
+#   lists the inventory keys whose activation it decides.
+# * ``security_switch``: stays a startup-validated environment setting (§6):
+#   authentication, egress, consent, privacy, execution, or a setting of a
+#   pinned trust service. ``profiles.SECURITY_SETTINGS`` names it, so a patch
+#   row naming it is refused as a security setting.
+# * ``removed``: the env base layer is retired (its row's ``env_stage``); the
+#   flag is still listed so an install that sets it is handled, not ignored.
+# * ``not_composition``: diagnostics that select no plugin, provider or job.
+
+ENV_FLAG_KINDS = frozenset({"row", "security_switch", "removed", "not_composition"})
+SETTINGS_FILE = SRC_ROOT.parent / "config" / "settings.py"
+LAUNCHER_FILE = SRC_ROOT.parents[1] / "manage.sh"
+
+
+@dataclass(frozen=True)
+class EnvFlag:
+    env_name: str
+    # The settings attribute (nested fields joined by ``__``); None for a
+    # flag only the managed launcher reads.
+    setting: str | None
+    kind: str
+    row_id: str | None
+    gates: tuple[str, ...]
+    reason: str
+
+
+def _flag(env_name: str, kind: str, reason: str, *, row_id: str | None = None, gates: tuple[str, ...] = (),
+          launcher: bool = False) -> EnvFlag:
+    return EnvFlag(env_name, None if launcher else env_name.lower(), kind, row_id, gates, reason)
+
+
+_EGRESS = "egress authority: "
+_CONSENT = "consent: "
+_PINNED_INFERENCE = "a setting of the pinned seraph.inference.v1 trust service (ADR-036 §3): "
+ENV_FLAGS: tuple[EnvFlag, ...] = (
+    _flag("SCHEDULER_ENABLED", "row", "selects whether the scheduler and its lifecycle domain start",
+          row_id="seraph.scheduler.v1#enabled",
+          gates=(f"{_LS}init_scheduler]", f"{_LS}runtime_lifecycle.start]")),
+    _flag("USE_DELEGATION", "row", "selects the orchestrator and specialists instead of the single chat agent",
+          row_id="seraph.delegation.v1#enabled"),
+    _flag("SCREENSHOT_FOLDER_INGEST_ENABLED", "row", "selects the screenshot-folder ingest and analysis jobs",
+          row_id="seraph.scheduler.v1#screenshot_folder_ingest",
+          gates=(f"{_JOB}screenshot_folder_ingest]", f"{_JOB}screenshot_folder_analysis]")),
+    _flag("SCREENSHOT_OBSERVATION_DIGEST_ENABLED", "row", "selects the screenshot observation digest job",
+          row_id="seraph.scheduler.v1#screenshot_observation_digest",
+          gates=(f"{_JOB}screenshot_observation_digest]",)),
+    _flag("END_OF_DAY_REPORT_ENABLED", "row", "selects the stored end-of-day goal report job",
+          row_id="seraph.scheduler.v1#end_of_day_report", gates=(f"{_JOB}end_of_day_goal_report]",)),
+    _flag("OPERATOR_AUTH_LOCAL_NO_LOGIN", "security_switch", "operator authentication (#1161), startup-validated"),
+    _flag("OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS", "security_switch", "operator authentication test bypass"),
+    _flag("OPERATOR_AUTH_COOKIE_SECURE", "security_switch", "operator session cookie transport security"),
+    _flag("OPENROUTER_PROVIDER_ONLY", "security_switch", _PINNED_INFERENCE + "retired-provider routing policy"),
+    _flag("OPENROUTER_ALLOW_FALLBACKS", "security_switch", _PINNED_INFERENCE + "retired-provider routing policy"),
+    _flag("OPENROUTER_REQUIRE_PARAMETERS", "security_switch", _PINNED_INFERENCE + "retired-provider routing policy"),
+    _flag("OPENROUTER_ZERO_DATA_RETENTION", "security_switch", _PINNED_INFERENCE + "provider data retention"),
+    _flag("NEAR_TEE_CATALOG_REFRESH_ENABLED", "security_switch",
+          _PINNED_INFERENCE + "egress to NEAR's public catalog",
+          gates=(f"{_LS}near_tee_catalog_refresher.start]",)),
+    _flag("LLM_LOG_ENABLED", "security_switch", _PINNED_INFERENCE + "local records of inference calls",
+          gates=(f"{_LS}init_llm_logging]",)),
+    _flag("LLM_LOG_CONTENT", "security_switch", "privacy: writes prompts and responses to the local call log"),
+    _flag("SCREEN_DERIVED_LLM_ALLOW_REMOTE", "security_switch",
+          _CONSENT + "whether screen-derived content may reach a remote model"),
+    _flag("SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF", "security_switch",
+          _CONSENT + "the proof a screen-derived prompt needs before dispatch"),
+    _flag("END_OF_DAY_REPORT_LLM_ENABLED", "security_switch",
+          _CONSENT + "whether the end-of-day report sends screen-derived content to inference"),
+    _flag("EMAIL_REPORTS_ENABLED", "security_switch", _EGRESS + "sends reports by email"),
+    _flag("EMAIL_REPORTS_PREVIEW_REQUIRED", "security_switch", "approval gate on report email egress"),
+    _flag("SMTP_USE_TLS", "security_switch", "mail transport security"),
+    _flag("REPO_SANDBOX__ENABLED", "security_switch", "execution authority: the governed repository executor"),
+    _flag("REPO_SANDBOX__REQUIRE_ISOLATION", "security_switch", "execution isolation for repository commands"),
+    # String selectors (not found by the boolean scan; listed by review).
+    _flag("SCREEN_ANALYSIS_PROVIDER", "security_switch",
+          _PINNED_INFERENCE + "selects the screenshot analysis provider, behind its consent"),
+    _flag("SERAPH_VLM_MODE", "security_switch", _PINNED_INFERENCE + "selects the retired local VLM route"),
+    # Launcher-only flags (manage.sh starts a native process before the backend boots).
+    _flag("DAEMON_ENABLED", "security_switch",
+          _CONSENT + "starts the native screen-capture daemon under the OS capture permission", launcher=True),
+    _flag("PROXY_ENABLED", "security_switch",
+          "execution authority: starts the stdio proxy that exposes local MCP servers", launcher=True),
+    _flag("DEBUG", "not_composition", "diagnostics only; selects no plugin, provider or job"),
+    _flag("DATABASE_ECHO", "not_composition", "SQL echo diagnostics only; selects no plugin, provider or job"),
+)
+# String selectors the boolean scan cannot see; review keeps this list.
+STRING_SELECTORS = frozenset({"SCREEN_ANALYSIS_PROVIDER", "SERAPH_VLM_MODE"})
+_LAUNCHER_FLAG = re.compile(r"\$\{([A-Z][A-Z0-9_]*_ENABLED):-")
+
+
+def scan_env_flags(settings_file: Path = SETTINGS_FILE, launcher_file: Path = LAUNCHER_FILE) -> dict[str, str | None]:
+    """{ENV_NAME: setting attribute or None}: boolean settings and the launcher's ``*_ENABLED`` flags."""
+    tree = ast.parse(settings_file.read_text(), filename=str(settings_file))
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    nested: dict[str, str] = {}  # attribute -> nested model class, e.g. repo_sandbox -> RepoSandboxSettings
+    found: dict[str, str | None] = {}
+
+    def fields(node: ast.ClassDef) -> list[tuple[str, ast.expr]]:
+        return [(item.target.id, item.annotation) for item in node.body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)]
+
+    settings_class = classes["Settings"]
+    for name, annotation in fields(settings_class):
+        if isinstance(annotation, ast.Name) and annotation.id == "bool":
+            found[name.upper()] = name
+        elif isinstance(annotation, ast.Name) and annotation.id in classes:
+            nested[name] = annotation.id
+    for prefix, class_name in nested.items():
+        for name, annotation in fields(classes[class_name]):
+            if isinstance(annotation, ast.Name) and annotation.id == "bool":
+                found[f"{prefix}__{name}".upper()] = f"{prefix}__{name}"
+    for name in _LAUNCHER_FLAG.findall(launcher_file.read_text()):
+        found.setdefault(name, None)
+    return found
+
+
+def env_flag_problems(flags: tuple[EnvFlag, ...] = ENV_FLAGS) -> list[str]:
+    """Contradictions between the flag table, the patch-row catalogue and the security set."""
+    from .ownership import DOMAINS
+    from .profiles import PATCH_ROWS, SECURITY_SETTINGS
+    problems: list[str] = []
+    keys = set(rows())
+    seen: set[str] = set()
+    for flag in flags:
+        label = flag.env_name
+        if label in seen:
+            problems.append(f"{label}: listed twice")
+        seen.add(label)
+        if flag.kind not in ENV_FLAG_KINDS:
+            problems.append(f"{label}: kind_unknown")
+        if not flag.reason.strip() or "\n" in flag.reason:
+            problems.append(f"{label}: reason_not_one_line")
+        problems += [f"{label}: gate {gate} is not an inventory row" for gate in flag.gates if gate not in keys]
+        spec = PATCH_ROWS.get(flag.row_id) if flag.row_id else None
+        if flag.kind in {"row", "removed"}:
+            if spec is None:
+                problems.append(f"{label}: row_missing")
+                continue
+            if (spec.env_name, spec.env_setting) != (flag.env_name, flag.setting):
+                problems.append(f"{label}: row_env_mismatch")
+            if spec.runtime_domain not in DOMAINS:
+                problems.append(f"{label}: row_domain_unknown")
+            if not _ISSUE_REF.fullmatch(spec.removal_issue):
+                problems.append(f"{label}: removal_issue_missing")
+            if (spec.env_stage == "retired") is not (flag.kind == "removed"):
+                problems.append(f"{label}: removed_stage_mismatch")
+        elif flag.row_id is not None:
+            problems.append(f"{label}: row_on_non_row_flag")
+        if flag.kind == "security_switch" and label.lower() not in SECURITY_SETTINGS:
+            problems.append(f"{label}: not_in_security_settings")
+    row_flags = {flag.row_id for flag in flags if flag.kind in {"row", "removed"}}
+    problems += [f"{row_id}: patch row has no flag entry" for row_id in PATCH_ROWS if row_id not in row_flags]
+    return problems
 
 
 _ISSUE_REF = re.compile(r"#[1-9][0-9]*")

@@ -17,9 +17,12 @@ reviewed composition does this process run, and is it allowed?
   the layers in the fixed order profile bundles, profile patch, operator patch.
 
 Security switches (operator authentication, local no-login, bind host,
-Host/Origin checks, deployment environment) are never rows: they stay
-startup-validated environment settings. The environment file is still the base
-layer of each catalogued row until its composition flag is removed.
+Host/Origin checks, deployment environment, and the egress, consent, privacy,
+execution and pinned-inference switches #1206 classified) are never rows: they
+stay startup-validated environment settings. The environment is still the base
+layer of each catalogued row until its flag is removed: each row carries an
+``env_stage`` on the removal path (supported, deprecated, retired) and the
+issue that removes it. ``inventory.ENV_FLAGS`` classifies every flag.
 """
 from __future__ import annotations
 
@@ -88,6 +91,20 @@ _BUNDLES = {bundle.name: bundle for bundle in BUNDLES}
 CORE_BUNDLES = tuple(bundle.name for bundle in BUNDLES if bundle.kind == "core")
 
 
+# The stages of a row's environment base layer (ADR-036 §6 removal path, #1206):
+# * supported: the environment flag is the base layer below every patch layer.
+# * deprecated: still the base layer, so behaviour is unchanged, but each boot
+#   that still sets it logs a warning naming the row and writes one
+#   ``composition_env_flag_deprecated`` audit event.
+# * retired: the flag is no longer read. A value still set to the default is
+#   ignored (audited ``composition_env_flag_ignored``), as is any value a patch
+#   row covers; a non-default value with no patch row refuses boot with
+#   ``env_flag_retired`` so the install never changes behaviour silently.
+ENV_STAGES = ("supported", "deprecated", "retired")
+ENV_DEPRECATED_EVENT = "composition_env_flag_deprecated"
+ENV_IGNORED_EVENT = "composition_env_flag_ignored"
+
+
 @dataclass(frozen=True)
 class PatchRow:
     row_id: str
@@ -95,21 +112,66 @@ class PatchRow:
     # The settings attribute (environment flag) that is this row's base layer.
     env_setting: str
     env_name: str
+    # The row's typed schema: the values a patch layer may set. ``(False,)`` is
+    # disable-only: the flag starts observation or a screen-derived prompt, so a
+    # patch may turn it off but never on (ADR-036 §6: a patch never enables a
+    # consent-gated provider or restores an opt-out).
+    values: tuple[bool, ...] = (False, True)
+    # The value when neither a patch layer nor the environment sets it; it equals
+    # the settings field default, so retiring the env base changes nothing.
+    default: bool = True
+    env_stage: str = "supported"
+    # The tracked issue that removes the environment base layer.
+    removal_issue: str = ""
+
+    def payload(self) -> dict[str, Any]:
+        return {"id": self.row_id, "env": self.env_name, "values": list(self.values), "default": self.default,
+                "env_stage": self.env_stage, "removal_issue": self.removal_issue}
+
+
+def _row(row_id: str, env_setting: str, *, values: tuple[bool, ...] = (False, True), default: bool,
+         env_stage: str = "supported", removal_issue: str) -> PatchRow:
+    return PatchRow(row_id, row_id.partition("#")[0], env_setting, env_setting.upper(), values, default, env_stage,
+                    removal_issue)
 
 
 # The closed patchable-row catalogue. ADR-036 §6: each composition-selecting
-# environment flag gets a row; SCHEDULER_ENABLED is the first.
-PATCH_ROWS: dict[str, PatchRow] = {
-    "seraph.scheduler.v1#enabled": PatchRow("seraph.scheduler.v1#enabled", "seraph.scheduler.v1",
-                                            "scheduler_enabled", "SCHEDULER_ENABLED"),
-}
+# environment flag gets a row and a removal issue; SCHEDULER_ENABLED was the
+# first row (#1204) and is the first on the removal path (#1206). Every other
+# boolean setting and launcher flag is classified in ``inventory.ENV_FLAGS``.
+PATCH_ROWS: dict[str, PatchRow] = {row.row_id: row for row in (
+    _row("seraph.scheduler.v1#enabled", "scheduler_enabled", default=True, env_stage="deprecated",
+         removal_issue="#1337"),
+    _row("seraph.delegation.v1#enabled", "use_delegation", default=False, removal_issue="#1338"),
+    _row("seraph.scheduler.v1#screenshot_folder_ingest", "screenshot_folder_ingest_enabled", values=(False,),
+         default=True, removal_issue="#1339"),
+    _row("seraph.scheduler.v1#screenshot_observation_digest", "screenshot_observation_digest_enabled",
+         values=(False,), default=True, removal_issue="#1340"),
+    _row("seraph.scheduler.v1#end_of_day_report", "end_of_day_report_enabled", default=True,
+         removal_issue="#1341"),
+)}
+SCHEDULER_ROW = "seraph.scheduler.v1#enabled"
+DELEGATION_ROW = "seraph.delegation.v1#enabled"
+SCREENSHOT_FOLDER_INGEST_ROW = "seraph.scheduler.v1#screenshot_folder_ingest"
+SCREENSHOT_OBSERVATION_DIGEST_ROW = "seraph.scheduler.v1#screenshot_observation_digest"
+END_OF_DAY_REPORT_ROW = "seraph.scheduler.v1#end_of_day_report"
 
-# Startup-validated security switches: never a profile or patch row (§6).
+# Startup-validated security switches: never a profile or patch row (§6). The
+# authentication and bind settings (#1204), plus the switches #1206 classified:
+# egress, consent, privacy, execution and pinned-inference settings. A row id
+# naming any of them is refused as a security setting, not as an unknown row.
 SECURITY_SETTINGS = frozenset({
     "deployment_environment", "backend_bind_host", "operator_auth_secret", "operator_auth_secret_hash",
     "operator_auth_local_no_login", "operator_auth_allowed_hosts", "operator_auth_allowed_origins",
     "operator_auth_trusted_proxy_ips", "operator_auth_allow_unauthenticated_tests", "operator_auth_cookie_secure",
     "capability_journal_secret", "capability_journal_secret_hash", "vault_key",
+    # #1206 (inventory.ENV_FLAGS, kind security_switch).
+    "openrouter_provider_only", "openrouter_allow_fallbacks", "openrouter_require_parameters",
+    "openrouter_zero_data_retention", "near_tee_catalog_refresh_enabled", "screen_derived_llm_allow_remote",
+    "screen_derived_llm_require_profile_proof", "end_of_day_report_llm_enabled", "email_reports_enabled",
+    "email_reports_preview_required", "smtp_use_tls", "llm_log_enabled", "llm_log_content",
+    "repo_sandbox__enabled", "repo_sandbox__require_isolation", "screen_analysis_provider", "seraph_vlm_mode",
+    "daemon_enabled", "proxy_enabled",
 })
 _ROW_ID = re.compile(r"(seraph\.[a-z0-9-]+\.v[0-9]+)#([a-z][a-z0-9_]{0,63})\Z")
 
@@ -137,12 +199,35 @@ PROFILES: dict[str, Profile] = {
 
 
 @dataclass(frozen=True)
+class EnvBase:
+    """How one catalogued row's environment base layer stood at composition time."""
+    row_id: str
+    env_set: bool  # the environment (process env or env file) sets the flag explicitly
+    # "patch" (a patch layer sets the row), "env" (the environment value is the
+    # base), "default" (nothing sets it) or "ignored" (a retired flag still set).
+    source: str
+
+    def payload(self) -> dict[str, Any]:
+        spec = PATCH_ROWS[self.row_id]
+        return {"id": self.row_id, "env": spec.env_name, "env_stage": spec.env_stage, "env_set": self.env_set,
+                "source": self.source, "removal_issue": spec.removal_issue}
+
+
+@dataclass(frozen=True)
 class ComposedProfile:
     profile: Profile
     source: str  # "explicit" (COMPOSITION_PROFILE) or "deployment_environment"
     # Rows a patch layer set, in application order: (row_id, value, layer).
     applied: tuple[tuple[str, Any, str], ...]
     operator_patch_present: bool
+    # Each catalogued row's environment base layer; None when the environment
+    # was not read (the offline dump, which never reads settings).
+    env_base: tuple[EnvBase, ...] | None = None
+
+    def env_base_payload(self) -> dict[str, Any]:
+        if self.env_base is None:
+            return {"read": False, "rows": []}
+        return {"read": True, "rows": [item.payload() for item in self.env_base]}
 
     def value(self, row_id: str) -> tuple[bool, Any]:
         """(set_by_patch, value) for one catalogued row; the last layer wins."""
@@ -227,6 +312,9 @@ def validate_patch(rows: Any, *, layer: str, bundles: tuple[str, ...]) -> list[t
         if type(row["value"]) is not bool:
             # Every catalogued row is a boolean today; no string can carry a credential.
             raise CompositionProfileInvalid("patch_value_invalid", row_id=row_id)
+        if row["value"] not in spec.values:
+            # A disable-only row: a patch never turns observation or a screen-derived prompt on.
+            raise CompositionProfileInvalid("patch_value_consent_gated", row_id=row_id)
         if row_id in seen:
             raise CompositionProfileInvalid("patch_row_duplicate", row_id=row_id)
         seen.add(row_id)
@@ -288,9 +376,44 @@ def resolve_profile_id(requested: str | None, deployment_environment: str) -> tu
             "deployment_environment")
 
 
+def env_base_layer(applied: list[tuple[str, Any, str]], env_values: dict[str, Any],
+                   rows: dict[str, PatchRow] | None = None) -> tuple[EnvBase, ...]:
+    """Each row's environment base layer; refuse a retired flag whose value would otherwise change silently.
+
+    ``env_values`` holds only the settings the environment sets explicitly, by
+    settings attribute.
+    """
+    catalogue = PATCH_ROWS if rows is None else rows
+    patched = {row_id for row_id, _value, _layer in applied}
+    found: list[EnvBase] = []
+    for row_id, spec in catalogue.items():
+        if spec.env_stage not in ENV_STAGES:
+            raise CompositionProfileInvalid("env_stage_unknown", row_id=row_id)
+        env_set = spec.env_setting in env_values
+        if row_id in patched:
+            source = "patch"
+        elif not env_set:
+            source = "default"
+        elif spec.env_stage != "retired":
+            source = "env"
+        elif bool(env_values[spec.env_setting]) == spec.default:
+            source = "ignored"
+        else:
+            # ADR-036 §6 removal path: the flag is gone, and dropping its value
+            # would change behaviour. The operator moves it into a patch row.
+            raise CompositionProfileInvalid("env_flag_retired", row_id=row_id)
+        found.append(EnvBase(row_id, env_set, source))
+    return tuple(found)
+
+
 def compose_profile(requested: str | None, *, deployment_environment: str, local_no_login: bool,
-                    operator_patch: list[Any] | None, profiles: dict[str, Profile] | None = None) -> ComposedProfile:
-    """Validate the selected profile and its layers; raise ``CompositionProfileInvalid`` before boot."""
+                    operator_patch: list[Any] | None, profiles: dict[str, Profile] | None = None,
+                    env_values: dict[str, Any] | None = None) -> ComposedProfile:
+    """Validate the selected profile and its layers; raise ``CompositionProfileInvalid`` before boot.
+
+    ``env_values`` are the row settings the environment sets explicitly; None
+    means the environment was not read (the offline dump).
+    """
     catalogue = PROFILES if profiles is None else profiles
     profile_id, source = resolve_profile_id(requested, deployment_environment)
     profile = catalogue.get(profile_id)
@@ -309,7 +432,8 @@ def compose_profile(requested: str | None, *, deployment_environment: str, local
     applied = validate_patch(list(profile.patch), layer="profile", bundles=bundles)
     if operator_patch is not None:
         applied += validate_patch(operator_patch, layer="operator", bundles=bundles)
-    return ComposedProfile(profile, source, tuple(applied), operator_patch is not None)
+    env_base = None if env_values is None else env_base_layer(applied, env_values)
+    return ComposedProfile(profile, source, tuple(applied), operator_patch is not None, env_base)
 
 
 # The composition this process booted through (one per process, set by the
@@ -323,9 +447,21 @@ def boot_profile() -> ComposedProfile:
     from config.settings import settings
     composed = compose_profile(settings.composition_profile, deployment_environment=settings.deployment_environment,
                                local_no_login=bool(settings.operator_auth_local_no_login),
-                               operator_patch=load_operator_patch(Path(settings.workspace_dir)))
+                               operator_patch=load_operator_patch(Path(settings.workspace_dir)),
+                               env_values=explicit_env_values(settings))
     _booted = composed
     return composed
+
+
+def explicit_env_values(settings_object: Any) -> dict[str, Any]:
+    """The row settings the environment (process env or env file) sets explicitly.
+
+    Pydantic records a field in ``model_fields_set`` only when a source supplied
+    it, so a default is never mistaken for an operator's choice.
+    """
+    explicit = set(getattr(settings_object, "model_fields_set", ()) or ())
+    return {spec.env_setting: getattr(settings_object, spec.env_setting) for spec in PATCH_ROWS.values()
+            if spec.env_setting in explicit}
 
 
 def release_profile() -> None:
@@ -351,6 +487,9 @@ def effective_row(row_id: str, base: Any = _UNSET) -> Any:
         set_by_patch, value = _booted.value(row_id)
         if set_by_patch:
             return value
+    if spec.env_stage == "retired":
+        # The removed env flag is never read again; boot already refused a value it would drop.
+        return spec.default
     if base is not _UNSET:
         return base
     from config.settings import settings
@@ -358,11 +497,79 @@ def effective_row(row_id: str, base: Any = _UNSET) -> Any:
 
 
 def scheduler_enabled(base: Any = _UNSET) -> bool:
-    return bool(effective_row("seraph.scheduler.v1#enabled", base))
+    return bool(effective_row(SCHEDULER_ROW, base))
+
+
+def delegation_enabled(base: Any = _UNSET) -> bool:
+    """USE_DELEGATION, or the ``seraph.delegation.v1#enabled`` row."""
+    return bool(effective_row(DELEGATION_ROW, base))
+
+
+def screenshot_folder_ingest_enabled(base: Any = _UNSET) -> bool:
+    """SCREENSHOT_FOLDER_INGEST_ENABLED, or the disable-only screenshot-folder ingest row."""
+    return bool(effective_row(SCREENSHOT_FOLDER_INGEST_ROW, base))
+
+
+def screenshot_observation_digest_enabled(base: Any = _UNSET) -> bool:
+    """SCREENSHOT_OBSERVATION_DIGEST_ENABLED, or the disable-only digest row."""
+    return bool(effective_row(SCREENSHOT_OBSERVATION_DIGEST_ROW, base))
+
+
+def end_of_day_report_enabled(base: Any = _UNSET) -> bool:
+    """END_OF_DAY_REPORT_ENABLED, or the end-of-day report row."""
+    return bool(effective_row(END_OF_DAY_REPORT_ROW, base))
+
+
+def env_base_notices(composed: ComposedProfile | None) -> list[dict[str, Any]]:
+    """The deprecated or retired env flags this boot still sees set, as audit-ready records."""
+    if composed is None or composed.env_base is None:
+        return []
+    notices = []
+    for item in composed.env_base:
+        spec = PATCH_ROWS[item.row_id]
+        if not item.env_set or spec.env_stage == "supported":
+            continue
+        event = ENV_DEPRECATED_EVENT if item.source == "env" else ENV_IGNORED_EVENT
+        notices.append({"event_type": event, **item.payload()})
+    return notices
+
+
+async def record_env_base_layer() -> list[dict[str, Any]]:
+    """Log and audit each deprecated or retired env flag this boot still sees set.
+
+    Runs once per boot after the provider worker opens the state gate. Best
+    effort: an unwritable audit never changes the composition.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    notices = env_base_notices(_booted)
+    for notice in notices:
+        if notice["event_type"] == ENV_DEPRECATED_EVENT:
+            summary = (f"{notice['env']} is deprecated; move it to the patch row {notice['id']} in "
+                       f"<workspace>/{OPERATOR_PATCH_FILE} ({notice['removal_issue']})")
+        else:
+            summary = (f"{notice['env']} is retired and was ignored; the patch row {notice['id']} or its "
+                       f"default applies ({notice['removal_issue']})")
+        logger.warning("Composition: %s", summary)
+        try:
+            from src.audit.repository import audit_repository
+            await audit_repository.log_event(event_type=notice["event_type"], actor="system",
+                                             tool_name="composition_profile", risk_level="low",
+                                             summary=summary,
+                                             details={key: notice[key] for key in (
+                                                 "id", "env", "env_stage", "source", "removal_issue")})
+        except Exception:  # noqa: BLE001 - the composition already booted
+            logger.warning("Could not audit the %s environment flag notice", notice["env"], exc_info=True)
+    return notices
 
 
 def recovery_text(error: CompositionProfileInvalid) -> str:
     """Operator-facing fix for a refused composition; names files and settings, never values."""
+    if error.reason == "env_flag_retired" and error.row_id in PATCH_ROWS:
+        spec = PATCH_ROWS[error.row_id]
+        return (f"Composition refused: {spec.env_name} was removed ({spec.removal_issue}). Add the row "
+                f'{{"id": "{spec.row_id}", "value": ...}} to <workspace>/{OPERATOR_PATCH_FILE} with the value '
+                f"you set, or delete {spec.env_name} from the environment file, then restart.")
     if error.reason.startswith("operator_patch") or error.reason.startswith("patch_"):
         # Only a catalogued row id is echoed; operator file text never reaches the log.
         where = "" if error.row_id is None else f" (row {error.row_id if error.row_id in PATCH_ROWS else 'redacted'})"
@@ -372,8 +579,13 @@ def recovery_text(error: CompositionProfileInvalid) -> str:
             + ", ".join(PROFILES) + " that matches DEPLOYMENT_ENVIRONMENT (or leave it empty), then restart.")
 
 
-__all__ = ["BUNDLES", "BUNDLE_NAMES", "CORE_BUNDLES", "Bundle", "ComposedProfile", "CompositionProfileInvalid",
+__all__ = ["BUNDLES", "BUNDLE_NAMES", "CORE_BUNDLES", "DELEGATION_ROW", "END_OF_DAY_REPORT_ROW", "ENV_DEPRECATED_EVENT",
+           "ENV_IGNORED_EVENT", "ENV_STAGES", "Bundle", "ComposedProfile", "CompositionProfileInvalid", "EnvBase",
            "OPERATOR_PATCH_FILE", "PATCH_ROWS", "PATCH_SCHEMA", "PROFILES", "PatchRow", "Profile",
+           "SCHEDULER_ROW", "SCREENSHOT_FOLDER_INGEST_ROW", "SCREENSHOT_OBSERVATION_DIGEST_ROW",
            "SECURITY_SETTINGS", "boot_profile", "booted_profile", "compose_profile", "decode_operator_patch",
-           "effective_row", "load_operator_patch", "recovery_text", "release_profile", "resolve_profile_id",
-           "scheduler_enabled", "validate_bundles", "validate_patch"]
+           "delegation_enabled", "effective_row", "end_of_day_report_enabled", "env_base_layer",
+           "env_base_notices", "explicit_env_values", "load_operator_patch", "record_env_base_layer",
+           "recovery_text", "release_profile", "resolve_profile_id", "scheduler_enabled",
+           "screenshot_folder_ingest_enabled", "screenshot_observation_digest_enabled", "validate_bundles",
+           "validate_patch"]

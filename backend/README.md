@@ -95,7 +95,7 @@ Receive (streamed):
 | `SCREEN_CAPTURE_ARCHIVE_RETENTION_DAYS` | `365` | Operator-visible retention posture for preserved captures |
 | `SCREEN_CAPTURE_ARCHIVE_MAX_MB` | `0` | Operator-visible archive size budget; `0` means unlimited |
 | `REPORT_ARCHIVE_DIR` | `$WORKSPACE_DIR/artifacts/reports` | Durable local archive root for stored report text/JSON artifacts used by future analysis |
-| `END_OF_DAY_REPORT_ENABLED` | `true` | Enables the stored end-of-day goal report scheduler job |
+| `END_OF_DAY_REPORT_ENABLED` | `true` | Enables the stored end-of-day goal report scheduler job; base layer of the patch row `seraph.scheduler.v1#end_of_day_report` (#1206, removal #1341) |
 | `END_OF_DAY_REPORT_HOUR` | `21` | Local hour for the end-of-day goal report |
 | `END_OF_DAY_REPORT_LLM_ENABLED` | `false` | Enables LLM drafting for the report; default deterministic mode avoids sending screen-derived summaries to a provider |
 | `EMAIL_REPORTS_ENABLED` | `false` | Enables email delivery for reports after local storage |

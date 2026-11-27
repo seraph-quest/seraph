@@ -19,6 +19,8 @@ from config.settings import RepoSandboxSettings, settings
 from src.db.engine import get_session as get_db
 from src.db.models import MemoryEpisode, ScreenObservation, UserProfile
 from src.utils.clock import get_clock
+from src.runtime_plugins.profiles import (END_OF_DAY_REPORT_ROW, SCREENSHOT_FOLDER_INGEST_ROW, end_of_day_report_enabled,
+                                          screenshot_folder_ingest_enabled)
 from src.local_runtime_profile_verifier import (
     PROFILE_VERIFIER_VERSION,
     latest_local_runtime_profile_proof,
@@ -1415,7 +1417,8 @@ async def get_artifact_storage_settings():
                 "runtime": vlm_status,
                 **screenshot_pipeline,
             },
-            "auto_ingest_enabled": settings.screenshot_folder_ingest_enabled,
+            # #1206: the effective value (a patch row, else the environment flag).
+            "auto_ingest_enabled": screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled),
             "auto_ingest_interval_min": settings.screenshot_folder_ingest_interval_min,
             "auto_ingest_limit": settings.screenshot_folder_ingest_limit,
             "scan_endpoint": "/api/observer/screenshot-folder/scan",
@@ -1427,6 +1430,7 @@ async def get_artifact_storage_settings():
                 "auto_ingest_interval": "SCREENSHOT_FOLDER_INGEST_INTERVAL_MIN",
                 "auto_ingest_limit": "SCREENSHOT_FOLDER_INGEST_LIMIT",
             },
+            "control_row": {"auto_ingest_enabled": SCREENSHOT_FOLDER_INGEST_ROW},
         },
         "local_runtime": {
             # The legacy provider flag can disable the active cloud phase, but
@@ -1448,7 +1452,7 @@ async def get_artifact_storage_settings():
             ),
         },
         "reports": {
-            "enabled": settings.end_of_day_report_enabled,
+            "enabled": end_of_day_report_enabled(settings.end_of_day_report_enabled),
             "hour": settings.end_of_day_report_hour,
             "analysis_provider": (
                 "llm"
@@ -1467,6 +1471,7 @@ async def get_artifact_storage_settings():
                 "enabled": "END_OF_DAY_REPORT_ENABLED",
                 "llm": "END_OF_DAY_REPORT_LLM_ENABLED",
             },
+            "control_row": {"enabled": END_OF_DAY_REPORT_ROW},
         },
         "email": {
             "enabled": settings.email_reports_enabled,

@@ -1454,7 +1454,8 @@ async def send_end_of_day_report_test_email() -> dict[str, Any]:
 
 
 async def run_end_of_day_goal_report() -> None:
-    if not settings.end_of_day_report_enabled:
+    from src.runtime_plugins.profiles import end_of_day_report_enabled
+    if not end_of_day_report_enabled(settings.end_of_day_report_enabled):
         await log_scheduler_job_event(
             job_name="end_of_day_goal_report",
             outcome="skipped",

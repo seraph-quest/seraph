@@ -673,6 +673,10 @@ async def _lifespan_services(app: FastAPI):
     # The provider worker's activation already ran init_db (#1024), so the
     # #1161 auth-mode reconcile runs here, against the open state gate.
     await _reconcile_operator_auth_mode()
+    # ADR-036 §6 removal path (#1206): log and audit each deprecated or retired
+    # composition env flag this boot still sees set. Best effort; never blocks boot.
+    from src.runtime_plugins.profiles import record_env_base_layer
+    await record_env_base_layer()
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
     from src.agent.session import session_manager

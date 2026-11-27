@@ -67,7 +67,8 @@ async def run_screenshot_folder_analysis() -> None:
     if _ANALYSIS_LOCK.locked():
         logger.info("screenshot_folder_analysis: skipped; previous analysis still running")
         return
-    if not settings.screenshot_folder_ingest_enabled:
+    from src.runtime_plugins.profiles import screenshot_folder_ingest_enabled
+    if not screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled):
         logger.info("screenshot_folder_analysis: skipped; screenshot folder ingest disabled")
         await log_scheduler_job_event(
             job_name="screenshot_folder_analysis",

@@ -71,7 +71,8 @@ async def list_tools():
 
     # When delegation is active, also include specialist names so the frontend
     # toolRegistry recognizes them for animation triggers.
-    if settings.use_delegation:
+    from src.runtime_plugins.profiles import delegation_enabled
+    if delegation_enabled(settings.use_delegation):
         for specialist in list_specialist_descriptors(
             tools,
             tool_mode=mode,

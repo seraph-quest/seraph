@@ -310,7 +310,9 @@ def delegate_task(task: str, specialist: str = "") -> str:
     """
     from src.agent.specialists import build_all_specialists
 
-    if not settings.use_delegation:
+    from src.runtime_plugins.profiles import delegation_enabled
+
+    if not delegation_enabled(settings.use_delegation):
         return "Error: Delegation runtime is disabled."
     from src.approval.runtime import get_current_trust_principal
     principal = get_current_trust_principal()

@@ -74,7 +74,8 @@ class ScreenshotDigestResult:
 
 async def run_screenshot_observation_digest() -> None:
     """Scheduler entrypoint for the current rolling screenshot digest window."""
-    if not settings.screenshot_observation_digest_enabled:
+    from src.runtime_plugins.profiles import screenshot_observation_digest_enabled
+    if not screenshot_observation_digest_enabled(settings.screenshot_observation_digest_enabled):
         await log_scheduler_job_event(
             job_name=SCREENSHOT_DIGEST_TOOL_NAME,
             outcome="skipped",

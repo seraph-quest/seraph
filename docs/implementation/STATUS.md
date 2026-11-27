@@ -351,6 +351,25 @@ Partial because:
 See the
 [guide section](./12-current-app-guide.md#bundles-named-profiles-and-the-patch-layer-1204).
 
+**Source inventory** from
+[#1205](https://github.com/seraph-quest/seraph/issues/1205) (A3.3 slice 2 of
+[#1026](https://github.com/seraph-quest/seraph/issues/1026), design §5) is
+**Partial**: `runtime_plugins/inventory.py` lists every runtime responsibility
+an AST scan of `backend/src` finds (start/stop owners, lifespan steps, scheduler
+jobs, routers and WebSocket endpoints, background tasks, threads and subprocess
+spawns) in one of three tables. `OWNERS` (98 rows) map a responsibility to an
+existing domain row, its A3.3-1 bundle, its provider and whether it is required.
+`GAPS` (127 rows) are responsibilities with no plugin owner yet, each naming its
+planned seam, bundle, reason and the work expected to own it. `EXCLUSIONS` (21
+rows) are the composition bootstrap, pure utilities and test helpers, each with
+a one-line reason. `tests/test_source_inventory_1205.py` fails on any scanned
+owner in no table and on any row the scan no longer finds. Partial because the
+inventory only records ownership: it moves no code and changes no composition.
+Most gaps belong to later A3.3 slices (#1208, #1209, #1211); the browser,
+repository, sandbox, documents and MCP capability seams (48 rows) have no
+tracking issue yet. See the
+[guide section](./12-current-app-guide.md#source-inventory-1205).
+
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
 **Partial**: the one Python scheduler and the WorkBoard dispatcher run only

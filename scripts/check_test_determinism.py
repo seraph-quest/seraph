@@ -159,6 +159,7 @@ CLOCK_SEAM_MODULES = (
     "observer/sources/time_source.py",
     "runtime_plugins/bridge.py",
     "runtime_plugins/lifecycle.py",
+    "scheduler/job_status.py",
     "security/http_transport.py",
     "work_board/dispatcher.py",
     "work_board/pipelines.py",

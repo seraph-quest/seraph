@@ -371,14 +371,13 @@ async def test_a_blocked_background_job_is_persisted_announced_once_and_cleared(
         await report_guardian_blocked("daily_briefing", blocked)
     assert len(announced) == 1 and "Daily briefing is blocked" in announced[0]
     assert len(events) == 1 and events[0]["outcome"] == "blocked"  # Activity at most hourly
-    # The block survives a restart (the in-memory status is reloaded from disk).
-    background_inference._status_loaded_from = None
-    row = next(job for job in background_inference.background_inference_status()["jobs"]
+    # The block survives a restart: it is the durable background_job_status row (#1025 D2).
+    row = next(job for job in (await background_inference.background_inference_status())["jobs"]
                if job["job_id"] == "daily_briefing")
     assert row["blocked"] is True and row["last_skip"]["reason"] == "cordis_host_unavailable"
     assert row["last_skip"]["recovery"] == blocked.recovery
-    report_guardian_succeeded("daily_briefing")
-    row = next(job for job in background_inference.background_inference_status()["jobs"]
+    await report_guardian_succeeded("daily_briefing")
+    row = next(job for job in (await background_inference.background_inference_status())["jobs"]
                if job["job_id"] == "daily_briefing")
     assert row["blocked"] is False
     await report_guardian_blocked("daily_briefing", blocked)
@@ -840,7 +839,7 @@ async def test_a_blocked_guardian_domain_skips_every_flush_and_keeps_its_fingerp
                                            trigger="workflow_completed") is False
         completion.assert_not_called()
         assert flush._last_flushed_session_fingerprints == {}  # a later catch-up consolidates once ready
-        row = next(job for job in background_inference.background_inference_status()["jobs"]
+        row = next(job for job in (await background_inference.background_inference_status())["jobs"]
                    if job["job_id"] == "memory_consolidation")
         assert row["blocked"] is True and row["last_skip"]["reason"].startswith("cordis_")
         await host.start()
@@ -1044,13 +1043,11 @@ async def test_a_cancelled_caller_cancels_its_owner_loop_task():
 @pytest.mark.asyncio
 async def test_blocked_status_notifies_on_entering_blocked_only_and_is_written_privately_on_change(
         accounting_db, monkeypatch, tmp_path):  # noqa: F811
-    import os
-    import stat
     from config.settings import settings
     from src.scheduler import background_inference
     from src.scheduler.guardian_runtime import report_guardian_blocked
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    announced, writes = [], []
+    announced = []
 
     async def deliver(message, **_kwargs):
         announced.append(message.content)
@@ -1059,16 +1056,21 @@ async def test_blocked_status_notifies_on_entering_blocked_only_and_is_written_p
         return None
     monkeypatch.setattr("src.observer.delivery.deliver_or_queue", deliver)
     monkeypatch.setattr("src.audit.runtime.log_scheduler_job_event", scheduler_event)
-    persist = background_inference._persist_status_locked
-    monkeypatch.setattr(background_inference, "_persist_status_locked", lambda: (writes.append(1), persist()))
+    from src.scheduler import job_status
     # A reason that flaps while the job stays blocked is not a new announcement.
     for reason in ("cordis_host_unavailable", "guardian_owner_blocked", "cordis_host_unavailable"):
         await report_guardian_blocked("evening_review", GuardianBlocked(reason))
     assert len(announced) == 1
-    path = background_inference.background_inference_status_path()
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
-    # Repeated identical skips rewrite nothing.
-    writes.clear()
-    for _ in range(5):
-        background_inference.record_background_inference_skip("daily_briefing")
-    assert len(writes) == 1
+    row = await job_status.status_row("evening_review")
+    # The one notification was claimed for this transition in the status transaction.
+    assert row["state"] == "blocked" and row["notified_for"] == row["since"]
+    # The status lives in the workspace database (#1025 D2); no status file is written any more.
+    assert not job_status.legacy_status_path().exists()
+    assert not any(path.name.startswith("background-inference-status") for path in tmp_path.iterdir())
+    # Repeated identical skips keep one transition: the same since and the first audit time.
+    await background_inference.record_background_inference_skip("daily_briefing")
+    first = await job_status.status_row("daily_briefing")
+    for _ in range(4):
+        assert await background_inference.record_background_inference_skip("daily_briefing") is False
+    again = await job_status.status_row("daily_briefing")
+    assert (again["since"], again["audited_at"]) == (first["since"], first["audited_at"])

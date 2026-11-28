@@ -1180,7 +1180,7 @@ async def build_end_of_day_goal_report(report_day: date | None = None, *,
             "artifact_schema": "seraph.end_of_day_goal_report.v1",
             **blocked_evidence,
         }
-    report_guardian_succeeded("end_of_day_goal_report")
+    await report_guardian_succeeded("end_of_day_goal_report")
     body = str(response.choices[0].message.content or "").strip()
     if github_variant:
         body, goal_evidence = _goal_evidence(body, goal_refs, sent_refs)

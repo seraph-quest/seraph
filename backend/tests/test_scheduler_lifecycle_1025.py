@@ -54,10 +54,10 @@ async def _bump(domain: str, **values) -> None:
                          .values(**values))
 
 
-def _status_entry(job_id: str) -> dict:
-    from src.scheduler.background_inference import background_inference_status_path
-    path = background_inference_status_path()
-    return json.loads(path.read_text())["jobs"].get(job_id, {}) if path.exists() else {}
+async def _status_entry(job_id: str) -> dict:
+    """The durable ``background_job_status`` row (#1025 D2), or ``{}``."""
+    from src.scheduler.job_status import status_row
+    return await status_row(job_id) or {}
 
 
 # ------------------------------------------------------------------ classification and naming
@@ -138,13 +138,13 @@ async def test_unmanaged_process_and_disabled_scheduler_never_run_gated_work(ser
 
     unmanaged = RuntimeLifecycle()
     assert await unmanaged.run_gated("goal_check", job) is None
-    assert ran == [] and _status_entry("goal_check")["reason"] == "lifecycle_not_started"
+    assert ran == [] and (await _status_entry("goal_check"))["reason"] == "lifecycle_not_started"
     disabled = _lifecycle(scheduler_enabled=False)
     status = await disabled.activate(SCHEDULER_DOMAIN)
     assert status["state"] == "disabled" and status["reason"] == "scheduler_disabled"
     assert await disabled.run_gated("calendar_scan", job) is None
     # Disabled is never "blocked": no block is recorded and nothing announces it.
-    assert ran == [] and _status_entry("calendar_scan") == {}
+    assert ran == [] and await _status_entry("calendar_scan") == {}
     assert disabled._notified == {}
 
 
@@ -162,9 +162,9 @@ async def test_retention_jobs_run_while_the_scheduler_domain_is_blocked(service_
     await lifecycle.run_gated("cordis_mail_retention", lambda: job("cordis_mail_retention"))
     await lifecycle.run_gated("goal_check", lambda: job("goal_check"))
     assert ran == ["screen_cleanup", "cordis_mail_retention"]
-    assert _status_entry("goal_check")["status"] == "blocked"
-    assert _status_entry("goal_check")["reason"] == "scheduler_owner_blocked"
-    assert _status_entry("screen_cleanup") == {}
+    assert (await _status_entry("goal_check"))["status"] == "blocked"
+    assert (await _status_entry("goal_check"))["reason"] == "scheduler_owner_blocked"
+    assert await _status_entry("screen_cleanup") == {}
 
 
 async def test_a_cordis_owner_without_an_admitting_host_blocks_with_the_fix(service_db):  # noqa: F811
@@ -203,18 +203,26 @@ async def test_blocked_is_announced_once_repeated_ticks_are_silent_and_success_c
 
     for _ in range(3):
         await lifecycle.run_gated("goal_check", job)
-    since = _status_entry("goal_check")["since"]
+    since = (await _status_entry("goal_check"))["since"]
     assert notices == ["scheduler_owner_draining"]
-    # The record survives a restart (a fresh process reads the same status record).
+    # The record survives a restart (a fresh process reads the same status table),
+    # and a fresh process that finds the domain still blocked does not announce it again.
     from src.scheduler import background_inference
-    background_inference._status_loaded_from = None
-    assert _status_entry("goal_check")["since"] == since
-    assert any(item["job_id"] == "goal_check" for item in background_inference.scheduler_job_blocks())
+    assert (await _status_entry("goal_check"))["since"] == since
+    assert any(item["job_id"] == "goal_check" for item in await background_inference.scheduler_job_blocks())
+    restarted = _lifecycle()
+    monkeypatch.setattr(restarted, "_notify", notify)
+    monkeypatch.setattr(restarted, "_activity", record_activity)
+    await restarted.activate(SCHEDULER_DOMAIN)
+    assert restarted.status(SCHEDULER_DOMAIN)["state"] == "blocked"
+    assert notices == ["scheduler_owner_draining"] and activity == ["blocked"]
+    domain_row = await _status_entry("lifecycle:scheduler")
+    assert domain_row["state"] == "blocked" and domain_row["notified_for"] == domain_row["since"]
     await _bump(SCHEDULER_DOMAIN, state="ready")
     lifecycle._last_attempt.clear()
     await lifecycle.run_gated("goal_check", job)
     assert activity == ["blocked", "recovered"] and notices == ["scheduler_owner_draining"]
-    assert _status_entry("goal_check")["status"] == "succeeded"
+    assert (await _status_entry("goal_check"))["status"] == "succeeded"
 
 
 # ------------------------------------------------------------------ fences
@@ -237,7 +245,7 @@ async def test_a_stale_epoch_between_tick_and_admission_records_no_run_and_conta
     assert contacts == []
     async with db_engine.get_session() as db:
         assert await db.scalar(select(func.count()).select_from(ScheduledJobRun)) == 0
-    entry = _status_entry("user_cron:job-1")
+    entry = await _status_entry("user_cron:job-1")
     assert (entry["status"], entry["reason"]) == ("blocked", "composition_dependency_changed")
 
 
@@ -280,7 +288,7 @@ async def test_run_pass_refuses_at_its_first_step_under_a_stale_dispatch_epoch(s
     finally:
         module.expire_inbox_items = original
     assert calls == []
-    assert _status_entry("work_board_dispatch")["reason"] == "composition_dependency_changed"
+    assert (await _status_entry("work_board_dispatch"))["reason"] == "composition_dependency_changed"
 
 
 async def test_api_launched_workers_refuse_while_dispatch_is_not_active(service_db, monkeypatch):  # noqa: F811
@@ -726,7 +734,7 @@ async def test_shutdown_closes_admission_first_so_no_tick_reactivates_after_the_
     await asyncio.gather(in_flight, stopping)
     assert ran == [] and lifecycle.current(DISPATCH_DOMAIN) is None and not lifecycle.managed
     # Post-stop ticks persist nothing and API launches are refused (not let through).
-    assert _status_entry("calendar_scan") == {}
+    assert await _status_entry("calendar_scan") == {}
     with pytest.raises(LifecycleBlocked) as refused:
         lifecycle.require_dispatch_active()
     assert refused.value.reason_code == "dispatch_owner_not_active"

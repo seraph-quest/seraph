@@ -160,7 +160,7 @@ async def run_daily_briefing() -> None:
                 "degraded_inputs": degraded_inputs,
             },
         )
-        report_guardian_succeeded("daily_briefing")
+        await report_guardian_succeeded("daily_briefing")
         logger.info("daily_briefing: delivered morning briefing")
 
     except Exception as exc:

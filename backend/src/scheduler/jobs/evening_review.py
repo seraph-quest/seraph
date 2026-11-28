@@ -186,7 +186,7 @@ async def run_evening_review() -> None:
                 "degraded_inputs": degraded_inputs,
             },
         )
-        report_guardian_succeeded("evening_review")
+        await report_guardian_succeeded("evening_review")
         logger.info("evening_review: delivered evening review")
 
     except Exception as exc:

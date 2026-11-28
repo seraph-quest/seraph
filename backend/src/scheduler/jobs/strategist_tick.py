@@ -1136,7 +1136,7 @@ async def run_strategist_tick() -> None:
             durable_fencing_token=durable_fencing_token,
         )
 
-        report_guardian_succeeded("strategist_tick")
+        await report_guardian_succeeded("strategist_tick")
         decision = parse_strategist_response(str(raw))
 
         if not decision.should_intervene:

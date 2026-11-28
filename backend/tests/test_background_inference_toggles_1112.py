@@ -28,17 +28,16 @@ def assessment_route_available(monkeypatch):
 
 
 @pytest.fixture
-def toggles(tmp_path, monkeypatch):
+def toggles(db, tmp_path, monkeypatch):
+    # The per-job status is the durable background_job_status table (#1025 D2) in the test database.
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    background_inference._last_status.clear()
     runtime._executions.clear()
     yield
-    background_inference._last_status.clear()
     runtime._executions.clear()
 
 
-def _status(job_id):
-    return {job["job_id"]: job for job in background_inference.background_inference_status()["jobs"]}[job_id]
+async def _status(job_id):
+    return {job["job_id"]: job for job in (await background_inference.background_inference_status())["jobs"]}[job_id]
 
 
 async def _seed(*, deadline):
@@ -53,20 +52,30 @@ async def _seed(*, deadline):
     return row.id
 
 
+async def _age_skip_audit(job_id):
+    """Move the stored skip-audit time back one audit interval (the job's last audit was an hour ago)."""
+    from src.db.engine import get_session
+    from src.db.models import BackgroundJobStatus
+    async with get_session() as db:
+        row = await db.get(BackgroundJobStatus, job_id)
+        row.audited_at = (datetime.fromisoformat(row.audited_at) - background_inference.SKIP_AUDIT_INTERVAL).isoformat()
+
+
 async def _rows():
     from src.db.engine import get_session
     async with get_session() as db:
         return {row.id: row for row in (await db.execute(select(GuardianOpportunity))).scalars()}
 
 
-def test_both_jobs_are_registered_default_on_with_event_driven_estimates(toggles):
+@pytest.mark.asyncio
+async def test_both_jobs_are_registered_default_on_with_event_driven_estimates(toggles):
     for job_id, scope in (("guardian_opportunity_assessment", "llm_only"), ("screenshot_folder_analysis", "job")):
-        job = _status(job_id)
+        job = await _status(job_id)
         assert job["enabled"] is True and job["scope"] == scope
         # Event-driven: the basis text, not a cadence, is the estimate.
         assert job["approx_calls_per_day"] is None and job["estimate_basis"]
-    assert "16 per tick" in _status("guardian_opportunity_assessment")["estimate_basis"]
-    assert "vision" in _status("screenshot_folder_analysis")["estimate_basis"]
+    assert "16 per tick" in (await _status("guardian_opportunity_assessment"))["estimate_basis"]
+    assert "vision" in (await _status("screenshot_folder_analysis"))["estimate_basis"]
 
 
 @pytest.mark.asyncio
@@ -89,7 +98,7 @@ async def test_disabled_opportunity_assessment_makes_no_model_call_and_keeps_can
     assert (rows[expired].status, rows[expired].reason_code) == ("blocked", "assessment_deadline_expired")
     # A repeated paused tick does not churn the visible row.
     assert rows[live].revision == 2
-    assert _status("guardian_opportunity_assessment")["last_skip"]["reason"] == "disabled_by_operator"
+    assert (await _status("guardian_opportunity_assessment"))["last_skip"]["reason"] == "disabled_by_operator"
 
     # Switching it back on resumes the same candidate exactly once. The real
     # assessment after a resume is covered by the paused_resume scenario of
@@ -143,11 +152,12 @@ async def test_unreadable_toggle_file_pauses_opportunity_assessment(async_db, to
     executor.assert_not_called()
     row = (await _rows())[live]
     assert (row.status, row.reason_code) == ("queued", background_inference.SETTINGS_UNREADABLE)
-    assert _status("guardian_opportunity_assessment")["last_skip"]["reason"] == background_inference.SETTINGS_UNREADABLE
+    assert (await _status("guardian_opportunity_assessment"))["last_skip"]["reason"] == background_inference.SETTINGS_UNREADABLE
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("unreadable", [False, True])
-def test_disabled_screenshot_folder_analysis_makes_no_vision_call(toggles, unreadable):
+async def test_disabled_screenshot_folder_analysis_makes_no_vision_call(toggles, unreadable):
     if unreadable:
         background_inference.background_inference_settings_path().write_text("{broken", encoding="utf-8")
     else:
@@ -165,14 +175,15 @@ def test_disabled_screenshot_folder_analysis_makes_no_vision_call(toggles, unrea
                                      allow_model_inference=True)()
         return audit
 
-    audit = asyncio.run(run())
+    audit = (await run())
     reason = background_inference.SETTINGS_UNREADABLE if unreadable else "disabled_by_operator"
     assert calls == []
     audit.assert_awaited_once_with(job_name="screenshot_folder_analysis", outcome="skipped", details={"reason": reason})
-    assert _status("screenshot_folder_analysis")["last_skip"]["reason"] == reason
+    assert (await _status("screenshot_folder_analysis"))["last_skip"]["reason"] == reason
 
 
-def test_disabled_screenshot_folder_analysis_audits_once_per_transition(toggles):
+@pytest.mark.asyncio
+async def test_disabled_screenshot_folder_analysis_audits_once_per_transition(toggles):
     """The job polls every second; the skip audit is once per transition, then hourly."""
     background_inference.write_background_inference_settings({"screenshot_folder_analysis": False})
     calls = []
@@ -188,20 +199,19 @@ def test_disabled_screenshot_folder_analysis_audits_once_per_transition(toggles)
                                          allow_model_inference=True)()
         return audit
 
-    assert asyncio.run(run(5)).await_count == 1
+    assert (await run(5)).await_count == 1
     # A different reason is a new transition.
     background_inference.background_inference_settings_path().write_text("{broken", encoding="utf-8")
-    audit = asyncio.run(run(3))
+    audit = (await run(3))
     audit.assert_awaited_once_with(job_name="screenshot_folder_analysis", outcome="skipped",
                                    details={"reason": background_inference.SETTINGS_UNREADABLE})
     # After an hour the persisting skip is audited again.
-    entry = background_inference._last_status["screenshot_folder_analysis"]
-    entry["_audited_at"] -= background_inference.SKIP_AUDIT_INTERVAL
-    assert asyncio.run(run(2)).await_count == 1
+    await _age_skip_audit("screenshot_folder_analysis")
+    assert (await run(2)).await_count == 1
     # Running once and switching off again is a new transition.
     background_inference.background_inference_settings_path().unlink()
-    assert asyncio.run(run(1)).await_count == 0 and calls == ["vision"]
+    assert (await run(1)).await_count == 0 and calls == ["vision"]
     background_inference.write_background_inference_settings({"screenshot_folder_analysis": False})
-    assert asyncio.run(run(2)).await_count == 1 and calls == ["vision"]
+    assert (await run(2)).await_count == 1 and calls == ["vision"]
     # The private audit marker is not part of the status payload.
-    assert "_audited_at" not in _status("screenshot_folder_analysis")["last_skip"]
+    assert not {"_audited_at", "audited_at"} & set((await _status("screenshot_folder_analysis"))["last_skip"])

@@ -181,7 +181,7 @@ async def run_activity_digest() -> None:
                 "degraded_inputs": degraded_inputs,
             },
         )
-        report_guardian_succeeded("activity_digest")
+        await report_guardian_succeeded("activity_digest")
         logger.info("activity_digest: delivered daily digest")
 
     except Exception as exc:

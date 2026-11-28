@@ -311,15 +311,18 @@ def test_canary_proof_ttl_accepts_daily_maximum_only():
 
 
 @pytest.fixture
-def background_workspace(tmp_path, monkeypatch):
+def background_workspace(db, tmp_path, monkeypatch):
+    # The per-job status is the durable background_job_status table (#1025 D2) in the test database.
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    background_inference._last_status.clear()
     yield tmp_path
-    background_inference._last_status.clear()
+
+
+def _background_status() -> dict:
+    return asyncio.run(background_inference.background_inference_status())
 
 
 def test_background_jobs_default_on_with_estimates(background_workspace):
-    status = background_inference.background_inference_status()
+    status = _background_status()
     assert status["error_code"] is None
     jobs = {job["job_id"]: job for job in status["jobs"]}
     assert set(jobs) >= {"strategist_tick", "memory_consolidation", "daily_briefing", "evening_review",
@@ -360,7 +363,7 @@ def test_disabled_background_job_makes_zero_model_calls(background_workspace, jo
     audit = asyncio.run(run())
     assert transport_calls == []
     audit.assert_awaited_once_with(job_name=job_id, outcome="skipped", details={"reason": "disabled_by_operator"})
-    status = {job["job_id"]: job for job in background_inference.background_inference_status()["jobs"]}
+    status = {job["job_id"]: job for job in _background_status()["jobs"]}
     assert status[job_id]["enabled"] is False
     assert status[job_id]["last_skip"]["reason"] == "disabled_by_operator"
 
@@ -382,7 +385,7 @@ def test_disabled_end_of_day_analysis_makes_zero_model_calls(background_workspac
     assert decision.allowed is False
     assert decision.reason == "disabled_by_operator"
     completion.assert_not_called()
-    status = {job["job_id"]: job for job in background_inference.background_inference_status()["jobs"]}
+    status = {job["job_id"]: job for job in _background_status()["jobs"]}
     assert status["end_of_day_goal_report"]["last_skip"]["reason"] == "disabled_by_operator"
 
 
@@ -547,7 +550,7 @@ def test_disabled_memory_consolidation_gates_every_flush_trigger(background_work
         else:
             assert asyncio.run(flush.flush_session_memory("session-1", trigger=trigger)) is False
     consolidate.assert_not_called()
-    status = {job["job_id"]: job for job in background_inference.background_inference_status()["jobs"]}
+    status = {job["job_id"]: job for job in _background_status()["jobs"]}
     assert status["memory_consolidation"]["last_skip"]["reason"] == "disabled_by_operator"
 
 

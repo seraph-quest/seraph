@@ -21,7 +21,7 @@ async def report_guardian_blocked(job_id: str, exc: GuardianBlocked, *, started_
                                   details: dict | None = None) -> None:
     from src.audit.runtime import log_scheduler_job_event
     from src.scheduler.background_inference import _JOBS, record_background_inference_blocked
-    state = record_background_inference_blocked(job_id, exc.reason_code, exc.recovery)
+    state = await record_background_inference_blocked(job_id, exc.reason_code, exc.recovery)
     logger.warning("%s blocked by the guardian runtime: %s", job_id, exc.reason_code)
     if state["activity_due"]:
         await log_scheduler_job_event(job_name=job_id, outcome="blocked", details={
@@ -41,6 +41,6 @@ async def report_guardian_blocked(job_id: str, exc: GuardianBlocked, *, started_
             logger.warning("Could not announce the %s block", job_id, exc_info=True)
 
 
-def report_guardian_succeeded(job_id: str) -> None:
+async def report_guardian_succeeded(job_id: str) -> None:
     from src.scheduler.background_inference import record_background_inference_succeeded
-    record_background_inference_succeeded(job_id)
+    await record_background_inference_succeeded(job_id)

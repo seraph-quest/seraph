@@ -412,6 +412,33 @@ owner contradicts the catalogues. Partial because:
 See the
 [guide section](./12-current-app-guide.md#source-inventory-1205).
 
+**Passive provider-worker entry** from
+[#1207](https://github.com/seraph-quest/seraph/issues/1207) (A3.3 slice 4 of
+[#1026](https://github.com/seraph-quest/seraph/issues/1026), design §7 phase 1)
+is **Partial**. `python -m src.runtime_plugins.worker` (`runtime_plugins/worker_entry.py`)
+runs the #1024 `ProviderWorker` as a passive stdio-framed child:
+- it is spawned through `worker_launch()` with a pinned absolute interpreter,
+  `-I -B`, a fixed argv and a closed environment. Anything else is refused
+  before a setting loads;
+- on Linux it is non-dumpable before any secret is read, and it arms
+  `PR_SET_PDEATHSIG`. On macOS it watches the parent with kqueue instead;
+- it always holds the workspace owner lock and activates the mandatory providers
+  first;
+- it serves a closed control/ordinary method set with 4 reserved control slots and
+  control-first writes;
+- it shuts down in the #1024 order on `worker.shutdown`, SIGTERM/SIGINT, stdin EOF
+  or parent death, with a fixed exit-code table.
+
+Component tests cover lock ownership, the second-worker refusal (exit 73),
+mandatory-first abort (exit 78), closed-env refusals (exit 64) and clean
+shutdown on parent loss (exit 71). The `/proc` unreadability test runs only on
+Linux. Partial because no managed entry spawns it yet: `manage.sh`, compose and
+the uvicorn lifespan are unchanged, the Node `python-provider-host` plugin is
+#1208/#1210, and there are no host receipts yet.
+
+See the
+[guide section](./12-current-app-guide.md#passive-provider-worker-entry-1207).
+
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
 **Partial**: the one Python scheduler and the WorkBoard dispatcher run only

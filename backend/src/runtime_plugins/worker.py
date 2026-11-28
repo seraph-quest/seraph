@@ -42,6 +42,14 @@ worker's life.
 """
 from __future__ import annotations
 
+if __name__ == "__main__":
+    # The passive provider-worker entry (#1207): it hardens the process and
+    # checks its invocation before any import below can load a setting or a
+    # secret, then runs the real ``src.runtime_plugins.worker`` module's
+    # ProviderWorker. This ``__main__`` copy never defines anything.
+    from src.runtime_plugins.worker_entry import main as _entry_main
+    raise SystemExit(_entry_main())
+
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -336,6 +344,8 @@ class ProviderWorker:
         self._owner = None
         self._activated = False
         self._closed = False
+        # Providers in the order activation evaluated them (mandatory first; #1207 reports it).
+        self.activation_order: list[str] = []
         # Serializes every status mutation (activation, rechecks, shutdown marks).
         self._status_lock = asyncio.Lock()
         # Last audit write probe: {"checked_at", "outcome", "reason_code"}.
@@ -400,10 +410,12 @@ class ProviderWorker:
             raise ProviderActivationError("state", "state_provider_closed")
         set_state_gate("activating")
         try:
+            self.activation_order.append("state")
             await _state_predicate(run_init=True)
             self.status["state"].state = "active"
             set_state_gate("active")
             for name in MANDATORY[1:]:
+                self.activation_order.append(name)
                 await _PREDICATES[name]()
                 self.status[name].state = "active"
                 if name == "audit":
@@ -416,6 +428,7 @@ class ProviderWorker:
             raise
         await self._read_facade_rows()
         for name in DEGRADABLE:
+            self.activation_order.append(name)
             try:
                 await _PREDICATES[name]()
                 self._facade_passed(name)

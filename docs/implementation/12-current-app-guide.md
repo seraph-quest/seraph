@@ -1547,8 +1547,56 @@ them, and the test checks that.
 A new capability (for example a #1308 child) adds its rows here. Its domain row
 must exist before it can be an owner; until then it is a gap.
 
-**Not yet built:** the inventory records ownership only. Interface domains,
-the worker entry and the Node entry are later slices (#1207 to #1211).
+**Not yet built:** the inventory records ownership only. Interface domains
+and the Node entry are later slices (#1208 to #1211). The passive worker entry
+(#1207, below) has its rows under `seraph.state.v1`.
+
+### Passive provider-worker entry (#1207)
+
+This is A3.3 slice 4 (#1026 §7 phase 1, design review items 2, 3, 4 and 7; the
+binding resolutions are the v2 addendum on #1026). No managed launcher uses it
+yet. `./manage.sh`, compose and `uvicorn src.app:create_app --factory` with its
+lifespan are unchanged.
+
+**Launch.** A parent spawns `worker_launch(...)`, which gives:
+- **argv:** `[<pinned venv python>, -I, -B, -c, WORKER_BOOTSTRAP, <backend root>]`.
+  `-I` excludes the uninstalled backend from `-m`'s search path, so the fixed
+  bootstrap runs `src.runtime_plugins.worker` as `__main__` through `runpy`,
+  exactly as `-m` would.
+- **env:** exactly `SERAPH_WORKER_PARENT_PID`, `SERAPH_SETTINGS_ENV_FILE` (the env
+  file Python reads itself; empty loads none), optional `WORKSPACE_DIR`, a fixed
+  `PATH`, and locale/TZ. The worker refuses any other name, a credential, a
+  composition flag or an interpreter flag change with exit 64 before it loads a
+  setting.
+
+**Order.**
+1. `prctl(PR_SET_DUMPABLE, 0)` (Linux).
+2. Invocation check.
+3. `PR_SET_PDEATHSIG(SIGHUP)` (Linux), or a kqueue `NOTE_EXIT` watch (macOS),
+   then a check that the parent pid still matches.
+4. Frame pipes move off fds 0 and 1.
+5. Settings load, `boot_profile()`, the workspace owner lock (always held here),
+   then `ProviderWorker.activate()`: `state, authority, audit, tasks, vault`, then
+   `goals, memory, artifacts`.
+
+**Frames.** Frames are length-prefixed closed JSON with a boot nonce and strict
+sequence numbers. The first request is `worker.hello`.
+- Control methods are `worker.hello`, `worker.heartbeat`, `worker.status` and
+  `worker.shutdown`.
+- The ordinary method is `worker.readiness`. Ordinary requests may hold at most
+  28 of the 32 in-flight slots, and a queued control response is written before
+  queued ordinary responses.
+- No frame activates or deactivates a provider.
+- Payloads carry provider names, states and typed reasons only.
+
+**Stop and exit.** `worker.shutdown` (answered after the lock is released) and
+SIGTERM/SIGINT exit 0. Stdin EOF, PDEATHSIG or kqueue parent exit give 71. A
+busy lock gives 73, a mandatory activation failure 78 and a protocol violation 65.
+The full table is `worker_entry.EXIT_CODES`. Every exit writes one
+`seraph_worker_exit` JSON line to stderr, with no values.
+
+**macOS** has no `/proc` or `prctl`. The closed env keeps secrets out of
+`environ`, and kqueue replaces PDEATHSIG. Receipts are Linux only.
 
 ### Pinned credential vault (#1199)
 

@@ -104,7 +104,7 @@ _TZ_VALUE = re.compile(r"[A-Za-z0-9_+:/-]{1,64}\Z")
 
 # The exit-code table (review item 4). Codes follow sysexits(3) where one fits.
 EXIT_CODES: Mapping[str, int] = MappingProxyType({
-    "stopped": 0,                     # worker.shutdown, SIGTERM, SIGINT or a non-PDEATHSIG SIGHUP; orderly
+    "stopped": 0,                     # worker.shutdown, SIGTERM or SIGINT; orderly
     "invocation_refused": 64,         # interpreter flags, argv, env or stdio not closed
     "protocol_violation": 65,         # malformed, unknown or out-of-order frame; slots exhausted
     "composition_refused": 66,        # the composition profile or a patch layer was refused
@@ -113,6 +113,7 @@ EXIT_CODES: Mapping[str, int] = MappingProxyType({
     "parent_lost": 71,                # stdin EOF, broken stdout, PDEATHSIG, kqueue NOTE_EXIT, wrong parent at start
     "workspace_owner_busy": 73,       # another process holds the workspace owner lock
     "workspace_lock_unavailable": 74,  # the lock path is unsafe, unavailable or the root moved
+    "hangup": 75,                     # an unrequested SIGHUP that is not PDEATHSIG; orderly, but worker loss
     "mandatory_provider_failed": 78,  # state, authority, audit, tasks or vault failed to activate
 })
 EXIT_EVENT = "seraph_worker_exit"
@@ -123,7 +124,8 @@ _STOP_SIGNALS = ((signal.SIGTERM, "stopped", "worker_signal_terminate"),
                  (signal.SIGINT, "stopped", "worker_signal_interrupt"))
 # SIGHUP is parent death only when it is Linux's PDEATHSIG: the kernel
 # reparents the worker before delivering it, so the parent no longer matches.
-# Any other SIGHUP (macOS, or one sent by a process) is an orderly hangup stop.
+# Any other SIGHUP (macOS, a terminal hangup, or one sent by a process) is an
+# unrequested stop: orderly shutdown, but its own non-zero exit (``hangup``).
 
 
 class WorkerExit(Exception):
@@ -347,9 +349,11 @@ class FrameOutbox:
     ``on_broken`` once.
     """
 
-    def __init__(self, sink: Callable[[bytes], Awaitable[None]], *, on_broken: Callable[[], None] | None = None):
+    def __init__(self, sink: Callable[[bytes], Awaitable[None]], *, on_broken: Callable[[], None] | None = None,
+                 on_error: Callable[[], None] | None = None):
         self._sink = sink
         self._on_broken = on_broken
+        self._on_error = on_error
         self._control: deque[Callable[[int], bytes]] = deque()
         self._ordinary: deque[Callable[[int], bytes]] = deque()
         self._wake = asyncio.Event()
@@ -376,16 +380,24 @@ class FrameOutbox:
                 await self._wake.wait()
             build = (self._control or self._ordinary).popleft()
             self.sent += 1
-            data = build(self.sent)
+            try:
+                data = build(self.sent)
+            except Exception:  # noqa: BLE001 - a frame that cannot be encoded stops the worker
+                self._fail(self._on_error)
+                continue
             try:
                 await self._sink(data)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 # The parent's read end is gone: nothing more can be delivered.
-                self.broken = True
-                self._control.clear()
-                self._ordinary.clear()
-                if self._on_broken is not None:
-                    self._on_broken()
+                self._fail(self._on_broken)
+
+    def _fail(self, callback: Callable[[], None] | None) -> None:
+        """Nothing more is delivered: drop the queue (so ``flush`` returns) and report once."""
+        self.broken = True
+        self._control.clear()
+        self._ordinary.clear()
+        if callback is not None:
+            callback()
 
     async def flush(self) -> None:
         await self._idle.wait()
@@ -448,8 +460,9 @@ def _arm_parent_death(parent_pid: int, hardening: dict[str, Any]):
 
     On Linux, arming first and checking second closes the race where the
     parent dies before the hook exists: the check then sees a different
-    parent. On macOS the check comes first and the kqueue registration fails
-    with ESRCH for a parent that exited since.
+    parent. On macOS the check comes first (the distinct mismatch reason), then
+    the kqueue registration (ESRCH for a parent that exited since), then the
+    check again, so a pid reused in between is never watched in its place.
     """
     watch = None
     if sys.platform == "linux":
@@ -477,6 +490,11 @@ def _arm_parent_death(parent_pid: int, hardening: dict[str, Any]):
         except OSError as exc:
             watch.close()
             raise WorkerExit("parent_lost", "worker_parent_gone_at_start") from exc
+        if os.getppid() != parent_pid:
+            # The parent exited after the first check and its pid was reused before
+            # the registration: the watch names another process.
+            watch.close()
+            raise WorkerExit("parent_lost", "worker_parent_gone_at_start")
     return watch
 
 
@@ -628,7 +646,7 @@ async def _run(frames_in: int, frames_out: int, parent_pid: int, parent_watch, h
         if sys.platform == "linux" and os.getppid() != parent_pid:
             request_stop("parent_lost", "worker_parent_death_signal")
         else:
-            request_stop("stopped", "worker_signal_hangup")
+            request_stop("hangup", "worker_signal_hangup")
     loop.add_signal_handler(PARENT_DEATH_SIGNAL, hangup)
     if parent_watch is not None:
         def parent_exited() -> None:
@@ -649,7 +667,8 @@ async def _run(frames_in: int, frames_out: int, parent_pid: int, parent_watch, h
         stream.write(data)
         await stream.drain()
 
-    outbox = FrameOutbox(sink, on_broken=lambda: request_stop("parent_lost", "worker_stdout_broken"))
+    outbox = FrameOutbox(sink, on_broken=lambda: request_stop("parent_lost", "worker_stdout_broken"),
+                         on_error=lambda: request_stop("internal_error", "worker_frame_encode_failed"))
     writer = asyncio.create_task(outbox.run(), name="worker-entry-writer")
     try:
         return await _host(reader, outbox, stop, stop_reason, request_stop, hardening, report)

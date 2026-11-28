@@ -190,6 +190,48 @@ async def test_a_broken_pipe_drops_the_queue_and_flush_returns():
     assert outbox.sent == 1
 
 
+async def test_a_frame_that_cannot_be_encoded_stops_the_worker_instead_of_hanging_flush():
+    errors: list[bool] = []
+    written: list[bytes] = []
+
+    async def sink(data: bytes) -> None:
+        written.append(data)
+
+    def unencodable(seq: int) -> bytes:
+        raise ProtocolError("invalid status")
+
+    outbox = FrameOutbox(sink, on_error=lambda: errors.append(True))
+    writer = asyncio.create_task(outbox.run())
+    outbox.put(unencodable, control=True)
+    outbox.put(lambda seq: b"after", control=False)
+    await outbox.flush()
+    outbox.close()
+    await writer
+    assert errors == [True] and outbox.broken and written == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the kqueue parent watch is macOS-only; Linux arms PDEATHSIG")
+def test_macos_a_parent_gone_at_registration_or_reused_after_it_is_refused(monkeypatch):
+    import subprocess
+    from src.runtime_plugins import worker_entry
+    hardening = {"platform": "darwin", "dumpable": None, "parent_death_signal": None, "parent_watch": []}
+    # A reaped child's pid names no process: the kqueue registration fails with ESRCH.
+    completed = subprocess.run([sys.executable, "-I", "-c", "import os; print(os.getpid())"], check=True,
+                               capture_output=True, text=True)
+    dead_pid = int(completed.stdout)
+    monkeypatch.setattr(worker_entry.os, "getppid", lambda: dead_pid)
+    with pytest.raises(worker_entry.WorkerExit) as refused:
+        worker_entry._arm_parent_death(dead_pid, hardening)
+    assert (refused.value.name, refused.value.reason_code) == ("parent_lost", "worker_parent_gone_at_start")
+    # The parent matched at the first check, the registration succeeded (a live pid), then the parent no
+    # longer matched: a reused pid is never watched in the parent's place.
+    answers = iter([os.getpid(), os.getpid() + 7919])
+    monkeypatch.setattr(worker_entry.os, "getppid", lambda: next(answers))
+    with pytest.raises(worker_entry.WorkerExit) as refused:
+        worker_entry._arm_parent_death(os.getpid(), hardening)
+    assert (refused.value.name, refused.value.reason_code) == ("parent_lost", "worker_parent_gone_at_start")
+
+
 def test_frames_are_a_closed_method_set():
     nonce = "a" * 64
     good = {"protocol": 1, "boot_nonce": nonce, "request_id": "r1", "seq": 1, "kind": "request",
@@ -317,12 +359,12 @@ def test_sigterm_is_an_orderly_stop(workspace):
     assert record["workspace_lock"] == "released" and _lock_is_free(workspace)
 
 
-def test_a_sighup_while_the_parent_lives_is_an_orderly_hangup_not_parent_death(workspace):
+def test_an_unrequested_sighup_while_the_parent_lives_is_an_orderly_hangup_with_its_own_exit(workspace):
     worker = harness.spawn(workspace)
     worker.call("worker.hello")
     worker.process.send_signal(signal.SIGHUP)
     code, record = worker.finish()
-    assert (code, record["exit"], record["reason_code"]) == (0, "stopped", "worker_signal_hangup")
+    assert (code, record["exit"], record["reason_code"]) == (75, "hangup", "worker_signal_hangup")
     assert record["workspace_lock"] == "released" and _lock_is_free(workspace)
 
 
@@ -436,4 +478,6 @@ def test_exit_code_table_is_fixed():
     assert dict(EXIT_CODES) == {"stopped": 0, "invocation_refused": 64, "protocol_violation": 65,
                                 "composition_refused": 66, "hardening_unavailable": 69, "internal_error": 70,
                                 "parent_lost": 71, "workspace_owner_busy": 73, "workspace_lock_unavailable": 74,
-                                "mandatory_provider_failed": 78}
+                                "hangup": 75, "mandatory_provider_failed": 78}
+    # Only a stop the parent asked for (shutdown frame, SIGTERM, SIGINT) exits 0.
+    assert [name for name, code in EXIT_CODES.items() if code == 0] == ["stopped"]

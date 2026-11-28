@@ -1590,8 +1590,9 @@ sequence numbers. The first request is `worker.hello`.
 - No frame activates or deactivates a provider.
 - Payloads carry provider names, states and typed reasons only.
 
-**Stop and exit.** `worker.shutdown` (answered after the lock is released),
-SIGTERM/SIGINT and a SIGHUP that is not Linux's PDEATHSIG exit 0. Stdin EOF, a
+**Stop and exit.** `worker.shutdown` (answered after the lock is released) and
+SIGTERM/SIGINT exit 0. Any other SIGHUP exits 75 (`hangup`), and the parent treats
+every exit it did not ask for as worker loss. Stdin EOF, a
 broken stdout, PDEATHSIG (a SIGHUP after the parent is gone) or kqueue parent exit
 give 71. A dev uvicorn backend takes the lock only in prod, so it does not exclude a
 passive worker on the same workspace. No launcher pairs them in this phase, and

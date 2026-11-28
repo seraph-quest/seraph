@@ -42,7 +42,7 @@ Importing this module creates nothing: no task, timer, session or file.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timezone
@@ -185,6 +185,40 @@ async def assert_tick_fence(db) -> None:
         raise LifecycleFenced("composition_dependency_changed")
 
 
+def _step_guard(activation: Activation) -> Callable[[Any], None]:
+    """A commit guard: a transaction that wrote commits only while the tick's owner row is still exact."""
+    def guard(sync_session) -> None:
+        from sqlalchemy import select
+        from src.db.engine import transaction_wrote
+        if not transaction_wrote(sync_session):
+            return  # a read-only transaction has nothing to fence
+        ready = sync_session.scalar(select(domain_ready_predicate(
+            activation.domain, activation.owner_kind, activation.epoch, activation.composition_digest)))
+        if not ready:
+            raise LifecycleFenced("composition_dependency_changed")
+    return guard
+
+
+@contextmanager
+def fenced_step():
+    """Fence every transaction opened inside one ``run_pass`` step to the live tick epoch (#1025).
+
+    Each session the step opens through ``get_session`` re-checks the exact
+    ready owner inside its own transaction, right before it commits, when it
+    wrote anything. The check runs while the transaction holds SQLite's writer
+    lock, so no owner flip can commit between the check and the step's write:
+    a step whose owner row moved commits nothing (``LifecycleFenced``, rolled
+    back). Outside a lifecycle tick this is a no-op.
+    """
+    activation = _TICK.get()
+    if activation is None:
+        yield
+        return
+    from src.db.engine import commit_guard
+    with commit_guard(_step_guard(activation)):
+        yield
+
+
 def _now() -> str:
     return get_clock().now(timezone.utc).isoformat()
 
@@ -207,6 +241,8 @@ class RuntimeLifecycle:
         self._transitioning: dict[str, str] = {}
         self._last_attempt: dict[str, float] = {}
         self._notified: dict[str, str] = {}
+        # A failed transition reactivating at E is not a recovery (no "recovered" entry).
+        self._suppress_recovered: dict[str, bool] = {}
         self.worker_registry: Callable[[], dict] | None = None
         # (task_id, attempt_id, *, reason) -> outcome; the dispatcher's cleanup hook + cancel_job_tree.
         self.attempt_cleanup: Callable[..., Awaitable[dict]] | None = None
@@ -310,6 +346,8 @@ class RuntimeLifecycle:
             # Shutdown began (or never started): nothing reactivates after admission closed.
             return self.status(domain)
         if domain == SCHEDULER_DOMAIN and not self.scheduler_enabled:
+            if (self._status.get(domain) or {}).get("state") != "disabled":
+                await self._record_domain_state(domain, "disabled", None)
             self._set_status(domain, "disabled", "scheduler_disabled")
             return self.status(domain)
         async with self._lock(domain):
@@ -348,8 +386,11 @@ class RuntimeLifecycle:
             was_blocked = self._notified.pop(domain, None) is not None
             self._set_status(domain, "active", None, candidate)
             logger.info("Lifecycle %s active under %s@%d", domain, candidate.owner_kind, candidate.epoch)
-            if was_blocked:
+            cleared = await self._record_domain_state(domain, "ok", candidate.epoch)
+            if was_blocked or (cleared and not self._suppress_recovered.pop(domain, False)):
+                # A block persisted by an earlier process is cleared once, with its one recovered entry.
                 await self._activity(domain, "recovered", None)
+            self._suppress_recovered.pop(domain, None)
             return self.status(domain)
 
     async def ensure(self, domain: str) -> Activation | None:
@@ -467,16 +508,47 @@ class RuntimeLifecycle:
 
     async def _enter_blocked(self, domain: str, reason: str, *, activation: Activation | None = None,
                              mark_jobs: bool = True) -> None:
-        self._set_status(domain, "blocked", reason, activation)
+        status = self._set_status(domain, "blocked", reason, activation)
         if not mark_jobs:
             return
+        epoch = status.get("epoch")
         if self._notified.get(domain) is None:
-            # One notification and one Activity entry per domain transition into blocked.
+            # One notification and one Activity entry per domain transition into
+            # blocked. The transition is claimed durably in background_job_status
+            # (``notified_for``), so a block that outlives a restart is not announced twice.
             self._notified[domain] = reason
-            await self._activity(domain, "blocked", reason)
-            await self._notify(domain, reason)
+            if await self._claim_domain_block(domain, reason, epoch):
+                await self._activity(domain, "blocked", reason)
+                await self._notify(domain, reason)
         for job_id in self.gated_job_ids(domain):
-            record_job_blocked(job_id, reason)
+            await record_job_blocked(job_id, reason, epoch=epoch)
+
+    async def _claim_domain_block(self, domain: str, reason: str, epoch: int | None) -> bool:
+        from src.scheduler import job_status
+        try:
+            state = await job_status.record_blocked(job_status.domain_key(_SHORT[domain]), reason,
+                                                    lifecycle_recovery(reason), source=job_status.SOURCE_LIFECYCLE,
+                                                    epoch=epoch)
+        except Exception:  # noqa: BLE001 - at most once: losing one notification beats repeating it
+            # An unclaimed transition is not announced: after a restart it could be announced
+            # again. The in-memory status still shows the block with its fix.
+            logger.warning("Could not persist the %s domain block; it is not announced", domain, exc_info=True)
+            return False
+        return state["notify"]
+
+    async def _record_domain_state(self, domain: str, state: str, epoch: int | None) -> bool:
+        """Persist an active (``ok``) or ``disabled`` domain; return whether a stored block was cleared."""
+        from src.scheduler import job_status
+        key = job_status.domain_key(_SHORT[domain])
+        try:
+            if state == "disabled":
+                await job_status.record_disabled(key, "scheduler_disabled", lifecycle_recovery("scheduler_disabled"),
+                                                 epoch=epoch)
+                return False
+            return await job_status.record_ok(key, epoch=epoch)
+        except Exception:  # noqa: BLE001 - the in-memory status stays visible
+            logger.warning("Could not persist the %s domain status", domain, exc_info=True)
+            return False
 
     def gated_job_ids(self, domain: str) -> list[str]:
         from src.scheduler.engine import get_scheduler
@@ -526,13 +598,14 @@ class RuntimeLifecycle:
         if self.closing:
             return None  # shutdown: no tick runs and no block is persisted for a closing process
         if not self.managed:
-            record_job_blocked(job_id, "lifecycle_not_started")
+            await record_job_blocked(job_id, "lifecycle_not_started")
             return None
         activation = await self.ensure(domain)
         if activation is None:
             status = self._status.get(domain) or {}
             if status.get("state") != "disabled":
-                record_job_blocked(job_id, str(status.get("reason") or "lifecycle_not_started"))
+                await record_job_blocked(job_id, str(status.get("reason") or "lifecycle_not_started"),
+                                         epoch=status.get("epoch"))
             return None
         task = asyncio.current_task()
         token = _TICK.set(activation)
@@ -541,14 +614,20 @@ class RuntimeLifecycle:
         try:
             result = await run()
         except LifecycleBlocked as exc:
-            record_job_blocked(job_id, exc.reason_code)
+            _TICK.reset(token)
+            token = None
+            await record_job_blocked(job_id, exc.reason_code, epoch=activation.epoch)
             logger.warning("Scheduled job %s blocked by its lifecycle: %s", job_id, exc.reason_code)
             return None
         finally:
-            _TICK.reset(token)
+            if token is not None:
+                _TICK.reset(token)
             if task is not None:
                 self._inflight[domain].discard(task)
-        record_job_ok(job_id)
+        if self.current(domain) is activation:
+            # Only a tick that finished under the still-live activation clears a block: one that
+            # ends after its domain was deactivated (a fresh block at the same epoch) keeps it.
+            await record_job_ok(job_id, epoch=activation.epoch)
         return result
 
     def require_dispatch_active(self) -> None:
@@ -666,6 +745,7 @@ class RuntimeLifecycle:
             # A failed transition is not a recovery: no "recovered" entry when the
             # unchanged row reactivates at E.
             self._notified.pop(domain, None)
+            self._suppress_recovered[domain] = True
             # Whatever happened, the row decides: reactivate if it is still ready (never while closing).
             self._last_attempt.pop(domain, None)
             try:
@@ -700,18 +780,19 @@ def _dispatch_drain_seconds() -> float:
     return float(MAX_RUNTIME_SECONDS) + SETTLEMENT_SECONDS
 
 
-def record_job_blocked(job_id: str, reason: str) -> None:
+async def record_job_blocked(job_id: str, reason: str, *, epoch: int | None = None) -> None:
+    """Persist one job's lifecycle block in ``background_job_status`` (monotonic in ``epoch``)."""
     from src.scheduler.background_inference import record_scheduler_job_blocked
     try:
-        record_scheduler_job_blocked(job_id, reason, lifecycle_recovery(reason))
+        await record_scheduler_job_blocked(job_id, reason, lifecycle_recovery(reason), epoch=epoch)
     except Exception:  # noqa: BLE001 - the domain status stays the visible record
         logger.warning("Could not record the %s block", job_id, exc_info=True)
 
 
-def record_job_ok(job_id: str) -> None:
+async def record_job_ok(job_id: str, *, epoch: int | None = None) -> None:
     from src.scheduler.background_inference import record_scheduler_job_ok
     try:
-        record_scheduler_job_ok(job_id)
+        await record_scheduler_job_ok(job_id, epoch=epoch)
     except Exception:  # noqa: BLE001
         logger.warning("Could not clear the %s block", job_id, exc_info=True)
 
@@ -735,7 +816,9 @@ async def lifecycle_runtime_status(domain: str) -> dict[str, Any]:
     result = {**status, **row_payload}
     if domain == SCHEDULER_DOMAIN:
         from src.scheduler.background_inference import scheduler_job_blocks
-        result["blocked_jobs"] = scheduler_job_blocks()
+        # A disabled scheduler runs no gated tick, so stored per-job blocks are history, not
+        # current blocks: they are not listed next to "disabled" (#1025).
+        result["blocked_jobs"] = [] if status.get("state") == "disabled" else await scheduler_job_blocks()
     return result
 
 

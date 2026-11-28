@@ -1693,8 +1693,16 @@ effects re-check the exact ready owner (`domain_ready` `EXISTS` on
 `runtime_composition_states`) inside their own transaction: the
 `ScheduledJobRun` insert, governed `reserve_occurrence` and
 `claim_occurrence`, and WorkBoard `promote_task_ready`, `claim_ready_task` and
-`block_ready_task`. `run_pass` also checks at each mutating step boundary. A
-moved row refuses with `composition_dependency_changed` before any contact.
+`block_ready_task`. `run_pass` checks at each mutating step boundary and also
+runs each maintenance step (inbox expiry and repair, review-window expiry,
+NEAR finance recovery, attempt and linked reconciliation, linked pipeline
+recovery, expired repository roots) under `lifecycle.fenced_step`: every
+session the step opens through `get_session` re-checks the owner row inside
+its own transaction right before commit when it wrote anything (a
+`before_commit` commit guard from `db.engine.commit_guard`), while the
+transaction holds SQLite's writer lock, so a step whose owner moved commits
+nothing. Work a step spawns inherits the guard. A moved row refuses with
+`composition_dependency_changed` before any contact.
 API and manual writes outside a tick are not gated. API launches that enter the
 live-worker registry (research recovery, document comparison retry) refuse
 with `dispatch_owner_not_active` while dispatch is not active.
@@ -1737,23 +1745,63 @@ status shows `last_transition` (`succeeded` or `failed` with its reason).
 Visibility: `/api/runtime/status` gains `scheduler_runtime` and
 `dispatch_runtime` (`state`, `reason`, `recovery`, the row's `owner`,
 `owner_epoch` and `owner_state`, in-flight and live-worker counts, and the
-scheduler's `blocked_jobs`). Entering `blocked` raises one notification and one
-Activity entry per domain; repeated blocked ticks only update the job's
-persisted status, and the first activation after a block writes one
-`recovered` Activity entry. Per-job lifecycle blocks are stored in the same
-status record as the background-inference toggles
-(`background-inference-status.json`), so Settings → Automation → Background inference shows
-them for inference jobs; a lifecycle block is cleared only by that job's next
-tick under an active domain.
+scheduler's `blocked_jobs`). Settings → Cordis runtime host lists both domains
+(state, owner and epoch, the fix, the last transition and the blocked jobs),
+and the cockpit's runtime-owner banner shows a domain that is not active (a
+disabled scheduler is not shown). Entering `blocked` raises one notification
+and one Activity entry per domain; repeated blocked ticks only update the
+job's persisted status, and the first activation after a block writes one
+`recovered` Activity entry.
+
+Status record (D2): per-job and per-domain status lives in the
+`background_job_status` table (`src/scheduler/job_status.py`): `job_id`,
+`state` (`ok`, `skipped`, `blocked`, `disabled`), `reason_code`, `recovery`,
+`source` (lifecycle, guardian or inference), `since`, `last_attempt_at`,
+`last_success_at`, `epoch` and `notified_for`. It holds status, never work.
+Each write is one `BEGIN IMMEDIATE` read-decide-write and a monotonic-epoch
+upsert (a stale tick never overwrites or clears a newer epoch's status); it
+has no ready fence, because a block must be writable while the owner is not
+ready. The one notification of a transition into `blocked` is claimed in the
+same transaction (`notified_for` = that block's `since`) and delivered after
+commit: at most once per transition, also across a restart (a crash between
+claim and delivery loses that notification; the persisted block stays
+visible). A repeated identical skip (a job polled every second) is a
+lock-free read with no write until its audit is due, so its
+`last_attempt_at` advances with each audited skip. The background-inference toggles, guardian blocks (#1020), lifecycle
+blocks, missed fires (`EVENT_JOB_MISSED`) and the `disabled` scheduler all use
+it. The #1020 JSON status file (`background-inference-status.json`) is folded
+into the table once per workspace on first use and removed; an unreadable or
+invalid file is left in place and not imported. Settings →
+Automation → Background inference reads it; a lifecycle block is cleared only
+by that job's next tick under an active domain.
 
 Proof limits: verified with temporary SQLite state and, for the Cordis owner,
 host loss and live transitions, the real reviewed child; external transport
-and inference denied. Not yet done: the durable `background_job_status` table
-(D2) replacing the JSON status record, Settings and cockpit banner rendering of
-the two domain statuses, fences inside each `run_pass` step's own transaction
-(today a separate read at each step boundary), and race tests for governed
-occurrences, WorkBoard claims and a pending approval at cutover on a real
-board.
+and inference denied. Lifecycle mechanics (classification, retention
+exemption, disabled scheduler, restart at the current epoch, drain bound and
+cleanup through `cancel_job_tree`, unknown drains never flipping, crash after
+the flip, boot order without the proof, shutdown) are in
+`backend/tests/test_scheduler_lifecycle_1025.py` and
+`test_cordis_cutover.py`; the status table, step fences and races are in
+`test_scheduler_dispatch_races_1025.py`. A controlled clock drives dispatch
+ticks that claim in priority order, hold a scheduled task until its time and
+board capacity until a running task settles, and never skip it. Not yet
+proven: a controlled-clock test that cancels the running attempt through the
+real operator cancel path (`cancel_task`) and then claims the freed capacity;
+operator cancellation is the unchanged dispatcher path, covered by its own
+tests and reused by the drain. Races are tested on a real governed occurrence (two
+ticks reserve one occurrence; one claim wins; a stale epoch reserves none), a
+real WorkBoard claim (two dispatch ticks create one attempt; a stale epoch
+claims none and leaves the task Ready) and a real dispatch cutover with a task
+awaiting approval (the cutover completes, the task stays visibly blocked, and
+once answered it is claimed under the new epoch). Not done: an older binary
+still rejects an inventory that contains `seraph.dispatch.v1`, so going back
+to an older build needs the pre-upgrade backup; the notification is not
+written in the same transaction as the native outbox row (it is claimed in
+the status transaction and delivered once after commit); the step guard sees
+only writes whose SQL starts with `INSERT`/`UPDATE`/`DELETE`/`REPLACE`/`BEGIN
+IMMEDIATE`; the real-child cutover tests skip where the reviewed Cordis
+package is not built.
 
 ### Cordis guardian research (#1008)
 

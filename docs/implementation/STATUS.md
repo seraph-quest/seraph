@@ -441,24 +441,36 @@ See the
 
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
-**Partial**: the one Python scheduler and the WorkBoard dispatcher run only
-while their owner rows (`seraph.scheduler.v1`, new `seraph.dispatch.v1`) are
-ready at an epoch and, once cut over to Cordis (at boot only on the running
-reviewed child's proof; otherwise they stay on the identical legacy owner),
-while that child proves the domain's plugin. Retention and cleanup jobs are exempt. Timers keep
-their phase and a non-active domain refuses ticks at entry with a visible
-block; stale epochs are fenced inside the run, occurrence and board
-transactions; deactivation drains within the original bounds, then stops
-leftover attempts through their own cleanup and `cancel_job_tree`, and never
-flips the owner while cleanup is unproven; live operator transitions drain at
-E before the flip; shutdown is bounded and closes admission first. `seraph.dispatch.v1` is
-added once to the exact post-#1024 inventory, forward-only. Verified with
-temporary state and the real reviewed child; external transport and inference
-denied. Partial because per-job blocks still use the background-inference JSON
-status record (the D2 status table is not built), Settings and the cockpit
-banner do not yet render the domain statuses (they are in
-`/api/runtime/status`), and governed-occurrence/board-claim race tests on a
-real board are pending. See the
+**Partial**: the one Python scheduler and the WorkBoard
+dispatcher run only while their owner rows (`seraph.scheduler.v1`, new
+`seraph.dispatch.v1`) are ready at an epoch and, once cut over to Cordis (at
+boot only on the running reviewed child's proof; otherwise they stay on the
+identical legacy owner), while that child proves the domain's plugin.
+Retention and cleanup jobs are exempt. Timers keep their phase and a
+non-active domain refuses ticks at entry with a visible block; stale epochs
+are fenced inside the run, occurrence and board transactions and inside each
+`run_pass` maintenance step's own write transactions; deactivation drains
+within the original bounds, then stops leftover attempts through their own
+cleanup and `cancel_job_tree`, and never flips the owner while cleanup is
+unproven; live operator transitions drain at E before the flip; shutdown is
+bounded and closes admission first. Per-job and per-domain status is the
+durable `background_job_status` table (monotonic in the epoch, one claimed
+notification per blocked transition; the #1020 JSON status file is folded in
+and removed). Settings and the cockpit banner render the scheduler and
+dispatch domains. `seraph.dispatch.v1` is added once to the exact post-#1024
+inventory, forward-only. Verified with temporary state, races on a real
+governed occurrence and a real board claim, and the real reviewed child for
+cutover (including a pending approval); external transport and inference
+denied. Partial because one acceptance proof is missing: no controlled-clock
+test cancels a running attempt through the real operator cancel path
+(`WorkBoardDispatcher.cancel_task`) and then shows the freed capacity claimed
+on the next tick; the controlled-clock test frees capacity by settling the
+running task, and operator cancel is proven only by the existing dispatcher
+tests and the #1171 drain tests. Documented limits (not blockers): an older
+binary rejects an inventory with `seraph.dispatch.v1` (downgrade needs the
+pre-upgrade backup), and the blocked notification is claimed in the status
+transaction and delivered after commit rather than written in the native
+outbox's transaction. See the
 [guide section](./12-current-app-guide.md#scheduler-and-dispatcher-lifecycle-1025).
 
 **Cordis guardian research** from

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { blockedRuntimeDomains, chatRuntimeLabel, guardianRuntimeLabel, normalizeChatRuntime, normalizeCordisRuntime,
-  normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
-import type { ChatRuntimeStatus, CordisRuntimeSnapshot, GuardianRuntimeStatus, RuntimeDomainStatus } from "../../lib/cordisRuntime";
+import { blockedRuntimeDomains, chatRuntimeLabel, guardianRuntimeLabel, lifecycleNeedsAction, lifecycleRuntimeLabel,
+  lifecycleRuntimeOrUnavailable, normalizeChatRuntime, normalizeCordisRuntime, normalizeGuardianRuntime,
+  normalizeRuntimeDomains } from "../../lib/cordisRuntime";
+import type { ChatRuntimeStatus, CordisRuntimeSnapshot, GuardianRuntimeStatus, LifecycleRuntimeStatus,
+  RuntimeDomainStatus } from "../../lib/cordisRuntime";
 
 const CHAT_DOMAIN = "seraph.agent-loop.v1";
 const DELEGATION_DOMAIN = "seraph.delegation.v1";
@@ -13,6 +15,7 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
   const [chat, setChat] = useState<ChatRuntimeStatus | null>(null);
   const [guardian, setGuardian] = useState<GuardianRuntimeStatus | null>(null);
   const [domains, setDomains] = useState<RuntimeDomainStatus[]>([]);
+  const [lifecycle, setLifecycle] = useState<LifecycleRuntimeStatus[]>([]);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const generation = useRef(0), controller = useRef<AbortController | null>(null);
   async function refresh() {
@@ -28,7 +31,10 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       const chatStatus = normalizeChatRuntime(value && typeof value === "object" && "chat_runtime" in value ? value.chat_runtime : null);
       const guardianStatus = normalizeGuardianRuntime(value && typeof value === "object" && "guardian_runtime" in value ? value.guardian_runtime : null);
       const domainRows = normalizeRuntimeDomains(value && typeof value === "object" && "runtime_domains" in value ? value.runtime_domains : null);
-      if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setGuardian(guardianStatus); setDomains(domainRows); setError(null); }
+      const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      const lifecycleRows = [lifecycleRuntimeOrUnavailable(raw.scheduler_runtime, "seraph.scheduler.v1"),
+        lifecycleRuntimeOrUnavailable(raw.dispatch_runtime, "seraph.dispatch.v1")];
+      if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setGuardian(guardianStatus); setDomains(domainRows); setLifecycle(lifecycleRows); setError(null); }
     } catch { if (version === generation.current) setError("Cordis runtime metadata is unavailable. Last confirmed state remains visible; refresh after restoring the host. Artifact settings remain usable."); }
     finally { clearTimeout(timeout); if (version === generation.current) setBusy(false); }
   }
@@ -111,6 +117,14 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
     {moveError && <p role="status" className="text-yellow-400">{moveError}</p>}
     {guardian && <p role="status" aria-label="Guardian loop">{guardianRuntimeLabel(guardian)}</p>}
     {guardian?.loop === "blocked" && guardian.recovery && <p role="status">Guardian fix: {guardian.recovery}</p>}
+    {lifecycle.length > 0 && <ul aria-label="Scheduler and dispatch lifecycle">
+      {lifecycle.map(item => <li key={item.domain}>
+        <span role="status">{lifecycleRuntimeLabel(item)}</span>
+        {lifecycleNeedsAction(item) && item.recovery && <span> · fix: {item.recovery}</span>}
+        {item.last_transition && <span> · last transition {item.last_transition.status} → {item.last_transition.target}{item.last_transition.reason ? ` (${item.last_transition.reason})` : ""}</span>}
+        {item.blocked_jobs.length > 0 && <span> · blocked jobs: {item.blocked_jobs.map(job => `${job.job_id} (${job.reason})`).join(", ")}</span>}
+      </li>)}
+    </ul>}
     {blockedRuntimeDomains(domains).length > 0 && <ul aria-label="Runtime domains needing action">
       {blockedRuntimeDomains(domains).map(item => <li key={item.domain}>{item.domain}: {item.state}{item.reason ? ` · ${item.reason}` : ""}{item.recovery ? ` · fix: ${item.recovery}` : ""}</li>)}
     </ul>}

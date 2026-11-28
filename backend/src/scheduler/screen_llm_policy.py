@@ -112,7 +112,7 @@ async def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDeci
 
     if runtime_path == "end_of_day_goal_report" and not background_inference_job_enabled(runtime_path):
         # The deterministic report still runs; only its model analysis is off.
-        record_background_inference_skip(runtime_path)
+        await record_background_inference_skip(runtime_path)
         return ScreenDerivedLlmDecision(
             allowed=False,
             reason=DISABLED_BY_OPERATOR,

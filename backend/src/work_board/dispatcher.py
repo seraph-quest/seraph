@@ -2995,11 +2995,19 @@ class WorkBoardDispatcher:
             await assert_tick_fence(db)
 
     async def run_pass(self) -> dict[str, Any]:
+        from src.runtime_plugins.lifecycle import fenced_step
         observed_at = self.now()
+        # #1025: every maintenance step checks the live dispatch epoch at its
+        # start and, through ``fenced_step``, again inside each of its own
+        # write transactions before they commit. The claim step's writes are
+        # fenced by ``promote/claim/block`` themselves.
         await self._lifecycle_step()
         try:
-            inbox_expired = await expire_inbox_items(limit=20)
-            inbox_repaired = await repair_inbox_dispositions(limit=20)
+            with fenced_step():
+                inbox_expired = await expire_inbox_items(limit=20)
+                inbox_repaired = await repair_inbox_dispositions(limit=20)
+        except LifecycleBlocked:
+            raise
         except Exception:
             # Inbox projection repair is bounded optional reconciliation. A
             # board dispatch pass must remain available when its DB write is
@@ -3008,16 +3016,23 @@ class WorkBoardDispatcher:
             inbox_expired = 0
             inbox_repaired = 0
         await self._lifecycle_step()
-        expired_reviews = await self._expire_review_windows(now=observed_at)
+        with fenced_step():
+            expired_reviews = await self._expire_review_windows(now=observed_at)
         await self._lifecycle_step()
-        await self.recover_expired_near_finance(now=observed_at)
+        with fenced_step():
+            await self.recover_expired_near_finance(now=observed_at)
         await self._lifecycle_step()
-        reconciled = await self.reconcile_pending_attempts(now=observed_at)
+        with fenced_step():
+            reconciled = await self.reconcile_pending_attempts(now=observed_at)
         await self._lifecycle_step()
-        linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
+        with fenced_step():
+            linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
         await self._lifecycle_step()
         try:
-            await self._recover_linked_pipelines()
+            with fenced_step():
+                await self._recover_linked_pipelines()
+        except LifecycleBlocked:
+            raise
         except Exception:
             logger.warning("bounded linked pipeline recovery unavailable")
         source = getattr(self.general_tasks, "repository_source_service", None)
@@ -3027,7 +3042,8 @@ class WorkBoardDispatcher:
             try:
                 from src.workflows.repo_repair_stop import close_expired_repository_roots
                 await self._lifecycle_step()
-                await close_expired_repository_roots(source, self.jobs)
+                with fenced_step():
+                    await close_expired_repository_roots(source, self.jobs)
             except LifecycleBlocked:
                 raise
             except Exception:

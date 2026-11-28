@@ -90,7 +90,7 @@ async def run_screenshot_observation_digest() -> None:
             await report_guardian_blocked("screenshot_observation_digest", exc)
             return
         if result.status in {"created", "updated"}:
-            report_guardian_succeeded("screenshot_observation_digest")
+            await report_guardian_succeeded("screenshot_observation_digest")
         await log_scheduler_job_event(
             job_name=SCREENSHOT_DIGEST_TOOL_NAME,
             outcome="succeeded",

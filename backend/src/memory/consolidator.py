@@ -107,7 +107,7 @@ async def consolidate_session(
                 outcome="timed_out",
                 should_cache_fingerprint=False,
             )
-        report_guardian_succeeded("memory_consolidation")
+        await report_guardian_succeeded("memory_consolidation")
         persist_result = await persist_extracted_memories(
             extracted_memories=extraction.memories,
             session_id=session_id,

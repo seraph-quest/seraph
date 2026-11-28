@@ -223,7 +223,8 @@ class TestSchedulerEngine:
         assert completed
 
     @pytest.mark.asyncio
-    async def test_async_job_wrapper_binds_unique_model_service_identity_and_cleans_up(self):
+    async def test_async_job_wrapper_binds_unique_model_service_identity_and_cleans_up(self, db):
+        # The wrapper reads the job's durable status row (#1025 D2), so it needs the test database.
         from src.approval.runtime import get_current_trust_principal
         from src.scheduler.engine import _async_job_wrapper
         from src.security.trust_contract import AuthorityGrant, PrincipalType
@@ -251,7 +252,7 @@ class TestSchedulerEngine:
         assert get_current_trust_principal() is None
 
     @pytest.mark.asyncio
-    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self, model_fabric_workspace):
+    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self, db, model_fabric_workspace):
         """ADR-035 retired world: with a usable NEAR TEE text slot the route is
         active, so the canonical context reaches the identity fence, and a
         non-model scheduler job is refused for lacking model_inference."""

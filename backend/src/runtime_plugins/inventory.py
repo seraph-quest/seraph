@@ -290,6 +290,8 @@ OWNERS: tuple[Owner, ...] = (
         "src.runtime_plugins.lifecycle:RuntimeLifecycle": "lifecycle_method",
         "src.scheduler.engine:init_scheduler": "scheduler_job",
         "src.scheduler.engine:sync_scheduled_jobs": "scheduler_job",
+        # The EVENT_JOB_MISSED listener's durable status write (#1025 D2), one tracked task per dropped fire.
+        "src.scheduler.engine:_record_missed_fire": "background_task",
         **{f"{_JOB}{job}]": "scheduler_job" for job in (
             "programme_daily_digest", "goal_public_discovery", "memory_consolidation", "goal_check",
             "calendar_scan", "strategist_tick", "guardian_opportunity_assessment", "daily_briefing",

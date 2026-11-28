@@ -785,7 +785,7 @@ async def run_opportunity_tick():
     # a queued candidate stays visible with the skip reason until its deadline.
     paused = background_inference_skip_reason("guardian_opportunity_assessment")
     if paused:
-        record_background_inference_skip("guardian_opportunity_assessment", paused)
+        await record_background_inference_skip("guardian_opportunity_assessment", paused)
     else:
         # ADR-035 (#1156): with no usable route for the assessment model step,
         # hold queued candidates exactly like the toggle above (visible reason,

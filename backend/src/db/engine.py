@@ -169,6 +169,54 @@ _session_factory_override: ContextVar[Callable[[], AsyncSession] | None] = Conte
     "seraph_session_factory_override", default=None
 )
 
+# A commit guard (#1025): a sync check run inside the transaction, before it
+# commits, by every session ``session_scope`` opened while the guard was set in
+# the opening task's context. The lifecycle uses it to fence each ``run_pass``
+# step's own transactions to the live dispatch epoch. A raise rolls the
+# transaction back. ``commit_guard(None)`` opens unguarded sessions inside a
+# guarded scope (for status writes that must land while a domain is blocked).
+_commit_guard: ContextVar[Callable[[object], None] | None] = ContextVar("seraph_commit_guard", default=None)
+_COMMIT_GUARD_KEY = "seraph_commit_guard"
+
+
+@contextmanager
+def commit_guard(guard: Callable[[object], None] | None) -> Iterator[None]:
+    token = _commit_guard.set(guard)
+    try:
+        yield
+    finally:
+        _commit_guard.reset(token)
+
+
+def transaction_wrote(sync_session) -> bool:
+    """Whether the session's open transaction already ran a lock-taking (write) statement.
+
+    It reads the marker ``_note_write_start`` sets for a statement that starts
+    with ``INSERT``/``UPDATE``/``DELETE``/``REPLACE``/``BEGIN IMMEDIATE`` (ORM
+    flushes and executemany included). Known limit: a write whose SQL starts
+    otherwise (a ``WITH ...`` CTE write, or a leading comment) is not marked,
+    so a commit guard does not see it; Seraph's writers do not emit those.
+    """
+    if not sync_session.in_transaction():
+        return False
+    return _WRITE_STARTED_AT in sync_session.connection().info
+
+
+def _run_commit_guard(sync_session) -> None:
+    guard = sync_session.info.get(_COMMIT_GUARD_KEY)
+    if guard is None:
+        return
+    # Pending ORM changes are written now, so the guard sees whether this transaction writes.
+    # SQLAlchemy permits flush and SELECT in before_commit; the guard's read runs on the
+    # transaction's own connection, so it adds no lock and no lock-ordering edge.
+    sync_session.flush()
+    guard(sync_session)
+
+
+from sqlalchemy.orm import Session as _OrmSession  # noqa: E402
+
+event.listen(_OrmSession, "before_commit", _run_commit_guard)
+
 
 class StateProviderUnavailable(RuntimeError):
     """The canonical state provider is failed or shutting down (#1024)."""
@@ -2419,6 +2467,9 @@ async def session_scope(
     factory. Tests that hold their own database handle use it directly.
     """
     async with factory() as session:
+        guard = _commit_guard.get()
+        if guard is not None:
+            session.info[_COMMIT_GUARD_KEY] = guard
         try:
             yield session
             await session.commit()

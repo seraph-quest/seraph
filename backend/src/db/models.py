@@ -2143,6 +2143,39 @@ class RuntimeCompositionState(SQLModel, table=True):
     recovery_receipt_ref: Optional[str] = Field(default=None)
 
 
+class BackgroundJobStatus(SQLModel, table=True):
+    """The last visible status of one scheduled job or lifecycle domain (#1025 D2).
+
+    Status, never work: a row is not a queue entry, is never replayed and
+    never starts anything. ``job_id`` is a scheduler job id (system job,
+    ``user_cron:<id>``) or a lifecycle domain key (``lifecycle:scheduler``,
+    ``lifecycle:dispatch``). Writes are a monotonic-epoch upsert
+    (``src.scheduler.job_status``): a stale tick never overwrites a newer
+    epoch's status. Times are ISO-8601 UTC strings.
+    """
+
+    __tablename__ = "background_job_status"
+    __table_args__ = (
+        CheckConstraint("state IN ('ok', 'skipped', 'blocked', 'disabled')", name="ck_background_job_status_state"),
+    )
+
+    job_id: str = Field(primary_key=True)
+    state: str  # ok | skipped | blocked | disabled
+    reason_code: str = Field(default="")
+    recovery: Optional[str] = Field(default=None)
+    # Who wrote the status: lifecycle (#1025), guardian (#1020) or inference (#1112 toggles).
+    source: str = Field(default="inference")
+    since: str
+    last_attempt_at: str
+    last_success_at: Optional[str] = Field(default=None)
+    epoch: Optional[int] = Field(default=None)
+    # The ``since`` of the blocked transition that already raised its one notification.
+    notified_for: Optional[str] = Field(default=None)
+    # The last skip audit (one per transition, then hourly) and the last blocked Activity entry.
+    audited_at: Optional[str] = Field(default=None)
+    activity_at: Optional[str] = Field(default=None)
+
+
 class InferenceAccountingOwner(SQLModel, table=True):
     """Deployment budget metadata owned by DurableJobRepository."""
 

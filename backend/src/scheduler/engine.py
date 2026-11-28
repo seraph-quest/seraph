@@ -76,9 +76,13 @@ def _lifecycle_job(func, *, job_id: str):
 
 def _record_missed_fire(event) -> None:
     """A fire dropped past its misfire grace stays visible (``skipped / missed_fire``)."""
+    # The listener runs on the scheduler's event loop; the durable status write is one tracked task.
     try:
+        import asyncio
         from src.scheduler.background_inference import record_scheduler_job_missed
-        record_scheduler_job_missed(str(event.job_id))
+        from src.utils.background import track_task
+        asyncio.get_running_loop()
+        track_task(record_scheduler_job_missed(str(event.job_id)), name="scheduler_missed_fire_status")
     except Exception:
         logger.warning("Could not record a missed fire of %s", getattr(event, "job_id", "?"), exc_info=True)
 
@@ -98,13 +102,13 @@ async def _skip_disabled_inference_job(job_id: str) -> bool:
     if not is_whole_job_toggle(job_id):
         return False
     if background_inference_job_enabled(job_id):
-        record_background_inference_run(job_id)
+        await record_background_inference_run(job_id)
         return False
     _enabled, error = read_background_inference_settings()
     reason = SETTINGS_UNREADABLE if error else DISABLED_BY_OPERATOR
     # Audited once per transition, then hourly (#1112): screenshot folder
     # analysis polls every second.
-    if record_background_inference_skip(job_id, reason):
+    if await record_background_inference_skip(job_id, reason):
         from src.audit.runtime import log_scheduler_job_event
 
         await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})

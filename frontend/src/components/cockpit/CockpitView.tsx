@@ -1,6 +1,6 @@
 import { RuntimeOwnerBanner } from "./RuntimeOwnerBanner";
-import { normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
-import type { GuardianRuntimeStatus, RuntimeDomainStatus } from "../../lib/cordisRuntime";
+import { lifecycleRuntimeOrUnavailable, normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
+import type { GuardianRuntimeStatus, LifecycleRuntimeStatus, RuntimeDomainStatus } from "../../lib/cordisRuntime";
 import { HomeMethodInspection } from "./HomeMethodInspection";
 import type { HomeTarget } from "../../lib/homeContinuation";
 import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseStored, githubCapacityCloseInspection, type GitHubCapacityCloseInspection } from "../../lib/githubReadback";
@@ -7918,8 +7918,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [composer, setComposer] = useState("");
   const [runtimeReceipt, setRuntimeReceipt] = useState<RuntimeReceipt | null>(() => loadStoredRuntimeReceipt());
-  const [runtimeOwners, setRuntimeOwners] = useState<{ guardian: GuardianRuntimeStatus | null; domains: RuntimeDomainStatus[] }>(
-    { guardian: null, domains: [] });
+  const [runtimeOwners, setRuntimeOwners] = useState<{ guardian: GuardianRuntimeStatus | null; domains: RuntimeDomainStatus[];
+    lifecycle: LifecycleRuntimeStatus[] }>({ guardian: null, domains: [], lifecycle: [] });
   const [observerState, setObserverState] = useState<ObserverState | null>(null);
   const [auditEvents, setAuditEvents] = useState<CockpitAuditEvent[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
@@ -8464,9 +8464,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ? normalizeRuntimeStatus(runtimeStatusResult.payload)
       : null;
     if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
-      const raw = runtimeStatusResult.payload as { guardian_runtime?: unknown; runtime_domains?: unknown };
+      const raw = runtimeStatusResult.payload as { guardian_runtime?: unknown; runtime_domains?: unknown;
+        scheduler_runtime?: unknown; dispatch_runtime?: unknown };
       setRuntimeOwners({ guardian: normalizeGuardianRuntime(raw.guardian_runtime ?? null),
-        domains: normalizeRuntimeDomains(raw.runtime_domains ?? null) });
+        domains: normalizeRuntimeDomains(raw.runtime_domains ?? null),
+        lifecycle: [lifecycleRuntimeOrUnavailable(raw.scheduler_runtime, "seraph.scheduler.v1"),
+          lifecycleRuntimeOrUnavailable(raw.dispatch_runtime, "seraph.dispatch.v1")] });
     }
     if (ownsShellData && runtimeStatusPayload) {
       storeRuntimeReceipt(runtimeStatusPayload);
@@ -8866,9 +8869,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (isCancelled() || !claimShellDataWrite(generation)) return;
     const runtimeStatusPayload = runtimeStatusResult.ok ? normalizeRuntimeStatus(runtimeStatusResult.payload) : null;
     if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
-      const raw = runtimeStatusResult.payload as { guardian_runtime?: unknown; runtime_domains?: unknown };
+      const raw = runtimeStatusResult.payload as { guardian_runtime?: unknown; runtime_domains?: unknown;
+        scheduler_runtime?: unknown; dispatch_runtime?: unknown };
       setRuntimeOwners({ guardian: normalizeGuardianRuntime(raw.guardian_runtime ?? null),
-        domains: normalizeRuntimeDomains(raw.runtime_domains ?? null) });
+        domains: normalizeRuntimeDomains(raw.runtime_domains ?? null),
+        lifecycle: [lifecycleRuntimeOrUnavailable(raw.scheduler_runtime, "seraph.scheduler.v1"),
+          lifecycleRuntimeOrUnavailable(raw.dispatch_runtime, "seraph.dispatch.v1")] });
     }
     if (runtimeStatusPayload) {
       storeRuntimeReceipt(runtimeStatusPayload);
@@ -16770,7 +16776,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         </div>
       </header>
 
-      <RuntimeOwnerBanner guardian={runtimeOwners.guardian} domains={runtimeOwners.domains} />
+      <RuntimeOwnerBanner guardian={runtimeOwners.guardian} domains={runtimeOwners.domains} lifecycle={runtimeOwners.lifecycle} />
 
       <div className={`cockpit-main-stage ${chatDockOpen ? "cockpit-main-stage--dock-open" : "cockpit-main-stage--dock-closed"}`}>
         <CockpitSectionNav

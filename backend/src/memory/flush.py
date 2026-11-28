@@ -87,7 +87,7 @@ async def flush_session_memory(
     # the operator's memory_consolidation toggle gates them all here. The
     # fingerprint stays uncached, so a later catch-up can still consolidate.
     if not background_inference_job_enabled("memory_consolidation"):
-        record_background_inference_skip("memory_consolidation")
+        await record_background_inference_skip("memory_consolidation")
         return False
     fingerprint = await _build_session_flush_fingerprint(session_id)
     if fingerprint is None:

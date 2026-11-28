@@ -378,7 +378,8 @@ def test_the_patch_file_owner_must_be_the_service_user_root_or_the_workspace_own
 
 
 @pytest.mark.asyncio
-async def test_the_lifecycle_and_programme_digest_gates_see_the_booted_patch(tmp_path, monkeypatch):
+async def test_the_lifecycle_and_programme_digest_gates_see_the_booted_patch(db, tmp_path, monkeypatch):
+    # A disabled scheduler is recorded in the durable background_job_status table (#1025 D2).
     from config.settings import settings
     from src.guardian.programme_digest import source_schedule
     from src.runtime_plugins.lifecycle import RuntimeLifecycle

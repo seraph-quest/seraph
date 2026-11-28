@@ -1590,7 +1590,7 @@ async def send_end_of_day_report_test_email():
 @router.get("/settings/background-inference")
 async def get_background_inference_settings():
     """Return per-job background inference toggles with call estimates."""
-    return background_inference_status()
+    return await background_inference_status()
 
 
 @router.put("/settings/background-inference")
@@ -1613,7 +1613,7 @@ async def set_background_inference_settings(body: BackgroundInferenceSettingsReq
             status_code=500,
             detail={"code": "background_inference_settings_persist_failed", "message": "Toggles were not saved."},
         ) from exc
-    return background_inference_status()
+    return await background_inference_status()
 
 
 @router.get("/settings/tool-policy-mode")

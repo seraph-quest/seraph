@@ -168,7 +168,7 @@ async def run_weekly_activity_review() -> None:
                 "total_tracked_minutes": summary.get("total_tracked_minutes", 0),
             },
         )
-        report_guardian_succeeded("weekly_activity_review")
+        await report_guardian_succeeded("weekly_activity_review")
         logger.info("weekly_activity_review: delivered weekly review")
 
     except Exception as exc:

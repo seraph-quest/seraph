@@ -14,9 +14,11 @@ Order, which the design review fixes (items 2, 3, 4 and 7 on #1026):
 2. The invocation is checked: interpreter flags, the exact argv, the closed
    environment and pipe-backed stdio. Any deviation exits
    ``invocation_refused`` before a setting, lock or database is touched.
-3. Parent loss is armed: ``PR_SET_PDEATHSIG`` (``SIGHUP``) on Linux, a kqueue
-   ``NOTE_EXIT`` watch on macOS, then a check that the parent is still the one
-   the environment names. stdin EOF is the third, portable signal.
+3. Parent loss is armed: ``PR_SET_PDEATHSIG`` (``SIGHUP``) on Linux, then a
+   check that the parent is still the one the environment names; on macOS the
+   check, then a kqueue ``NOTE_EXIT`` watch. stdin EOF and a broken stdout
+   are the portable signals. The parent must spawn from a long-lived thread:
+   Linux sends PDEATHSIG when the forking thread exits.
 4. The frame pipes move off fds 0 and 1 to private non-inheritable
    descriptors, so a later grandchild can neither inject frames nor keep the
    parent-loss pipe open.
@@ -97,19 +99,18 @@ PLATFORM_ENV: Mapping[str, Mapping[str, re.Pattern[str]]] = MappingProxyType({
     "darwin": MappingProxyType({"__CF_USER_TEXT_ENCODING": re.compile(r"0x[0-9A-Fa-f]+:0x[0-9A-Fa-f]+:0x[0-9A-Fa-f]+\Z")}),
 })
 WORKER_PATH = "/usr/bin:/bin"
-_PATH_VALUE = re.compile(r"[A-Za-z0-9_./:@+-]{1,512}\Z")
 _LOCALE_VALUE = re.compile(r"[A-Za-z0-9_.@-]{1,64}\Z")
 _TZ_VALUE = re.compile(r"[A-Za-z0-9_+:/-]{1,64}\Z")
 
 # The exit-code table (review item 4). Codes follow sysexits(3) where one fits.
 EXIT_CODES: Mapping[str, int] = MappingProxyType({
-    "stopped": 0,                     # worker.shutdown, SIGTERM or SIGINT; orderly
+    "stopped": 0,                     # worker.shutdown, SIGTERM, SIGINT or a non-PDEATHSIG SIGHUP; orderly
     "invocation_refused": 64,         # interpreter flags, argv, env or stdio not closed
     "protocol_violation": 65,         # malformed, unknown or out-of-order frame; slots exhausted
     "composition_refused": 66,        # the composition profile or a patch layer was refused
     "hardening_unavailable": 69,      # prctl failed on Linux; never runs unhardened
     "internal_error": 70,             # an unexpected exception
-    "parent_lost": 71,                # stdin EOF, PDEATHSIG, kqueue NOTE_EXIT or a reparented start
+    "parent_lost": 71,                # stdin EOF, broken stdout, PDEATHSIG, kqueue NOTE_EXIT, wrong parent at start
     "workspace_owner_busy": 73,       # another process holds the workspace owner lock
     "workspace_lock_unavailable": 74,  # the lock path is unsafe, unavailable or the root moved
     "mandatory_provider_failed": 78,  # state, authority, audit, tasks or vault failed to activate
@@ -119,8 +120,10 @@ EXIT_EVENT = "seraph_worker_exit"
 _PR_SET_PDEATHSIG, _PR_GET_PDEATHSIG, _PR_GET_DUMPABLE, _PR_SET_DUMPABLE = 1, 2, 3, 4
 PARENT_DEATH_SIGNAL = signal.SIGHUP
 _STOP_SIGNALS = ((signal.SIGTERM, "stopped", "worker_signal_terminate"),
-                 (signal.SIGINT, "stopped", "worker_signal_interrupt"),
-                 (PARENT_DEATH_SIGNAL, "parent_lost", "worker_parent_death_signal"))
+                 (signal.SIGINT, "stopped", "worker_signal_interrupt"))
+# SIGHUP is parent death only when it is Linux's PDEATHSIG: the kernel
+# reparents the worker before delivering it, so the parent no longer matches.
+# Any other SIGHUP (macOS, or one sent by a process) is an orderly hangup stop.
 
 
 class WorkerExit(Exception):
@@ -155,7 +158,14 @@ def worker_launch(*, interpreter: str | os.PathLike[str], parent_pid: int, setti
     interpreter, root = os.fspath(interpreter), os.fspath(backend_root)
     if not os.path.isabs(interpreter) or not os.path.isfile(interpreter) or not os.access(interpreter, os.X_OK):
         raise ValueError("worker_interpreter_not_pinned")
-    if not os.path.isabs(root) or not (Path(root) / "src" / "runtime_plugins" / "worker.py").is_file():
+    if not os.path.isabs(root):
+        raise ValueError("worker_backend_root_invalid")
+    try:
+        # The worker compares argv[1] with its own resolved root, so a symlinked path is resolved here.
+        root = str(Path(root).resolve(strict=True))
+    except OSError as exc:
+        raise ValueError("worker_backend_root_invalid") from exc
+    if not (Path(root) / "src" / "runtime_plugins" / "worker.py").is_file():
         raise ValueError("worker_backend_root_invalid")
     if type(parent_pid) is not int or parent_pid <= 1:
         raise ValueError("worker_parent_pid_invalid")
@@ -190,16 +200,18 @@ def _env_problem(env: Mapping[str, str], *, platform: str | None) -> tuple[str, 
             if not injected[name].fullmatch(value):
                 bad.append(name)
         elif name == PARENT_PID_ENV:
-            if not value.isdigit() or int(value) <= 1:
+            if not (value.isascii() and value.isdigit()) or int(value) <= 1:
                 bad.append(name)
         elif name in {SETTINGS_ENV_FILE_ENV, WORKSPACE_ENV}:
             if (value or name == WORKSPACE_ENV) and not os.path.isabs(value):
                 bad.append(name)
         elif name == "PATH":
-            if not _PATH_VALUE.fullmatch(value):
+            if value != WORKER_PATH:
                 bad.append(name)
         elif name == "TZ":
-            if not _TZ_VALUE.fullmatch(value):
+            # A zone name only: never an absolute or relative zoneinfo file path.
+            zone = value[1:] if value.startswith(":") else value
+            if not _TZ_VALUE.fullmatch(value) or zone.startswith("/") or ".." in zone:
                 bad.append(name)
         elif not _LOCALE_VALUE.fullmatch(value):
             bad.append(name)
@@ -326,22 +338,31 @@ class SlotAdmission:
 
 
 class FrameOutbox:
-    """One writer; a queued control frame is always written before any queued ordinary frame."""
+    """One writer; a queued control frame is always written before any queued ordinary frame.
 
-    def __init__(self, sink: Callable[[bytes], Awaitable[None]]):
+    The outbound ``seq`` is stamped when a frame is popped for the wire, not
+    when it is queued, so the parent always reads ``seq == previous + 1`` even
+    after a control frame overtook queued ordinary frames. A queued item is a
+    builder ``seq -> bytes``. A broken pipe drops the queue and calls
+    ``on_broken`` once.
+    """
+
+    def __init__(self, sink: Callable[[bytes], Awaitable[None]], *, on_broken: Callable[[], None] | None = None):
         self._sink = sink
-        self._control: deque[bytes] = deque()
-        self._ordinary: deque[bytes] = deque()
+        self._on_broken = on_broken
+        self._control: deque[Callable[[int], bytes]] = deque()
+        self._ordinary: deque[Callable[[int], bytes]] = deque()
         self._wake = asyncio.Event()
         self._idle = asyncio.Event()
         self._idle.set()
         self._closing = False
         self.broken = False
+        self.sent = 0
 
-    def put(self, data: bytes, *, control: bool) -> None:
+    def put(self, build: Callable[[int], bytes], *, control: bool) -> None:
         if self.broken:
             return
-        (self._control if control else self._ordinary).append(data)
+        (self._control if control else self._ordinary).append(build)
         self._idle.clear()
         self._wake.set()
 
@@ -353,7 +374,9 @@ class FrameOutbox:
                     return
                 self._wake.clear()
                 await self._wake.wait()
-            data = (self._control or self._ordinary).popleft()
+            build = (self._control or self._ordinary).popleft()
+            self.sent += 1
+            data = build(self.sent)
             try:
                 await self._sink(data)
             except (BrokenPipeError, ConnectionResetError, OSError):
@@ -361,6 +384,8 @@ class FrameOutbox:
                 self.broken = True
                 self._control.clear()
                 self._ordinary.clear()
+                if self._on_broken is not None:
+                    self._on_broken()
 
     async def flush(self) -> None:
         await self._idle.wait()
@@ -421,8 +446,10 @@ def _validate_invocation() -> int:
 def _arm_parent_death(parent_pid: int, hardening: dict[str, Any]):
     """Step 3: PDEATHSIG (Linux) or a kqueue exit watch (macOS), then the reparent check.
 
-    Arming first and checking second closes the race where the parent dies
-    before the hook exists: the check then sees a different parent.
+    On Linux, arming first and checking second closes the race where the
+    parent dies before the hook exists: the check then sees a different
+    parent. On macOS the check comes first and the kqueue registration fails
+    with ESRCH for a parent that exited since.
     """
     watch = None
     if sys.platform == "linux":
@@ -437,7 +464,10 @@ def _arm_parent_death(parent_pid: int, hardening: dict[str, Any]):
         except (OSError, AttributeError) as exc:
             raise WorkerExit("hardening_unavailable", "worker_prctl_unavailable") from exc
         hardening["parent_death_signal"] = int(PARENT_DEATH_SIGNAL)
-    elif sys.platform == "darwin":
+    if os.getppid() != parent_pid:
+        raise WorkerExit("parent_lost", "worker_parent_mismatch_at_start")
+    if sys.platform == "darwin":
+        # Checked first, then watched: a parent that exits in between makes the registration fail (ESRCH).
         import select
         watch = select.kqueue()
         try:
@@ -447,10 +477,6 @@ def _arm_parent_death(parent_pid: int, hardening: dict[str, Any]):
         except OSError as exc:
             watch.close()
             raise WorkerExit("parent_lost", "worker_parent_gone_at_start") from exc
-    if os.getppid() != parent_pid:
-        if watch is not None:
-            watch.close()
-        raise WorkerExit("parent_lost", "worker_parent_gone_at_start")
     return watch
 
 
@@ -483,7 +509,7 @@ class _Session:
         self.hardening, self.env_names = hardening, env_names
         self.admission = SlotAdmission()
         self.boot_nonce: str | None = None
-        self.received = self.sent = 0
+        self.received = 0
         self.in_flight: set[str] = set()
         self.tasks: set[asyncio.Task] = set()
 
@@ -566,10 +592,10 @@ class _Session:
             self.admission.release(control=False)
 
     def _respond(self, request: dict[str, Any], payload: dict[str, Any], *, control: bool) -> None:
-        self.sent += 1
         response = {"protocol": PROTOCOL, "boot_nonce": self.boot_nonce, "request_id": request["request_id"],
-                    "seq": self.sent, "kind": "response", "method": request["method"], "payload": payload}
-        self.outbox.put(encode(response, kind="response"), control=control)
+                    "seq": 1, "kind": "response", "method": request["method"], "payload": payload}
+        encode(response, kind="response")  # validate now: a bad payload fails its own request, not the writer
+        self.outbox.put(lambda seq: encode({**response, "seq": seq}, kind="response"), control=control)
 
     async def drain(self) -> None:
         """Finish every admitted ordinary request; none is abandoned mid-way."""
@@ -584,7 +610,7 @@ def _projection(snapshot: dict[str, Any]) -> dict[str, Any]:
             "mandatory_ready": bool(snapshot["mandatory_ready"])}
 
 
-async def _run(frames_in: int, frames_out: int, parent_watch, hardening: dict[str, Any],
+async def _run(frames_in: int, frames_out: int, parent_pid: int, parent_watch, hardening: dict[str, Any],
                report: dict[str, Any]) -> _Outcome:
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -597,6 +623,13 @@ async def _run(frames_in: int, frames_out: int, parent_watch, hardening: dict[st
 
     for signum, name, reason_code in _STOP_SIGNALS:
         loop.add_signal_handler(signum, request_stop, name, reason_code)
+
+    def hangup() -> None:
+        if sys.platform == "linux" and os.getppid() != parent_pid:
+            request_stop("parent_lost", "worker_parent_death_signal")
+        else:
+            request_stop("stopped", "worker_signal_hangup")
+    loop.add_signal_handler(PARENT_DEATH_SIGNAL, hangup)
     if parent_watch is not None:
         def parent_exited() -> None:
             # The kqueue descriptor stays readable: stop watching, then stop.
@@ -616,7 +649,7 @@ async def _run(frames_in: int, frames_out: int, parent_watch, hardening: dict[st
         stream.write(data)
         await stream.drain()
 
-    outbox = FrameOutbox(sink)
+    outbox = FrameOutbox(sink, on_broken=lambda: request_stop("parent_lost", "worker_stdout_broken"))
     writer = asyncio.create_task(outbox.run(), name="worker-entry-writer")
     try:
         return await _host(reader, outbox, stop, stop_reason, request_stop, hardening, report)
@@ -625,7 +658,7 @@ async def _run(frames_in: int, frames_out: int, parent_watch, hardening: dict[st
         await asyncio.gather(writer, return_exceptions=True)
         read_transport.close()
         write_transport.close()
-        for signum, _, _ in _STOP_SIGNALS:
+        for signum in (*(item[0] for item in _STOP_SIGNALS), PARENT_DEATH_SIGNAL):
             loop.remove_signal_handler(signum)
         if parent_watch is not None:
             loop.remove_reader(parent_watch.fileno())
@@ -687,7 +720,6 @@ async def _host(reader, outbox: FrameOutbox, stop: asyncio.Event, stop_reason: l
                             provider_worker.detach()
         if outcome.ack is not None:
             session._respond(outcome.ack, {"state": "stopped", "workspace_lock": "released"}, control=True)
-            session.admission.release(control=True)
         await outbox.flush()
         return outcome
     finally:
@@ -716,7 +748,7 @@ def main() -> int:
         parent_watch = _arm_parent_death(parent_pid, hardening)
         try:
             frames_in, frames_out = _detach_stdio()
-            outcome = asyncio.run(_run(frames_in, frames_out, parent_watch, hardening, report))
+            outcome = asyncio.run(_run(frames_in, frames_out, parent_pid, parent_watch, hardening, report))
         finally:
             if parent_watch is not None:
                 parent_watch.close()

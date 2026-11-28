@@ -1585,12 +1585,17 @@ sequence numbers. The first request is `worker.hello`.
   `worker.shutdown`.
 - The ordinary method is `worker.readiness`. Ordinary requests may hold at most
   28 of the 32 in-flight slots, and a queued control response is written before
-  queued ordinary responses.
+  queued ordinary responses. The response `seq` is stamped when a frame goes on
+  the wire, so it stays strictly +1 in wire order.
 - No frame activates or deactivates a provider.
 - Payloads carry provider names, states and typed reasons only.
 
-**Stop and exit.** `worker.shutdown` (answered after the lock is released) and
-SIGTERM/SIGINT exit 0. Stdin EOF, PDEATHSIG or kqueue parent exit give 71. A
+**Stop and exit.** `worker.shutdown` (answered after the lock is released),
+SIGTERM/SIGINT and a SIGHUP that is not Linux's PDEATHSIG exit 0. Stdin EOF, a
+broken stdout, PDEATHSIG (a SIGHUP after the parent is gone) or kqueue parent exit
+give 71. A dev uvicorn backend takes the lock only in prod, so it does not exclude a
+passive worker on the same workspace. No launcher pairs them in this phase, and
+phase 2 (#1210) removes the pairing. A
 busy lock gives 73, a mandatory activation failure 78 and a protocol violation 65.
 The full table is `worker_entry.EXIT_CODES`. Every exit writes one
 `seraph_worker_exit` JSON line to stderr, with no values.

@@ -25,9 +25,9 @@ INTERPRETER = str(BACKEND / ".venv" / "bin" / "python") if (BACKEND / ".venv" / 
 READ_BOUND_SECONDS = 120.0
 
 
-def launch(workspace: Path, *, parent_pid: int | None = None):
+def launch(workspace: Path, *, parent_pid: int | None = None, backend_root: Path = BACKEND):
     return worker_launch(interpreter=os.path.abspath(INTERPRETER), parent_pid=parent_pid or os.getpid(),
-                         settings_env_file="", workspace_dir=str(workspace))
+                         settings_env_file="", workspace_dir=str(workspace), backend_root=backend_root)
 
 
 def request(nonce: str, seq: int, method: str, payload: dict | None = None) -> bytes:
@@ -107,8 +107,8 @@ class Worker:
         return code, record
 
 
-def spawn(workspace: Path, *, argv=None, env=None) -> Worker:
-    spec = launch(workspace)
+def spawn(workspace: Path, *, argv=None, env=None, backend_root: Path = BACKEND) -> Worker:
+    spec = launch(workspace, backend_root=backend_root)
     process = subprocess.Popen(list(argv or spec.argv), env=dict(spec.env if env is None else env), cwd=spec.cwd,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return Worker(process, secrets.token_hex(32))

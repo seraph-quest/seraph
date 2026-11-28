@@ -7,6 +7,7 @@ Linux CI and skip elsewhere with the reason.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import signal
@@ -60,6 +61,26 @@ def test_launch_is_a_pinned_interpreter_with_a_closed_argv_and_env(workspace):
                       settings_env_file="relative/.env")
     with pytest.raises(ValueError, match="worker_parent_pid_invalid"):
         worker_launch(interpreter=os.path.abspath(harness.INTERPRETER), parent_pid=1, settings_env_file="")
+    for zone in ("/etc/localtime", ":/etc/localtime", "../../etc/passwd"):
+        with pytest.raises(ValueError, match="worker_env_invalid"):
+            worker_launch(interpreter=os.path.abspath(harness.INTERPRETER), parent_pid=os.getpid(),
+                          settings_env_file="", timezone=zone)
+    assert worker_launch(interpreter=os.path.abspath(harness.INTERPRETER), parent_pid=os.getpid(),
+                         settings_env_file="", timezone="Europe/Paris").env["TZ"] == "Europe/Paris"
+
+
+def test_a_symlinked_backend_root_is_resolved_and_the_worker_starts(workspace, tmp_path):
+    link = tmp_path / "backend-link"
+    link.symlink_to(harness.BACKEND, target_is_directory=True)
+    spec = harness.launch(workspace, backend_root=link)
+    assert spec.argv[-1] == str(harness.BACKEND.resolve()) and spec.cwd == spec.argv[-1]
+    worker = harness.spawn(workspace, backend_root=link)
+    try:
+        assert worker.call("worker.hello")["state"] == "ready"
+        assert worker.call("worker.shutdown")["workspace_lock"] == "released"
+    finally:
+        code, _ = worker.finish()
+    assert code == 0
 
 
 def test_the_closed_env_lines_up_with_the_source_inventory():
@@ -108,11 +129,11 @@ async def test_a_queued_control_frame_is_written_before_queued_ordinary_frames()
 
     outbox = FrameOutbox(sink)
     writer = asyncio.create_task(outbox.run())
-    outbox.put(b"ordinary-1", control=False)
+    outbox.put(lambda seq: b"ordinary-1", control=False)
     await entered.wait()  # the writer took ordinary-1 and is blocked in the sink
-    outbox.put(b"ordinary-2", control=False)
-    outbox.put(b"ordinary-3", control=False)
-    outbox.put(b"control-1", control=True)
+    outbox.put(lambda seq: b"ordinary-2", control=False)
+    outbox.put(lambda seq: b"ordinary-3", control=False)
+    outbox.put(lambda seq: b"control-1", control=True)
     gate.set()
     await outbox.flush()
     outbox.close()
@@ -120,18 +141,53 @@ async def test_a_queued_control_frame_is_written_before_queued_ordinary_frames()
     assert written == [b"ordinary-1", b"control-1", b"ordinary-2", b"ordinary-3"]
 
 
+def _response(method: str, request_id: str, payload: dict, seq: int) -> dict:
+    return {"protocol": 1, "boot_nonce": "b" * 64, "request_id": request_id, "seq": seq, "kind": "response",
+            "method": method, "payload": payload}
+
+
+async def test_outbound_seq_advances_by_one_in_wire_order_when_control_overtakes():
+    """The seq is stamped at pop, so a control frame that overtakes queued ordinary frames keeps seq strict."""
+    written: list[dict] = []
+    gate, entered = asyncio.Event(), asyncio.Event()
+
+    async def sink(data: bytes) -> None:
+        entered.set()
+        await gate.wait()
+        written.append(validate_frame(json.loads(data[4:]), kind="response"))
+
+    readiness = {"providers": [], "mandatory_ready": True}
+    outbox = FrameOutbox(sink)
+    writer = asyncio.create_task(outbox.run())
+    for request_id in ("o1", "o2", "o3"):
+        outbox.put(lambda seq, rid=request_id: encode(_response("worker.readiness", rid, readiness, seq),
+                                                        kind="response"), control=False)
+    await entered.wait()  # o1 is on the wire (blocked); o2 and o3 are queued
+    outbox.put(lambda seq: encode(_response("worker.heartbeat", "c1", {"state": "alive"}, seq), kind="response"),
+               control=True)
+    gate.set()
+    await outbox.flush()
+    outbox.close()
+    await writer
+    assert [frame["request_id"] for frame in written] == ["o1", "c1", "o2", "o3"]
+    assert [frame["seq"] for frame in written] == [1, 2, 3, 4]
+
+
 async def test_a_broken_pipe_drops_the_queue_and_flush_returns():
     async def sink(data: bytes) -> None:
         raise BrokenPipeError
 
-    outbox = FrameOutbox(sink)
+    broken: list[bool] = []
+    outbox = FrameOutbox(sink, on_broken=lambda: broken.append(True))
     writer = asyncio.create_task(outbox.run())
-    outbox.put(b"a", control=False)
-    outbox.put(b"b", control=True)
+    outbox.put(lambda seq: b"a", control=False)
+    outbox.put(lambda seq: b"b", control=True)
     await outbox.flush()
     outbox.close()
     await writer
-    assert outbox.broken
+    assert outbox.broken and broken == [True]
+    outbox.put(lambda seq: b"c", control=True)  # dropped: nothing more can be delivered
+    assert outbox.sent == 1
 
 
 def test_frames_are_a_closed_method_set():
@@ -201,6 +257,9 @@ def test_a_mandatory_failure_aborts_before_any_degradable_provider(workspace):
     ({"OPENROUTER_API_KEY": "redacted-test-value"}, "worker_env_not_closed"),
     ({"SERAPH_WORKER_PARENT_PID": None}, "worker_env_incomplete"),
     ({"WORKSPACE_DIR": "relative"}, "worker_env_invalid"),
+    ({"PATH": "/opt/evil/bin:/usr/bin:/bin"}, "worker_env_invalid"),
+    ({"TZ": "/etc/localtime"}, "worker_env_invalid"),
+    ({"SERAPH_WORKER_PARENT_PID": "\u0661\u0662\u0663"}, "worker_env_invalid"),
 ])
 def test_an_unclosed_env_is_refused_before_settings_or_the_lock(workspace, change, reason):
     env = dict(harness.launch(workspace).env)
@@ -258,6 +317,28 @@ def test_sigterm_is_an_orderly_stop(workspace):
     assert record["workspace_lock"] == "released" and _lock_is_free(workspace)
 
 
+def test_a_sighup_while_the_parent_lives_is_an_orderly_hangup_not_parent_death(workspace):
+    worker = harness.spawn(workspace)
+    worker.call("worker.hello")
+    worker.process.send_signal(signal.SIGHUP)
+    code, record = worker.finish()
+    assert (code, record["exit"], record["reason_code"]) == (0, "stopped", "worker_signal_hangup")
+    assert record["workspace_lock"] == "released" and _lock_is_free(workspace)
+
+
+def test_a_broken_stdout_stops_the_worker_as_parent_loss(workspace):
+    worker = harness.spawn(workspace)
+    worker.call("worker.hello")
+    worker.process.stdout.close()  # the parent's read end is gone; stdin stays open
+    worker.send("worker.heartbeat")  # its answer meets the broken pipe
+    record = harness.read_exit(worker.process.stderr.fileno())
+    worker.process.stdin.close()
+    code = worker.process.wait(timeout=harness.READ_BOUND_SECONDS)
+    worker.process.stderr.close()
+    assert (code, record["exit"], record["reason_code"]) == (71, "parent_lost", "worker_stdout_broken")
+    assert record["workspace_lock"] == "released" and _lock_is_free(workspace)
+
+
 def test_stdin_eof_is_parent_loss_with_a_clean_shutdown(workspace):
     worker = harness.spawn(workspace)
     worker.call("worker.hello")
@@ -300,10 +381,10 @@ def test_parent_death_without_stdin_eof_is_seen_by_the_platform_hook(workspace):
     assert record["workspace_lock"] == "released"
 
 
-def test_a_start_whose_parent_is_already_gone_is_refused(workspace):
+def test_a_start_under_a_parent_other_than_the_named_one_is_refused(workspace):
     env = dict(harness.launch(workspace).env, SERAPH_WORKER_PARENT_PID=str(os.getpid() + 7919))
     code, record = harness.run_refused(workspace, env=env)
-    assert (code, record["reason_code"]) == (71, "worker_parent_gone_at_start")
+    assert (code, record["reason_code"]) == (71, "worker_parent_mismatch_at_start")
     assert list(workspace.iterdir()) == []
 
 
@@ -339,7 +420,7 @@ def test_non_linux_reports_no_linux_hardening(workspace):
         worker.finish()
 
 
-def test_readiness_is_ordinary_and_answered_after_control(workspace):
+def test_readiness_is_served_as_an_ordinary_request(workspace):
     worker = harness.spawn(workspace)
     try:
         worker.call("worker.hello")

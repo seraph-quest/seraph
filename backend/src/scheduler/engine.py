@@ -154,7 +154,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
     """
     global _scheduler, _scheduler_loop
 
-    from src.runtime_plugins.profiles import scheduler_enabled
+    from src.runtime_plugins.profiles import (scheduler_enabled, screenshot_folder_ingest_enabled,
+                                              screenshot_observation_digest_enabled)
     if not scheduler_enabled(settings.scheduler_enabled):
         logger.info("Scheduler disabled (SCHEDULER_ENABLED=false or seraph.scheduler.v1#enabled patch row)")
         return None
@@ -293,7 +294,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "screenshot_folder_ingest",
             "name": "Screenshot folder image ingest",
-            "next_run_time": _startup_next_run(bool(settings.screenshot_folder_ingest_enabled)),
+            "next_run_time": _startup_next_run(
+                screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled)),
             "misfire_grace_time": 120,
         },
         {
@@ -303,7 +305,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "screenshot_folder_analysis",
             "name": "Screenshot folder semantic analysis",
-            "next_run_time": _startup_next_run(bool(settings.screenshot_folder_ingest_enabled), delay_seconds=10),
+            "next_run_time": _startup_next_run(
+                screenshot_folder_ingest_enabled(settings.screenshot_folder_ingest_enabled), delay_seconds=10),
             "misfire_grace_time": 120,
         },
         {
@@ -313,7 +316,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
             ),
             "id": "screenshot_observation_digest",
             "name": "Screenshot observation digest",
-            "next_run_time": _startup_next_run(bool(settings.screenshot_observation_digest_enabled)),
+            "next_run_time": _startup_next_run(
+                screenshot_observation_digest_enabled(settings.screenshot_observation_digest_enabled)),
             "misfire_grace_time": 120,
         },
         {

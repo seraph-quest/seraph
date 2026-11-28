@@ -457,7 +457,8 @@ class ToolRegistry:
             repository = repository_work_descriptor()
             entries[repository.tool_id] = (repository, None, False)
         from config.settings import settings
-        if (settings.use_delegation and self.delegation_service is not None
+        from src.runtime_plugins.profiles import delegation_enabled
+        if (delegation_enabled(settings.use_delegation) and self.delegation_service is not None
             and self.delegation_service.started and is_tool_allowed("delegate_task", mode)):
             from src.workflows.specialist_delegation import delegation_descriptor
             delegated = delegation_descriptor()

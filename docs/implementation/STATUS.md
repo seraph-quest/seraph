@@ -334,12 +334,12 @@ profile patch, operator patch `<workspace>/composition.patch.json`). It refuses
 to boot with a typed reason and a logged fix when one of these holds:
 - a profile omits or reorders `seraph-trust`, or drops a core bundle;
 - a patch row touches a pinned trust domain, names a security switch (no-login,
-  auth, bind host, deployment environment) or carries a non-catalogued or
-  non-boolean value;
+  auth, bind host, deployment environment, and the #1206 switches) or carries a
+  non-catalogued, non-boolean or (on a disable-only row) `true` value;
 - `prod` meets no-login.
 
 The first composition flag is a row: `seraph.scheduler.v1#enabled`, with
-`SCHEDULER_ENABLED` as its base layer. A patch value changes actual scheduler
+`SCHEDULER_ENABLED` as its base layer (#1206 adds the rest, below). A patch value changes actual scheduler
 activation (the engine, the lifecycle domain and the status/digest gates). The
 composition dump's `profile` (id, source, bundles, digest, patch presence) and
 `effective_patch` are now real, live and offline (`./manage.sh -e dev
@@ -359,8 +359,28 @@ Partial because:
   `patch_provider_unreviewed`);
 - the patch file is not a declared workspace state path, so backup and restore
   do not carry it;
-- the other composition env flags move in
-  [#1206](https://github.com/seraph-quest/seraph/issues/1206).
+- no env base layer is retired yet: `SCHEDULER_ENABLED` is deprecated (still
+  honoured, logged and audited at boot) and every flag's removal is its own
+  issue ([#1337](https://github.com/seraph-quest/seraph/issues/1337) to
+  [#1341](https://github.com/seraph-quest/seraph/issues/1341)).
+
+**Composition env flags** from
+[#1206](https://github.com/seraph-quest/seraph/issues/1206) (A3.3 slice 3) are
+**Partial**. Every composition flag is a catalogued patch row with a typed
+schema and a removal issue: `SCHEDULER_ENABLED`, `USE_DELEGATION`, and the
+disable-only `SCREENSHOT_FOLDER_INGEST_ENABLED`,
+`SCREENSHOT_OBSERVATION_DIGEST_ENABLED` and `END_OF_DAY_REPORT_ENABLED` (a patch
+can turn them off, never on). Each row's readers use the effective
+value, so a patch row changes the actual jobs, delegation and settings payload,
+and an install without a patch file behaves exactly as its environment says.
+Every other boolean setting, launcher flag (`DAEMON_ENABLED`, `PROXY_ENABLED`),
+direct environment read in `backend/src` and screen-analysis selector is a
+classified security switch that stays an environment setting, a classified
+non-flag read (credential, path, platform, server process), or a diagnostic. A
+guard test fails on an unclassified name; string selectors stay review-only. The env base layer has a removal path (supported, deprecated, retired).
+A retired flag that would change behaviour refuses boot with the row to add,
+instead of being dropped silently. The composition dump shows the row
+catalogue and each row's env source. Partial because no flag is retired yet.
 
 See the
 [guide section](./12-current-app-guide.md#bundles-named-profiles-and-the-patch-layer-1204).

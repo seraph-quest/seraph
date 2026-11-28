@@ -64,7 +64,8 @@ def get_base_tools_and_active_skills() -> tuple[list, list[str], str]:
             wrap_tools_for_secret_refs(filter_tools(discover_tools(), tool_mode))
         )
     )
-    if not settings.use_delegation:
+    from src.runtime_plugins.profiles import delegation_enabled
+    if not delegation_enabled(settings.use_delegation):
         native_tools = [tool for tool in native_tools if tool.name != "delegate_task"]
     filtered_mcp_tools = filter_tools(
         mcp_manager.get_tools(),
@@ -344,7 +345,8 @@ def build_agent(
 
     Drop-in replacement for create_agent() at call sites.
     """
-    if settings.use_delegation:
+    from src.runtime_plugins.profiles import delegation_enabled
+    if delegation_enabled(settings.use_delegation):
         if guardian_state is not None:
             return create_orchestrator(
                 additional_context,

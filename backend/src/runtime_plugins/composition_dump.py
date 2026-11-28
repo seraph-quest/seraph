@@ -5,11 +5,13 @@ their runtime domains, each domain's owner row (owner, epoch, state, owner
 digest), the reviewed Cordis provider digest and, for the live dump, the
 plugin state the running child reports; which domains and trust services are
 pinned; the validated named profile (ADR-036 §6, #1204) with the bundles it
-selects; and the effective patch rows its layers set.
+selects; the effective patch rows its layers set; and (#1206) the patch-row
+catalogue with each row's env base layer stage and source.
 
 It is built only from an allow-list of non-secret fields: reason codes,
-digests, epochs and fixed names. It never reads settings, environment values,
-the vault or any credential. ``live_composition_dump`` serves
+digests, epochs and fixed names. It never reads the vault or any credential;
+the only environment facts are the booted profile's record of whether each
+catalogued boolean row flag was set (the offline dump reads none). ``live_composition_dump`` serves
 ``/api/runtime/status`` and ``/api/runtime/composition/dump``;
 ``offline_composition_dump`` serves ``./manage.sh -e dev composition dump``,
 which opens the workspace database read-only and never starts the child.
@@ -99,6 +101,12 @@ def build_composition_dump(rows: dict[str, Any] | None, *, inventory_state: str,
         # ADR-036 §6 (#1204): the validated profile and the rows its patch layers set.
         "profile": _profile_payload(profile),
         "effective_patch": profile.effective_patch if isinstance(profile, ComposedProfile) else [],
+        # #1206: each catalogued row's env base layer: its removal stage and
+        # whether the environment, a patch or the default supplies it. Booleans
+        # and fixed names only; the offline dump never reads the environment.
+        "patch_rows": [row.payload() for row in PATCH_ROWS.values()],
+        "env_base_layer": (profile.env_base_payload() if isinstance(profile, ComposedProfile)
+                           else {"read": False, "rows": []}),
     }
 
 

@@ -1292,8 +1292,23 @@ catalogues:
   `COMPOSITION_PROFILE` selects one. Empty derives it: `production` gives
   `prod`, and anything else gives `local`. So an install that never sets it boots
   exactly as before. `test` is not a profile.
-- **Patch rows** (`PATCH_ROWS`): today only `seraph.scheduler.v1#enabled`
-  (boolean). Its base layer is the `SCHEDULER_ENABLED` environment flag.
+- **Patch rows** (`PATCH_ROWS`): one boolean row per composition flag (#1206).
+  Each names its environment base layer, a typed schema (the values a patch may
+  set), its default, the stage of its env base layer and its removal issue:
+
+  | Row | Env base layer | Values | Default | Env stage | Removal |
+  | --- | --- | --- | --- | --- | --- |
+  | `seraph.scheduler.v1#enabled` | `SCHEDULER_ENABLED` | `false`, `true` | `true` | deprecated | #1337 |
+  | `seraph.delegation.v1#enabled` | `USE_DELEGATION` | `false`, `true` | `false` | supported | #1338 |
+  | `seraph.scheduler.v1#screenshot_folder_ingest` | `SCREENSHOT_FOLDER_INGEST_ENABLED` | `false` only | `true` | supported | #1339 |
+  | `seraph.scheduler.v1#screenshot_observation_digest` | `SCREENSHOT_OBSERVATION_DIGEST_ENABLED` | `false` only | `true` | supported | #1340 |
+  | `seraph.scheduler.v1#end_of_day_report` | `END_OF_DAY_REPORT_ENABLED` | `false` only | `true` | supported | #1341 |
+
+  The two screenshot rows and the end-of-day report row are disable-only: they
+  start observation, a screen-derived prompt or a screen-derived report, so a
+  patch may turn them off but never on, and never restores an operator's
+  `false` (ADR-036 §6). The screenshot-folder row gates both the ingest and the
+  analysis job.
 
 **Boot order.** The lifespan calls `boot_profile()` before the provider worker
 takes the workspace lock. That function applies the layers in a fixed order:
@@ -1331,8 +1346,10 @@ Patch reasons:
 - `patch_row_pinned`: any row on a `seraph-trust` domain, including inference
   and the vault;
 - `patch_row_security_setting`: `operator_auth_*`, deployment environment, bind
-  host, journal secrets, vault key;
+  host, journal secrets, vault key, and every security switch #1206 classified
+  (see below);
 - `patch_provider_unreviewed`: no alternative provider is catalogued;
+- `patch_value_consent_gated`: `true` on a disable-only row;
 - `patch_row_unknown`, `patch_value_invalid` (non-boolean, so no string can carry
   a credential), `patch_row_duplicate`, `patch_row_invalid`, `patch_invalid`,
   `patch_too_large`;
@@ -1342,17 +1359,91 @@ Recovery: fix or remove the patch file, or correct `COMPOSITION_PROFILE`, then
 restart. The logged fix names a row only when it is catalogued; any other row
 id from the file is `redacted`.
 
-**Effective values.** `profiles.scheduler_enabled()` returns the last patch
-layer's value for a row, or the live `SCHEDULER_ENABLED` setting when no layer
-set it. The scheduler engine (`init_scheduler`), the runtime lifecycle's
-scheduler domain, the background-inference status and the programme digest gate
-all read it. The composition dump shows two fields:
+**Effective values.** Each row's reader (`scheduler_enabled()`,
+`delegation_enabled()`, `screenshot_folder_ingest_enabled()`,
+`screenshot_observation_digest_enabled()`, `end_of_day_report_enabled()`)
+returns the last patch layer's value, or the live environment setting when no
+layer set it. With no patch file an install behaves exactly as its environment
+says. The readers are:
+- scheduler: the engine (`init_scheduler`), the runtime lifecycle's scheduler
+  domain, the background-inference status and the programme digest gate;
+- delegation: the agent factory, the `delegate_task` tool, the native tool
+  registry, `/api/tools`, the operator governance/status payloads and the
+  Cordis agent-turn preset and owner checks;
+- screenshot folder: the ingest and analysis jobs, their start times and
+  `/api/settings/screen-analysis` `auto_ingest_enabled`;
+- digest: the digest job, its start time and the screen-derived prompt policy;
+- end-of-day report: the report job and `/api/settings/screen-analysis`
+  `reports.enabled`.
+
+The settings payload also names each row in `control_row`, beside the existing
+`control_env`.
+
+**Removal path for the env base layer (#1206).** Each row's `env_stage` is
+one of:
+- `supported`: the env flag is the base layer;
+- `deprecated`: still the base layer, so nothing changes, but each boot that
+  sets the flag logs a warning naming the row and writes one
+  `composition_env_flag_deprecated` audit event (also when a patch row overrides
+  it: "deprecated; overridden by patch row …"). The row's stage, not where its
+  value came from, chooses the event. `SCHEDULER_ENABLED` is the first and so
+  far only deprecated flag;
+- `retired`: the flag is no longer read. A value still set to the default is
+  ignored, as is any value a patch row covers (audited
+  `composition_env_flag_ignored`). A non-default value with no patch row refuses
+  boot with `env_flag_retired`, and the logged fix names the row to add. No row
+  is retired yet.
+
+"Set" means the environment or the env file supplies the flag (pydantic's
+`model_fields_set`); a default never counts. The audit step runs in the
+lifespan once the provider worker has opened the state gate, and an unwritable
+audit never blocks boot. Each flag's removal is its own issue (#1337 to #1341).
+
+**Classified flags.** `inventory.ENV_FLAGS` classifies every name found by
+three scans:
+- every boolean settings field in `config/settings.py`, including
+  `StrictBool`, `Optional`/`Union`/`bool | None` and `Annotated` forms and
+  nested models;
+- every `$NAME_ENABLED` or `${NAME_ENABLED...}` reference in `manage.sh`;
+- every variable `backend/src` reads directly from the environment, with module
+  string constants and their imports resolved.
+
+Non-flag environment reads (credentials, paths, platform and server-process
+variables, a test canary) are listed in `inventory.ENV_READS`. Reads whose name
+is computed at runtime are listed in `DYNAMIC_ENV_READS`. The string selectors
+`SCREEN_ANALYSIS_PROVIDER` and `SERAPH_VLM_MODE` are hand-kept and review-only.
+Each flag is a `row`, a `security_switch`, `removed` or `not_composition`, and
+`tests/test_composition_env_flags_1206.py` fails on an unclassified or stale
+name. The security switches stay startup-validated environment settings:
+- authentication: `OPERATOR_AUTH_LOCAL_NO_LOGIN`,
+  `OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS`, `OPERATOR_AUTH_COOKIE_SECURE`;
+- pinned inference (ADR-036 §3): the `OPENROUTER_*` routing booleans,
+  `NEAR_TEE_CATALOG_REFRESH_ENABLED`, `LLM_LOG_ENABLED`,
+  `SCREEN_ANALYSIS_PROVIDER`, `SERAPH_VLM_MODE`;
+- consent and privacy: `SCREEN_DERIVED_LLM_ALLOW_REMOTE`,
+  `SCREEN_DERIVED_LLM_REQUIRE_PROFILE_PROOF`, `END_OF_DAY_REPORT_LLM_ENABLED`,
+  `LLM_LOG_CONTENT`, the observer's direct reads `SERAPH_SCREEN_ANALYSIS_PROVIDER`
+  (an alias of `SCREEN_ANALYSIS_PROVIDER`), `SERAPH_SCREEN_ANALYSIS_ENABLED` and
+  `SERAPH_PRESERVE_SCREEN_CAPTURES`, and the launcher's `DAEMON_ENABLED` (native
+  screen capture);
+- egress and transport: `EMAIL_REPORTS_ENABLED`,
+  `EMAIL_REPORTS_PREVIEW_REQUIRED`, `SMTP_USE_TLS`;
+- execution: `REPO_SANDBOX__ENABLED`, `REPO_SANDBOX__REQUIRE_ISOLATION`, and the
+  launcher's `PROXY_ENABLED` (stdio MCP proxy).
+
+`DEBUG`, `DATABASE_ECHO` and manage.sh's own `TRACE_WAS_ENABLED` are not
+composition. The composition dump shows two fields:
 - `profile`: `state`, `profile_id`, `source` (`explicit` or
   `deployment_environment`), `env_file`, `bundles`, `operator_patch`
   (`present` or `absent`) and `digest`. When the profile is invalid it shows
   `state: invalid`, `reason`, and `row_id` only when the row is catalogued
   (otherwise `redacted`).
 - `effective_patch`: the rows that patch layers set, with their layer.
+- `patch_rows` (#1206): the row catalogue with values, default, env stage and
+  removal issue.
+- `env_base_layer` (#1206): for the booted profile, each row's `env_set` and
+  `source` (`patch`, `env`, `default` or `ignored`). The offline dump never reads
+  the environment, so it shows `read: false`.
 
 Each bundle also carries `kind` and a `status` of `selected` or `not_selected`.
 The status is `declared` when no profile booted. `./manage.sh -e dev
@@ -1364,7 +1455,9 @@ into its keyless run.
   `runtime/cordis/profile.json`.
 - `headless` drops `seraph-cockpit` from the validated tree only. The HTTP/WS API
   and the web cockpit still run until they become plugin-owned (#1208).
-- The remaining composition environment flags move in #1206.
+- No env base layer is retired yet; each flag's removal is #1337 to #1341.
+- The offline dump cannot show a retired-flag refusal, because it never reads
+  the environment.
 
 ### Source inventory (#1205)
 

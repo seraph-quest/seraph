@@ -84,7 +84,9 @@ TURN_BLOCKED_MESSAGES = {
     "agent_turn_profile_changed": "Chat settings changed while this turn started. Send the message again.",
     "delegation_owner_not_ready": ("Delegation needs the seraph.delegation.v1 owner on Cordis. Cut it over in "
                                    "Settings (it needs the agent-presets and agent-loop owners on Cordis first), "
-                                   "turn off use_delegation to chat without specialists, or, for legacy "
+                                   "turn off use_delegation (USE_DELEGATION or the seraph.delegation.v1#enabled "
+                                   "patch row) to "
+                                   "chat without specialists, or, for legacy "
                                    "specialists, roll chat (seraph.agent-loop.v1) back to the legacy loop."),
     "delegation_composition_drift": ("The running Cordis build is not the one the seraph.delegation.v1 owner row "
                                      f"names. Restart Seraph so boot records it ({RESTART_COMMANDS})."),
@@ -211,7 +213,8 @@ async def chat_runtime_status(host=None) -> dict:
                 "reason": "agent_loop_composition_drift",
                 "recovery": f"Restart Seraph so boot records the running Cordis build ({RESTART_COMMANDS})."}
     from config.settings import settings
-    if settings.use_delegation and _delegation_denial(rows, host) is not None:
+    from .profiles import delegation_enabled
+    if delegation_enabled(settings.use_delegation) and _delegation_denial(rows, host) is not None:
         # Specialists run as durable child turns under their own owner row (#1020 PR2).
         reason = _delegation_denial(rows, host)
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
@@ -478,7 +481,8 @@ class CordisTurn:
         operator = await _token_bound(operator)
         from src.agent.presets import PROFILE_PRESETS, preset_digest, preset_max_steps
         # With delegation on, the chat agent is the orchestrator (#1020 PR2): its own preset.
-        delegating = profile == "agent" and settings.use_delegation
+        from .profiles import delegation_enabled
+        delegating = profile == "agent" and delegation_enabled(settings.use_delegation)
         preset_id = "chat.orchestrator" if delegating else PROFILE_PRESETS[profile]
         max_steps = preset_max_steps(preset_id)
         candidate = {"schema_version": 1, "conversation_session_id": conversation_session_id, "message_id": message_id,

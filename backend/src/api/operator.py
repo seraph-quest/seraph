@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel, Field
 
 from config.settings import settings
+from src.runtime_plugins.profiles import delegation_enabled
 from src.agent.session import session_manager
 from src.app import _active_chat_runtime_status, _adr035_chat_identity, _effective_runtime_route_status
 from src.llm_runtime import provider_profile_statuses
@@ -1400,14 +1401,14 @@ def _control_plane_roles(tool_policy_mode: str, mcp_policy_mode: str, approval_m
             "scope": "bounded_execution",
             "summary": (
                 "Run bounded delegated work under the current workspace approval posture."
-                if settings.use_delegation
+                if delegation_enabled(settings.use_delegation)
                 else "Delegation is disabled for this runtime."
             ),
-            "status": "enabled" if settings.use_delegation else "disabled",
+            "status": "enabled" if delegation_enabled(settings.use_delegation) else "disabled",
             "permissions": [
                 "bounded workflow execution",
                 "specialist planning",
-            ] if settings.use_delegation else [],
+            ] if delegation_enabled(settings.use_delegation) else [],
             "boundaries": ["delegation", tool_policy_mode],
         },
         {
@@ -3454,7 +3455,7 @@ async def get_operator_control_plane(
             "approval_mode": ctx.approval_mode,
             "tool_policy_mode": ctx.tool_policy_mode,
             "mcp_policy_mode": ctx.mcp_policy_mode,
-            "delegation_enabled": bool(settings.use_delegation),
+            "delegation_enabled": delegation_enabled(settings.use_delegation),
             "workspace_dir": settings.workspace_dir,
             "roles": _control_plane_roles(
                 str(ctx.tool_policy_mode),

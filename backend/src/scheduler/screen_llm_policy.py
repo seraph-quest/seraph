@@ -91,8 +91,9 @@ async def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDeci
     # The digest is its own user-visible report surface.  Do not accidentally
     # inherit the end-of-day report flag and leave an explicitly enabled digest
     # permanently disabled in the OpenRouter-only deployment.
+    from src.runtime_plugins.profiles import screenshot_observation_digest_enabled
     enabled = (
-        settings.screenshot_observation_digest_enabled
+        screenshot_observation_digest_enabled(settings.screenshot_observation_digest_enabled)
         if runtime_path == "screenshot_observation_digest"
         else settings.end_of_day_report_llm_enabled
     )

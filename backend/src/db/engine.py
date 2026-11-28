@@ -189,7 +189,14 @@ def commit_guard(guard: Callable[[object], None] | None) -> Iterator[None]:
 
 
 def transaction_wrote(sync_session) -> bool:
-    """Whether the session's open transaction already ran a lock-taking (write) statement."""
+    """Whether the session's open transaction already ran a lock-taking (write) statement.
+
+    It reads the marker ``_note_write_start`` sets for a statement that starts
+    with ``INSERT``/``UPDATE``/``DELETE``/``REPLACE``/``BEGIN IMMEDIATE`` (ORM
+    flushes and executemany included). Known limit: a write whose SQL starts
+    otherwise (a ``WITH ...`` CTE write, or a leading comment) is not marked,
+    so a commit guard does not see it; Seraph's writers do not emit those.
+    """
     if not sync_session.in_transaction():
         return False
     return _WRITE_STARTED_AT in sync_session.connection().info
@@ -200,6 +207,8 @@ def _run_commit_guard(sync_session) -> None:
     if guard is None:
         return
     # Pending ORM changes are written now, so the guard sees whether this transaction writes.
+    # SQLAlchemy permits flush and SELECT in before_commit; the guard's read runs on the
+    # transaction's own connection, so it adds no lock and no lock-ordering edge.
     sync_session.flush()
     guard(sync_session)
 

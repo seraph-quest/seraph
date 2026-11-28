@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select, update
@@ -22,6 +22,7 @@ from src.runtime_plugins.lifecycle import LifecycleFenced, RuntimeLifecycle, cur
 from src.runtime_plugins.ownership import DISPATCH_DOMAIN, SCHEDULER_DOMAIN
 from src.scheduler import job_status
 from tests.cordis_research import seed_composition_inventory
+from tests.support.clock import fake_clock  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
 
@@ -79,6 +80,39 @@ async def test_the_legacy_json_status_is_folded_into_the_table_once_and_removed(
     state = await job_status.record_blocked("daily_briefing", "cordis_host_unavailable", "Start Cordis.",
                                             source=job_status.SOURCE_GUARDIAN)
     assert state["notify"] is False and state["transition"] is False
+
+
+async def test_an_unreadable_legacy_status_file_is_left_in_place_never_deleted(lifecycle_db):
+    path = job_status.legacy_status_path()
+    path.write_text("{not json", encoding="utf-8")
+    assert await job_status.statuses() == {}
+    assert path.read_text(encoding="utf-8") == "{not json"
+    # Writes still work; the unreadable file is not retried on every write.
+    await job_status.record_missed("goal_check")
+    assert path.exists() and (await job_status.status_row("goal_check"))["reason"] == "missed_fire"
+
+
+async def test_repeated_identical_skips_take_no_writer_lock(lifecycle_db, monkeypatch):
+    """A job polled every second reads its status; only a transition or a due audit writes."""
+    interval = timedelta(hours=1)
+    assert await job_status.record_skip("screenshot_folder_analysis", "disabled_by_operator",
+                                        audit_interval=interval) is True
+    writes: list[str] = []
+    original = job_status._Write.__aenter__
+
+    async def counted(self):
+        writes.append(self.job_id)
+        return await original(self)
+
+    monkeypatch.setattr(job_status._Write, "__aenter__", counted)
+    for _ in range(5):
+        assert await job_status.record_skip("screenshot_folder_analysis", "disabled_by_operator",
+                                            audit_interval=interval) is False
+    await job_status.record_run("never-skipped")
+    assert writes == []
+    await job_status.record_run("screenshot_folder_analysis")  # clears the audit marker: one write
+    assert writes == ["screenshot_folder_analysis"]
+    assert (await job_status.status_row("screenshot_folder_analysis"))["audited_at"] is None
 
 
 async def test_the_table_is_newer_than_a_late_legacy_file(lifecycle_db):
@@ -258,7 +292,9 @@ async def test_racing_scheduler_ticks_reserve_one_occurrence_and_a_stale_epoch_r
 
     await asyncio.gather(lifecycle.run_gated("user_cron:claim-a", claim),
                          lifecycle.run_gated("user_cron:claim-b", claim))
-    assert claims.count("claimed") == 1
+    assert claims.count("claimed") == 1, claims
+    # The loser lost on the token fence or saw the running receipt; nothing else counts as losing.
+    assert set(claims) - {"claimed"} <= {"governed_occurrence_claim_stale", "governed occurrence is not claimable"}
 
     # The owner moves between a tick's admission and its reservation: nothing is reserved.
     async def stale_tick():
@@ -388,3 +424,60 @@ async def test_a_pending_approval_never_holds_a_dispatch_cutover_open_and_resume
         await lifecycle.run_gated("work_board_dispatch", tick)
         assert claimed and claimed[0] is not None
         assert await _count(WorkBoardAttempt, WorkBoardAttempt.task_id == task_id) == 1
+
+
+# ------------------------------------------------------------------ controlled clock: priority without starvation
+
+
+async def test_dispatch_ticks_keep_priority_order_and_never_starve_lower_or_scheduled_work(lifecycle_db, fake_clock,
+                                                                                         monkeypatch):
+    """Under the lifecycle, a controlled clock drives the passes: priority first, lower work still runs,
+    a scheduled task waits for its time, and board capacity (unchanged by #1025) is released on settle."""
+    from unittest.mock import AsyncMock
+    from src.work_board.repository import WorkBoardRepository
+    monkeypatch.setattr(WorkBoardRepository, "_safe_text", AsyncMock(side_effect=lambda value, **kw: value))
+    _first, low, high, later = await _ready_tasks(4)
+    now = fake_clock.now(timezone.utc)
+    report = ("work.local-evidence-report.v1", "seraph-work-board:work.local-evidence-report.v1")
+    with db_engine.commit_guard(None):
+        async with db_engine.get_session() as db:
+            first = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == _first))
+            first.status = WorkBoardStatus.todo  # not part of this ordering
+            for task_id, priority, scheduled in ((low, 20, None), (high, 90, None),
+                                                 (later, 99, (now + timedelta(minutes=5)).replace(tzinfo=None))):
+                task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+                task.priority, task.scheduled_at = priority, scheduled
+                if task_id == low:
+                    # A different executor: the one-running-per-executor capacity does not hold it back.
+                    task.capability_id, task.executor_id = report
+    lifecycle = _lifecycle()
+    await lifecycle.activate(DISPATCH_DOMAIN)
+    repository = WorkBoardRepository()
+    order: list[str] = []
+
+    async def tick():
+        observed = fake_clock.now(timezone.utc)
+        assert current_tick() is not None
+        async with db_engine.get_session() as db:
+            candidates = await repository.list_dispatch_candidates(db, now=observed)
+        for head in candidates:
+            async with db_engine.get_session() as db:
+                claim = await repository.claim_ready_task(db, head.task_id, expected_revision=head.task_revision,
+                                                          lease_owner="runner", now=observed)
+            if claim is not None:
+                order.append(head.task_id)
+                return
+
+    await lifecycle.run_gated("work_board_dispatch", tick)
+    await lifecycle.run_gated("work_board_dispatch", tick)
+    await lifecycle.run_gated("work_board_dispatch", tick)  # the scheduled task is not due yet
+    assert order == [high, low]
+    fake_clock.advance(301)
+    await lifecycle.run_gated("work_board_dispatch", tick)
+    # Due, but board capacity (two running, one per executor) is full: it waits, it is never skipped.
+    assert order == [high, low]
+    with db_engine.commit_guard(None):
+        async with db_engine.get_session() as db:
+            (await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == high))).status = WorkBoardStatus.done
+    await lifecycle.run_gated("work_board_dispatch", tick)
+    assert order == [high, low, later]

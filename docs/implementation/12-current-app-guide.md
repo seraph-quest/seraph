@@ -1711,16 +1711,29 @@ ready. The one notification of a transition into `blocked` is claimed in the
 same transaction (`notified_for` = that block's `since`) and delivered after
 commit: at most once per transition, also across a restart (a crash between
 claim and delivery loses that notification; the persisted block stays
-visible). The background-inference toggles, guardian blocks (#1020), lifecycle
+visible). A repeated identical skip (a job polled every second) is a
+lock-free read with no write until its audit is due, so its
+`last_attempt_at` advances with each audited skip. The background-inference toggles, guardian blocks (#1020), lifecycle
 blocks, missed fires (`EVENT_JOB_MISSED`) and the `disabled` scheduler all use
 it. The #1020 JSON status file (`background-inference-status.json`) is folded
-into the table once per workspace on first use and removed. Settings →
+into the table once per workspace on first use and removed; an unreadable or
+invalid file is left in place and not imported. Settings →
 Automation → Background inference reads it; a lifecycle block is cleared only
 by that job's next tick under an active domain.
 
 Proof limits: verified with temporary SQLite state and, for the Cordis owner,
 host loss and live transitions, the real reviewed child; external transport
-and inference denied. Races are tested on a real governed occurrence (two
+and inference denied. Lifecycle mechanics (classification, retention
+exemption, disabled scheduler, restart at the current epoch, drain bound and
+cleanup through `cancel_job_tree`, unknown drains never flipping, crash after
+the flip, boot order without the proof, shutdown) are in
+`backend/tests/test_scheduler_lifecycle_1025.py` and
+`test_cordis_cutover.py`; the status table, step fences and races are in
+`test_scheduler_dispatch_races_1025.py`. A controlled clock drives dispatch
+ticks that claim in priority order, hold a scheduled task until its time and
+board capacity until a running task settles, and never skip it; operator
+cancellation itself is the unchanged dispatcher path, covered by its own
+tests and reused by the drain. Races are tested on a real governed occurrence (two
 ticks reserve one occurrence; one claim wins; a stale epoch reserves none), a
 real WorkBoard claim (two dispatch ticks create one attempt; a stale epoch
 claims none and leaves the task Ready) and a real dispatch cutover with a task
@@ -1729,7 +1742,10 @@ once answered it is claimed under the new epoch). Not done: an older binary
 still rejects an inventory that contains `seraph.dispatch.v1`, so going back
 to an older build needs the pre-upgrade backup; the notification is not
 written in the same transaction as the native outbox row (it is claimed in
-the status transaction and delivered once after commit).
+the status transaction and delivered once after commit); the step guard sees
+only writes whose SQL starts with `INSERT`/`UPDATE`/`DELETE`/`REPLACE`/`BEGIN
+IMMEDIATE`; the real-child cutover tests skip where the reviewed Cordis
+package is not built.
 
 ### Cordis guardian research (#1008)
 

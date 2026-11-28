@@ -94,6 +94,10 @@ class _Write:
         self._scope = get_session()
         try:
             self.db = await self._scope.__aenter__()
+        except BaseException:
+            self._guard.__exit__(None, None, None)
+            raise
+        try:
             await _fold_legacy(self.db)
             if self.db.get_bind().dialect.name == "sqlite":
                 if self.db.in_transaction():
@@ -140,21 +144,27 @@ async def _fold_legacy(db) -> None:
     key = str(path)
     if key in _legacy_folded:
         return
-    _legacy_folded.add(key)
     if not path.exists():
+        _legacy_folded.add(key)
         return
     from src.db.models import BackgroundJobStatus
     from src.scheduler.background_inference import status_job_known
-    entries: dict[str, Any] = {}
+    entries: Any = None
     try:
         if path.stat().st_size <= _MAX_LEGACY_BYTES:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and payload.get("schema_version") == LEGACY_SCHEMA_VERSION:
                 entries = payload.get("jobs") or {}
     except (OSError, ValueError):
-        logger.warning("The legacy background-inference status file is unreadable; it is not imported")
+        entries = None
+    if not isinstance(entries, dict):
+        # Never delete what could not be imported: the file stays for the operator to inspect.
+        logger.warning("The legacy background-inference status file is unreadable or invalid; it is left in "
+                       "place and not imported")
+        _legacy_folded.add(key)
+        return
     imported = 0
-    for job_id, value in (entries.items() if isinstance(entries, dict) else ()):
+    for job_id, value in entries.items():
         if not isinstance(value, dict) or not status_job_known(job_id):
             continue
         if await db.get(BackgroundJobStatus, job_id) is not None:
@@ -176,6 +186,8 @@ async def _fold_legacy(db) -> None:
             activity_at=str(value["activity_at"]) if value.get("activity_at") else None))
         imported += 1
     await db.commit()
+    # Marked only once the import committed: a failed fold is retried by the next write.
+    _legacy_folded.add(key)
     for leftover in (path, path.with_suffix(".tmp")):
         try:
             leftover.unlink(missing_ok=True)
@@ -185,6 +197,16 @@ async def _fold_legacy(db) -> None:
                 "y" if imported == 1 else "ies")
 
 
+async def _peek(job_id: str):
+    """A lock-free read of one row (a fast path; every decision that writes re-reads under the lock)."""
+    from src.db.engine import commit_guard, get_session
+    from src.db.models import BackgroundJobStatus
+    with commit_guard(None):
+        async with get_session() as db:
+            await _fold_legacy(db)
+            return await db.get(BackgroundJobStatus, job_id)
+
+
 # ------------------------------------------------------------------ writers
 
 
@@ -192,6 +214,14 @@ async def record_skip(job_id: str, reason: str, *, audit_interval: timedelta,
                       source: str = SOURCE_INFERENCE, epoch: int | None = None) -> bool:
     """A visible skip; return whether it is due an audit event (one per transition, then per interval)."""
     now = _now()
+    current = await _peek(job_id)
+    if (current is not None and current.state == "skipped" and current.reason_code == reason
+            and (epoch is None or current.epoch is None or epoch >= current.epoch)):
+        audited = _parse(current.audited_at)
+        if audited is not None and now - audited < audit_interval:
+            # A repeated identical skip (a job polled every second): no writer lock, no write.
+            # ``last_attempt_at`` advances with the next audited skip.
+            return False
     async with _Write(job_id, epoch) as write:
         row = write.row
         same = row is not None and row.state == "skipped" and row.reason_code == reason
@@ -205,6 +235,9 @@ async def record_skip(job_id: str, reason: str, *, audit_interval: timedelta,
 
 async def record_run(job_id: str) -> None:
     """The job ran: its next skip is a new transition (clears the audit marker only)."""
+    current = await _peek(job_id)
+    if current is None or current.audited_at is None:
+        return  # nothing to clear: no writer lock on the polled path
     async with _Write(job_id, None) as write:
         if write.row is not None and write.row.audited_at is not None:
             write.put(audited_at=None)

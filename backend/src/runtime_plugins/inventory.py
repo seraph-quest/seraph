@@ -176,6 +176,12 @@ OWNERS: tuple[Owner, ...] = (
         f"{_PW}worker.detach]": "lifespan_step",
         # #1024 in-process maintenance handoff: the backup step runs on one executor thread.
         "src.runtime_plugins.worker:ProviderWorker.maintenance_backup": "thread",
+        # #1207 passive worker entry: it hosts the same ProviderWorker over framed stdio. Its
+        # stop/parent-loss signal handlers, the frame writer and reader, and the admitted
+        # ordinary-request tasks all end before the lease is released.
+        "src.runtime_plugins.worker_entry:_run": "background_task process_hook",
+        "src.runtime_plugins.worker_entry:_Session.serve": "background_task",
+        "src.runtime_plugins.worker_entry:_Session._dispatch": "background_task",
     }, required=True),
     *_owned("seraph.authority.v1", _T, {
         f"{_LS}_reconcile_operator_auth_mode]": "lifespan_step",
@@ -669,6 +675,7 @@ ENV_READS: Mapping[str, tuple[str, str]] = MappingProxyType({
     "SERAPH_WORKSPACE_LIFECYCLE_PATH": ("path", "production workspace lifecycle receipt path"),
     "BACKEND_DATA_PATH_PROD": ("path", "the production host workspace bind path"),
     "WORKSPACE_DIR": ("path", "the workspace root, checked against the production bind"),
+    "SERAPH_WORKER_PARENT_PID": ("server_process", "the passive worker's supervising parent, for the parent-loss check"),
     "SERAPH_PRODUCTION_MOUNT_SOURCE": ("server_process", "production container mount source check"),
     "SERAPH_PRODUCTION_BIND_IDENTITY": ("server_process", "production container bind identity check"),
     "FORWARDED_ALLOW_IPS": ("server_process", "auth startup validation of the ASGI server's proxy trust"),

@@ -414,7 +414,7 @@ See the
 
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
-**Shipped** on the reviewed scope: the one Python scheduler and the WorkBoard
+**Partial**: the one Python scheduler and the WorkBoard
 dispatcher run only while their owner rows (`seraph.scheduler.v1`, new
 `seraph.dispatch.v1`) are ready at an epoch and, once cut over to Cordis (at
 boot only on the running reviewed child's proof; otherwise they stay on the
@@ -434,10 +434,16 @@ dispatch domains. `seraph.dispatch.v1` is added once to the exact post-#1024
 inventory, forward-only. Verified with temporary state, races on a real
 governed occurrence and a real board claim, and the real reviewed child for
 cutover (including a pending approval); external transport and inference
-denied. Limits: an older binary rejects an inventory with
-`seraph.dispatch.v1` (downgrade needs the pre-upgrade backup), and the
-blocked notification is claimed in the status transaction and delivered after
-commit rather than written in the native outbox's transaction. See the
+denied. Partial because one acceptance proof is missing: no controlled-clock
+test cancels a running attempt through the real operator cancel path
+(`WorkBoardDispatcher.cancel_task`) and then shows the freed capacity claimed
+on the next tick; the controlled-clock test frees capacity by settling the
+running task, and operator cancel is proven only by the existing dispatcher
+tests and the #1171 drain tests. Documented limits (not blockers): an older
+binary rejects an inventory with `seraph.dispatch.v1` (downgrade needs the
+pre-upgrade backup), and the blocked notification is claimed in the status
+transaction and delivered after commit rather than written in the native
+outbox's transaction. See the
 [guide section](./12-current-app-guide.md#scheduler-and-dispatcher-lifecycle-1025).
 
 **Cordis guardian research** from

@@ -1,5 +1,5 @@
 import { RuntimeOwnerBanner } from "./RuntimeOwnerBanner";
-import { normalizeGuardianRuntime, normalizeLifecycleRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
+import { lifecycleRuntimeOrUnavailable, normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
 import type { GuardianRuntimeStatus, LifecycleRuntimeStatus, RuntimeDomainStatus } from "../../lib/cordisRuntime";
 import { HomeMethodInspection } from "./HomeMethodInspection";
 import type { HomeTarget } from "../../lib/homeContinuation";
@@ -8468,10 +8468,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         scheduler_runtime?: unknown; dispatch_runtime?: unknown };
       setRuntimeOwners({ guardian: normalizeGuardianRuntime(raw.guardian_runtime ?? null),
         domains: normalizeRuntimeDomains(raw.runtime_domains ?? null),
-        lifecycle: [raw.scheduler_runtime, raw.dispatch_runtime].flatMap(item => {
-          const row = normalizeLifecycleRuntime(item ?? null);
-          return row ? [row] : [];
-        }) });
+        lifecycle: [lifecycleRuntimeOrUnavailable(raw.scheduler_runtime, "seraph.scheduler.v1"),
+          lifecycleRuntimeOrUnavailable(raw.dispatch_runtime, "seraph.dispatch.v1")] });
     }
     if (ownsShellData && runtimeStatusPayload) {
       storeRuntimeReceipt(runtimeStatusPayload);
@@ -8875,10 +8873,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         scheduler_runtime?: unknown; dispatch_runtime?: unknown };
       setRuntimeOwners({ guardian: normalizeGuardianRuntime(raw.guardian_runtime ?? null),
         domains: normalizeRuntimeDomains(raw.runtime_domains ?? null),
-        lifecycle: [raw.scheduler_runtime, raw.dispatch_runtime].flatMap(item => {
-          const row = normalizeLifecycleRuntime(item ?? null);
-          return row ? [row] : [];
-        }) });
+        lifecycle: [lifecycleRuntimeOrUnavailable(raw.scheduler_runtime, "seraph.scheduler.v1"),
+          lifecycleRuntimeOrUnavailable(raw.dispatch_runtime, "seraph.dispatch.v1")] });
     }
     if (runtimeStatusPayload) {
       storeRuntimeReceipt(runtimeStatusPayload);

@@ -149,6 +149,17 @@ async def _fold_legacy(db) -> None:
         return
     from src.db.models import BackgroundJobStatus
     from src.scheduler.background_inference import status_job_known
+    # Serialise concurrent first-use callers on SQLite's writer lock: the one
+    # that waits re-checks below and finds the fold done, so no two callers
+    # insert the same row and no status write is lost to a conflict.
+    if db.get_bind().dialect.name == "sqlite":
+        if db.in_transaction():
+            await db.commit()
+        await db.execute(text("BEGIN IMMEDIATE"))
+    if key in _legacy_folded or not path.exists():
+        _legacy_folded.add(key)
+        await db.commit()
+        return
     entries: Any = None
     try:
         if path.stat().st_size <= _MAX_LEGACY_BYTES:
@@ -162,6 +173,7 @@ async def _fold_legacy(db) -> None:
         logger.warning("The legacy background-inference status file is unreadable or invalid; it is left in "
                        "place and not imported")
         _legacy_folded.add(key)
+        await db.commit()
         return
     imported = 0
     for job_id, value in entries.items():

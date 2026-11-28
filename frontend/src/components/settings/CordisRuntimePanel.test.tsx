@@ -246,3 +246,15 @@ it("shows the scheduler and dispatch lifecycle with owner, epoch, fix and blocke
   expect(list).toHaveTextContent("Work Board dispatch: active · legacy owner epoch 1 · last transition failed → cordis (composition_boot_proof_missing)");
   expect(list).not.toHaveTextContent("/private");
 });
+it("shows a malformed lifecycle row as unavailable and lists no stale job blocks beside a disabled scheduler (#1025)", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot,
+    scheduler_runtime: { domain: "seraph.scheduler.v1", state: "disabled", reason: "scheduler_disabled",
+      recovery: "Enable it.", owner: "legacy", owner_epoch: 1, blocked_jobs: [{ job_id: "goal_check", reason: "cordis_host_unavailable" }] },
+    dispatch_runtime: { domain: "seraph.dispatch.v1", state: "running" } }));
+  render(<CordisRuntimePanel />);
+  const list = await screen.findByRole("list", { name: "Scheduler and dispatch lifecycle" });
+  expect(list).toHaveTextContent("Scheduled work: disabled · scheduler_disabled");
+  expect(list).not.toHaveTextContent("goal_check");
+  expect(list).toHaveTextContent("Work Board dispatch: unavailable · lifecycle_status_unreadable");
+  expect(list).toHaveTextContent("fix: The runtime status for this domain is missing or unreadable");
+});

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { blockedRuntimeDomains, chatRuntimeLabel, guardianRuntimeLabel, lifecycleNeedsAction, lifecycleRuntimeLabel,
-  normalizeChatRuntime, normalizeCordisRuntime, normalizeGuardianRuntime, normalizeLifecycleRuntime,
+  lifecycleRuntimeOrUnavailable, normalizeChatRuntime, normalizeCordisRuntime, normalizeGuardianRuntime,
   normalizeRuntimeDomains } from "../../lib/cordisRuntime";
 import type { ChatRuntimeStatus, CordisRuntimeSnapshot, GuardianRuntimeStatus, LifecycleRuntimeStatus,
   RuntimeDomainStatus } from "../../lib/cordisRuntime";
@@ -31,10 +31,9 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       const chatStatus = normalizeChatRuntime(value && typeof value === "object" && "chat_runtime" in value ? value.chat_runtime : null);
       const guardianStatus = normalizeGuardianRuntime(value && typeof value === "object" && "guardian_runtime" in value ? value.guardian_runtime : null);
       const domainRows = normalizeRuntimeDomains(value && typeof value === "object" && "runtime_domains" in value ? value.runtime_domains : null);
-      const lifecycleRows = ["scheduler_runtime", "dispatch_runtime"].flatMap(key => {
-        const row = normalizeLifecycleRuntime(value && typeof value === "object" && key in value ? (value as Record<string, unknown>)[key] : null);
-        return row ? [row] : [];
-      });
+      const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      const lifecycleRows = [lifecycleRuntimeOrUnavailable(raw.scheduler_runtime, "seraph.scheduler.v1"),
+        lifecycleRuntimeOrUnavailable(raw.dispatch_runtime, "seraph.dispatch.v1")];
       if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setGuardian(guardianStatus); setDomains(domainRows); setLifecycle(lifecycleRows); setError(null); }
     } catch { if (version === generation.current) setError("Cordis runtime metadata is unavailable. Last confirmed state remains visible; refresh after restoring the host. Artifact settings remain usable."); }
     finally { clearTimeout(timeout); if (version === generation.current) setBusy(false); }

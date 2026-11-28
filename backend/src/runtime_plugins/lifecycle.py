@@ -529,9 +529,11 @@ class RuntimeLifecycle:
             state = await job_status.record_blocked(job_status.domain_key(_SHORT[domain]), reason,
                                                     lifecycle_recovery(reason), source=job_status.SOURCE_LIFECYCLE,
                                                     epoch=epoch)
-        except Exception:  # noqa: BLE001 - announce rather than lose the transition
-            logger.warning("Could not persist the %s domain block", domain, exc_info=True)
-            return True
+        except Exception:  # noqa: BLE001 - at most once: losing one notification beats repeating it
+            # An unclaimed transition is not announced: after a restart it could be announced
+            # again. The in-memory status still shows the block with its fix.
+            logger.warning("Could not persist the %s domain block; it is not announced", domain, exc_info=True)
+            return False
         return state["notify"]
 
     async def _record_domain_state(self, domain: str, state: str, epoch: int | None) -> bool:
@@ -622,7 +624,10 @@ class RuntimeLifecycle:
                 _TICK.reset(token)
             if task is not None:
                 self._inflight[domain].discard(task)
-        await record_job_ok(job_id, epoch=activation.epoch)
+        if self.current(domain) is activation:
+            # Only a tick that finished under the still-live activation clears a block: one that
+            # ends after its domain was deactivated (a fresh block at the same epoch) keeps it.
+            await record_job_ok(job_id, epoch=activation.epoch)
         return result
 
     def require_dispatch_active(self) -> None:
@@ -811,7 +816,9 @@ async def lifecycle_runtime_status(domain: str) -> dict[str, Any]:
     result = {**status, **row_payload}
     if domain == SCHEDULER_DOMAIN:
         from src.scheduler.background_inference import scheduler_job_blocks
-        result["blocked_jobs"] = await scheduler_job_blocks()
+        # A disabled scheduler runs no gated tick, so stored per-job blocks are history, not
+        # current blocks: they are not listed next to "disabled" (#1025).
+        result["blocked_jobs"] = [] if status.get("state") == "disabled" else await scheduler_job_blocks()
     return result
 
 

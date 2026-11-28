@@ -127,10 +127,12 @@ export function normalizeLifecycleRuntime(value: unknown): LifecycleRuntimeStatu
   const jobs = Array.isArray(value.blocked_jobs) ? value.blocked_jobs.slice(0, 64).flatMap((item): LifecycleRuntimeStatus["blocked_jobs"] =>
     record(item) && typeof item.job_id === "string" && item.job_id.length <= 128 && typeof item.reason === "string" && item.reason.length <= 256
       ? [{ job_id: item.job_id, reason: item.reason }] : []) : [];
+  // A disabled scheduler runs nothing: stored per-job blocks are history, not shown beside "disabled".
+  const blockedJobs = value.state === "disabled" ? [] : jobs;
   return { domain: value.domain as LifecycleRuntimeStatus["domain"], state: value.state as LifecycleRuntimeStatus["state"],
     reason: value.reason as string | null, recovery: (value.recovery ?? null) as string | null,
     owner: (value.owner ?? null) as LifecycleRuntimeStatus["owner"], owner_epoch: (value.owner_epoch ?? null) as number | null,
-    transition: (value.transition ?? null) as string | null, last_transition: lastTransition, blocked_jobs: jobs };
+    transition: (value.transition ?? null) as string | null, last_transition: lastTransition, blocked_jobs: blockedJobs };
 }
 export function lifecycleRuntimeLabel(status: LifecycleRuntimeStatus): string {
   const name = status.domain === "seraph.scheduler.v1" ? "Scheduled work" : "Work Board dispatch";
@@ -139,6 +141,15 @@ export function lifecycleRuntimeLabel(status: LifecycleRuntimeStatus): string {
   if (status.state === "active") return `${name}: active${owner}${transition}`;
   if (status.state === "disabled") return `${name}: disabled${status.reason ? ` · ${status.reason}` : ""}`;
   return `${name}: ${status.state}${status.reason ? ` · ${status.reason}` : ""}${owner}${transition}`;
+}
+/** The server's lifecycle row for one domain, or an explicit "unavailable" row when it is missing or malformed
+ * (never silently dropped, never guessed active). */
+export function lifecycleRuntimeOrUnavailable(value: unknown, domain: LifecycleRuntimeStatus["domain"]): LifecycleRuntimeStatus {
+  const row = normalizeLifecycleRuntime(value);
+  if (row && row.domain === domain) return row;
+  return { domain, state: "unavailable", reason: "lifecycle_status_unreadable",
+    recovery: "The runtime status for this domain is missing or unreadable; refresh, and restart Seraph if it stays unavailable.",
+    owner: null, owner_epoch: null, transition: null, last_transition: null, blocked_jobs: [] };
 }
 /** A lifecycle domain the operator must act on: not active and not deliberately disabled. */
 export function lifecycleNeedsAction(status: LifecycleRuntimeStatus | null): boolean {

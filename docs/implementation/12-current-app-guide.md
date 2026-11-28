@@ -1731,8 +1731,10 @@ the flip, boot order without the proof, shutdown) are in
 `test_cordis_cutover.py`; the status table, step fences and races are in
 `test_scheduler_dispatch_races_1025.py`. A controlled clock drives dispatch
 ticks that claim in priority order, hold a scheduled task until its time and
-board capacity until a running task settles, and never skip it; operator
-cancellation itself is the unchanged dispatcher path, covered by its own
+board capacity until a running task settles, and never skip it. Not yet
+proven: a controlled-clock test that cancels the running attempt through the
+real operator cancel path (`cancel_task`) and then claims the freed capacity;
+operator cancellation is the unchanged dispatcher path, covered by its own
 tests and reused by the drain. Races are tested on a real governed occurrence (two
 ticks reserve one occurrence; one claim wins; a stale epoch reserves none), a
 real WorkBoard claim (two dispatch ticks create one attempt; a stale epoch

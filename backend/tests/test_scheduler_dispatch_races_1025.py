@@ -170,6 +170,79 @@ async def test_a_disabled_scheduler_is_recorded_disabled_never_blocked(lifecycle
     assert (row["state"], row["reason"]) == ("disabled", "scheduler_disabled") and notices == []
 
 
+async def test_concurrent_first_use_folds_the_legacy_file_once_and_loses_no_write(lifecycle_db):
+    """Racing first-use callers serialise the fold on the writer lock: no conflict, every write lands."""
+    path = job_status.legacy_status_path()
+    path.write_text(json.dumps({"schema_version": job_status.LEGACY_SCHEMA_VERSION, "jobs": {
+        "daily_briefing": {"status": "blocked", "reason": "cordis_host_unavailable", "at": "2026-11-01T08:00:00+00:00"},
+        "goal_check": {"status": "skipped", "reason": "missed_fire", "at": "2026-11-01T08:00:00+00:00"}}}))
+    jobs = ["goal_check", "calendar_scan", "strategist_tick", "daily_briefing", "evening_review", "activity_digest"]
+    results = await asyncio.gather(
+        *(job_status.record_blocked(job_id, "scheduler_owner_blocked", "Finish it.",
+                                    source=job_status.SOURCE_LIFECYCLE, keep_since_on_reason_change=False)
+          for job_id in jobs),
+        job_status.statuses(), return_exceptions=True)
+    assert not [item for item in results if isinstance(item, BaseException)], results
+    rows = await job_status.statuses()
+    assert {job_id for job_id in jobs} <= set(rows)
+    assert all(rows[job_id]["reason"] == "scheduler_owner_blocked" for job_id in jobs)
+    assert not path.exists()
+
+
+async def test_an_unpersisted_domain_block_is_not_announced(lifecycle_db, monkeypatch):
+    """At most once: if the transition cannot be claimed durably, it is not announced (a restart could repeat it)."""
+    lifecycle = _lifecycle()
+    notices: list[str] = []
+    activity: list[str] = []
+
+    async def notify(domain, reason):
+        notices.append(reason)
+
+    async def record_activity(domain, outcome, reason):
+        activity.append(outcome)
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("status store unavailable")
+
+    lifecycle._notify, lifecycle._activity = notify, record_activity
+    monkeypatch.setattr(job_status, "record_blocked", unavailable)
+    await _bump(SCHEDULER_DOMAIN, state="draining")
+    status = await lifecycle.activate(SCHEDULER_DOMAIN)
+    assert (status["state"], status["reason"]) == ("blocked", "scheduler_owner_draining")
+    assert notices == [] and activity == []
+
+
+async def test_a_tick_ending_after_its_domain_was_deactivated_keeps_the_fresh_block(lifecycle_db):
+    from src.runtime_plugins.lifecycle import record_job_blocked
+    lifecycle = _lifecycle()
+    await lifecycle.activate(SCHEDULER_DOMAIN)
+
+    async def tick():
+        # The domain closes admission while this tick runs (same epoch); its block is recorded.
+        lifecycle._active.pop(SCHEDULER_DOMAIN)
+        await record_job_blocked("goal_check", "scheduler_owner_draining", epoch=1)
+        return "done"
+
+    assert await lifecycle.run_gated("goal_check", tick) == "done"
+    row = await job_status.status_row("goal_check")
+    assert (row["state"], row["reason"]) == ("blocked", "scheduler_owner_draining")
+
+
+async def test_a_disabled_scheduler_lists_no_stale_job_blocks(lifecycle_db, monkeypatch):
+    from src.runtime_plugins import lifecycle as module
+    await job_status.record_blocked("goal_check", "cordis_host_unavailable", "x", source=job_status.SOURCE_LIFECYCLE)
+    lifecycle = _lifecycle()
+    lifecycle.scheduler_enabled = False
+    monkeypatch.setattr(module, "runtime_lifecycle", lifecycle)
+    await lifecycle.activate(SCHEDULER_DOMAIN)
+    status = await module.lifecycle_runtime_status(SCHEDULER_DOMAIN)
+    assert status["state"] == "disabled" and status["blocked_jobs"] == []
+    lifecycle.scheduler_enabled = True
+    lifecycle._status[SCHEDULER_DOMAIN]["state"] = "blocked"
+    assert [item["job_id"] for item in (await module.lifecycle_runtime_status(SCHEDULER_DOMAIN))["blocked_jobs"]] == [
+        "goal_check"]
+
+
 # ------------------------------------------------------------------ fences inside each run_pass step
 
 
@@ -432,7 +505,11 @@ async def test_a_pending_approval_never_holds_a_dispatch_cutover_open_and_resume
 async def test_dispatch_ticks_keep_priority_order_and_never_starve_lower_or_scheduled_work(lifecycle_db, fake_clock,
                                                                                          monkeypatch):
     """Under the lifecycle, a controlled clock drives the passes: priority first, lower work still runs,
-    a scheduled task waits for its time, and board capacity (unchanged by #1025) is released on settle."""
+    a scheduled task waits for its time, and board capacity (unchanged by #1025) is released on settle.
+
+    Capacity is freed by settling ``high`` (status ``done``), not by the operator cancel path: a real
+    ``cancel_task`` needs an admitted durable run, which this board fixture does not create. That gap is
+    named in STATUS (#1025 stays Partial until it is closed)."""
     from unittest.mock import AsyncMock
     from src.work_board.repository import WorkBoardRepository
     monkeypatch.setattr(WorkBoardRepository, "_safe_text", AsyncMock(side_effect=lambda value, **kw: value))
